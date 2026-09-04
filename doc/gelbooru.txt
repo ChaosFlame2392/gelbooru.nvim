@@ -23,6 +23,7 @@ tag learning.
 
 - Neovim 0.9.0 or higher
 - snacks.nvim (with snacks.image enabled)
+- ImageMagick (`magick` executable in system PATH, required by snacks.image)
 - curl
 
 ==============================================================================
@@ -40,14 +41,61 @@ Configure via Lazy.nvim:
 >lua
     return {
       "ChaosFlame2392/gelbooru.nvim",
+      dependencies = { "folke/snacks.nvim" },
       cmd = { "Gelbooru", "GelbooruTags" },
       opts = {
         save_dir = "~/Pictures/Gelbooru",
         per_page = 42,
         prefetch_radius = 5,
+        enable_logging = true,
+        log_level = "DEBUG",
       },
     }
 <
+
+Configuration Options:                                  *gelbooru-options*
+
+save_dir                                (string, default: "~/Pictures/Gelbooru")
+    Directory path where full-resolution downloaded images are saved.
+
+auth_file           (string, default: stdpath("config") .. "/gelbooru_auth.json")
+    Path to your JSON credentials file containing "api_key" and "user_id".
+
+tags_dir              (string, default: "~/.local/share/nvim/gelbooru")
+    Directory where split tag databases (series, characters, artists, general)
+    are downloaded and cached.
+
+cache_dir                               (string, default: "/tmp/gelbooru_cache")
+    Temporary directory used for cached image preview downloads.
+
+enable_logging                                         (boolean, default: true)
+    Whether debug logging to disk is enabled. Set to false to disable all
+    logging and prevent log file creation.
+
+log_level                                            (string, default: "DEBUG")
+    Minimum severity level for logging. Supported values:
+    "DEBUG", "INFO", "WARN", "ERROR", or "OFF" (disables logging).
+
+log_file               (string, default: stdpath("state") .. "/gelbooru.log")
+    Filesystem destination path for plugin log entries.
+
+per_page                                                  (number, default: 42)
+    Number of post results to fetch per page from the Gelbooru API.
+
+prefetch_radius                                            (number, default: 5)
+    Number of adjacent posts ahead and behind the active cursor to prefetch
+    in the background.
+
+show_tags_in_list                                     (boolean, default: false)
+    Whether to display raw tag strings directly inside the list view buffer.
+
+api_base                                                               (string)
+    Base Gelbooru posts API endpoint URL.
+
+tags_api                                                               (string)
+    Base Gelbooru tags API endpoint URL.
+
+Note: All option keys may be specified in either snake_case or UPPER_CASE.
 
 ==============================================================================
 4. COMMANDS                                                 *gelbooru-commands*
@@ -66,7 +114,7 @@ Input Buffer:
     <Down>, <C-n>   Navigate down autocomplete list
     <Up>, <C-p>     Navigate up autocomplete list
     <Space>         Accept selected autocomplete suggestion
-    <Esc>           Close Gelbooru
+    <Esc>           Close Gelbooru / exit input to list view
 
 List Buffer:
     j / k           Navigate next / previous post
