@@ -1,0 +1,87 @@
+*gelbooru.txt*   Gelbooru Image Browser for Neovim
+
+==============================================================================
+CONTENTS                                                    *gelbooru-contents*
+
+    1. Introduction .............................. |gelbooru-introduction|
+    2. Requirements .............................. |gelbooru-requirements|
+    3. Setup & Configuration ..................... |gelbooru-configuration|
+    4. Commands .................................. |gelbooru-commands|
+    5. Keymaps ................................... |gelbooru-keymaps|
+    6. License ................................... |gelbooru-license|
+
+==============================================================================
+1. INTRODUCTION                                         *gelbooru-introduction*
+
+gelbooru.nvim is a fast, asynchronous Gelbooru client built for Neovim. It
+features a debounced, bucket-indexed autocomplete tag picker, instant image
+rendering powered by snacks.nvim, persistent search history, and automated
+tag learning.
+
+==============================================================================
+2. REQUIREMENTS                                         *gelbooru-requirements*
+
+- Neovim 0.9.0 or higher
+- snacks.nvim (with snacks.image enabled)
+- curl
+
+==============================================================================
+3. SETUP & CONFIGURATION                               *gelbooru-configuration*
+
+Create ~/.config/nvim/gelbooru_auth.json with your API credentials:
+>json
+    {
+      "api_key": "YOUR_API_KEY",
+      "user_id": "YOUR_USER_ID"
+    }
+<
+
+Configure via Lazy.nvim:
+>lua
+    return {
+      "ChaosFlame2392/gelbooru.nvim",
+      cmd = { "Gelbooru", "GelbooruTags" },
+      opts = {
+        save_dir = "~/Pictures/Gelbooru",
+        per_page = 42,
+        prefetch_radius = 5,
+      },
+    }
+<
+
+==============================================================================
+4. COMMANDS                                                 *gelbooru-commands*
+
+:Gelbooru                                                           *:Gelbooru*
+    Open the tag search picker and image browser.
+
+:GelbooruTags                                                   *:GelbooruTags*
+    Download and build the local Gelbooru tag database for autocomplete.
+
+==============================================================================
+5. KEYMAPS                                                   *gelbooru-keymaps*
+
+Input Buffer:
+    <CR>            Submit search query
+    <Down>, <C-n>   Navigate down autocomplete list
+    <Up>, <C-p>     Navigate up autocomplete list
+    <Space>         Accept selected autocomplete suggestion
+    <Esc>           Close Gelbooru
+
+List Buffer:
+    j / k           Navigate next / previous post
+    <CR>            Download & save current full-resolution image
+    <Tab>           Fetch next page of results
+    <S-Tab>         Fetch previous page of results
+    r               Force re-render current image
+    R               Force re-download and re-render current image
+    [               Navigate backward in search history
+    ]               Navigate forward in search history
+    /               Focus search bar to edit query
+    q, <Esc>        Close Gelbooru
+
+==============================================================================
+6. LICENSE                                                     *gelbooru-license*
+
+MIT License. Copyright (c) 2026 Balkrishan Singh.
+vim:tw=78:ts=8:ft=help:norl:
