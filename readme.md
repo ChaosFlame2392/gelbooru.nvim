@@ -28,7 +28,6 @@ return {
     -- per_page = 42,
     -- show_tags_in_list = false,
     -- prefetch_radius = 5,
-    -- enable_logging = true,
     -- log_level = "DEBUG",
   },
 }
@@ -44,8 +43,7 @@ You can pass a table of options to `require("gelbooru").setup(opts)`. Both `snak
 | `auth_file` | `string` | `stdpath("config") .. "/gelbooru_auth.json"` | Path to your JSON credentials file (`api_key` & `user_id`). |
 | `tags_dir` | `string` | `"~/.local/share/nvim/gelbooru"` | Directory where local tag databases are stored. |
 | `cache_dir` | `string` | `"/tmp/gelbooru_cache"` | Temporary directory used for cached image previews. |
-| `enable_logging` | `boolean` | `true` | Enable or disable file logging. Set to `false` to completely disable logging. |
-| `log_level` | `string` | `"DEBUG"` | Minimum log level (`"DEBUG"`, `"INFO"`, `"WARN"`, `"ERROR"`, or `"OFF"`). |
+| `log_level` | `string` | `"DEBUG"` | Minimum log level (`"DEBUG"`, `"INFO"`, `"WARN"`, `"ERROR"`, or `"OFF"` to disable). |
 | `log_file` | `string` | `stdpath("state") .. "/gelbooru.log"` | Destination path for debug logs. |
 | `per_page` | `number` | `42` | Number of results to fetch per page. |
 | `prefetch_radius` | `number` | `5` | How many adjacent post previews to pre-download in the background. |

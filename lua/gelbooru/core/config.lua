@@ -5,7 +5,6 @@ M.options = {
   auth_file = vim.fn.stdpath("config") .. "/gelbooru_auth.json",
   tags_dir = vim.fn.expand("~/.local/share/nvim/gelbooru"),
   cache_dir = "/tmp/gelbooru_cache",
-  enable_logging = true,
   log_level = "DEBUG",
   log_file = vim.fn.stdpath("state") .. "/gelbooru.log",
   api_base = "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1",
@@ -67,7 +66,6 @@ function M.setup(opts)
   M.options.auth_file = get_opt("auth_file", "AUTH_FILE", M.options.auth_file)
   M.options.tags_dir = get_opt("tags_dir", "TAGS_DIR", M.options.tags_dir)
   M.options.cache_dir = get_opt("cache_dir", "CACHE_DIR", M.options.cache_dir)
-  M.options.enable_logging = get_opt("enable_logging", "ENABLE_LOGGING", M.options.enable_logging)
   M.options.log_level = get_opt("log_level", "LOG_LEVEL", M.options.log_level)
   M.options.log_file = get_opt("log_file", "LOG_FILE", M.options.log_file)
   M.options.api_base = get_opt("api_base", "API_BASE", M.options.api_base)

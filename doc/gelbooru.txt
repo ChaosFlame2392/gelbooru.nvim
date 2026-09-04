@@ -47,7 +47,6 @@ Configure via Lazy.nvim:
         save_dir = "~/Pictures/Gelbooru",
         per_page = 42,
         prefetch_radius = 5,
-        enable_logging = true,
         log_level = "DEBUG",
       },
     }
@@ -67,10 +66,6 @@ tags_dir              (string, default: "~/.local/share/nvim/gelbooru")
 
 cache_dir                               (string, default: "/tmp/gelbooru_cache")
     Temporary directory used for cached image preview downloads.
-
-enable_logging                                         (boolean, default: true)
-    Whether debug logging to disk is enabled. Set to false to disable all
-    logging and prevent log file creation.
 
 log_level                                            (string, default: "DEBUG")
     Minimum severity level for logging. Supported values:

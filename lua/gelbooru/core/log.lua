@@ -10,11 +10,10 @@ local LOG_LEVELS = {
 }
 
 function M.log(level, cat, fmt, ...)
-  if not config.options.enable_logging then
+  local configured_level = config.options.log_level
+  if configured_level == false then
     return
   end
-
-  local configured_level = config.options.log_level
   if type(configured_level) == "string" then
     local upper_lvl = configured_level:upper()
     if upper_lvl == "OFF" or upper_lvl == "NONE" then
