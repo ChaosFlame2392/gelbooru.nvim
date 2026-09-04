@@ -840,10 +840,12 @@ update_autocomplete = function()
     local candidates = {}
     local first_char = search_target:sub(1, 1)
 
-    local function check_bucket(bucket, cat_bonus, prefix_only)
+    local function check_bucket(bucket, cat_nudge, prefix_only, max_per_bucket)
       if not bucket then
-        return false
+        return
       end
+      local added = 0
+      local limit = max_per_bucket or 100
       for i = 1, #bucket do
         local t = bucket[i]
         local count = tonumber(t.c) or 0
@@ -851,52 +853,58 @@ update_autocomplete = function()
         if typ == 5 or count >= 1 then
           local nl = t.n_lower
           if not seen_names[nl] then
-          local score = 0
-          if nl == search_target or t.norm == target_norm then
-            score = 100
-          elseif vim.startswith(nl, search_target) or vim.startswith(t.norm, target_norm) then
-            score = 80
-          elseif not prefix_only and (nl:find(search_target, 1, true) or t.norm:find(target_norm, 1, true)) then
-            score = 50
-          end
+            local base = 0
+            if nl == search_target then
+              base = 35.0
+            elseif t.norm == target_norm then
+              base = 30.0
+            elseif vim.startswith(nl, search_target) then
+              base = 20.0
+            elseif vim.startswith(t.norm, target_norm) then
+              base = 15.0
+            elseif not prefix_only and (nl:find(search_target, 1, true) or t.norm:find(target_norm, 1, true)) then
+              base = 5.0
+            end
 
-          if score > 0 then
-            seen_names[nl] = true
-            candidates[#candidates + 1] = {
-              item = t,
-              score = score + cat_bonus,
-              count = count,
-            }
-            if #candidates >= 200 then
-              return true
+            if base > 0 then
+              seen_names[nl] = true
+              local pop = (typ == 5) and 0 or (math.log10(count + 1) * 10.0)
+              local score = (typ == 5) and 1000.0 or (base + pop + (cat_nudge or 0))
+              candidates[#candidates + 1] = {
+                item = t,
+                score = score,
+                count = count,
+              }
+              added = added + 1
+              if added >= limit then
+                break
+              end
             end
           end
         end
       end
     end
-    return false
-    end
 
     -- 1. Ultra-fast path: query first-character bucket (<3ms)
-    check_bucket(State.series_by_first[first_char], 15, false)
-    check_bucket(State.chars_by_first[first_char], 10, false)
-    check_bucket(State.general_by_first[first_char], 0, false)
-    check_bucket(State.artists_by_first[first_char], 5, true) -- prefix only for artists
+    check_bucket(State.series_by_first[first_char], 2.0, false, 100)
+    check_bucket(State.chars_by_first[first_char], 1.0, false, 100)
+    check_bucket(State.general_by_first[first_char], 0.0, false, 100)
+    check_bucket(State.artists_by_first[first_char], 0.5, true, 100) -- prefix only for artists
 
-    -- Also check META tags (small fixed list)
+    -- Also check META tags (small fixed list, always top priority)
     for _, t in ipairs(META_TAGS) do
       local nl = t.n_lower or t.n:lower()
       if not seen_names[nl] then
         if nl == search_target or vim.startswith(nl, search_target) then
           seen_names[nl] = true
-          candidates[#candidates + 1] = { item = t, score = 90, count = 0 }
+          candidates[#candidates + 1] = { item = t, score = 1000.0, count = 0 }
         end
       end
     end
 
-    -- 2. Substring fallback across full series/general if few candidates found and query is >= 3 chars
-    if #candidates < 20 and #search_target >= 3 then
-      local function check_full_list(list, cat_bonus)
+    -- 2. Substring fallback across full lists if few candidates found and query is >= 3 chars
+    if #candidates < 30 and #search_target >= 3 then
+      local function check_full_list(list, cat_nudge, max_needed)
         if not list then
           return false
         end
@@ -904,32 +912,43 @@ update_autocomplete = function()
           local t = list[i]
           local count = tonumber(t.c) or 0
           local typ = tonumber(t.t) or 0
-          if (typ == 5 or count >= 1) and not seen_names[t.n_lower] and (t.n_lower:find(search_target, 1, true) or t.norm:find(target_norm, 1, true)) then
-            seen_names[t.n_lower] = true
-            candidates[#candidates + 1] = {
-              item = t,
-              score = 50 + cat_bonus,
-              count = count,
-            }
-            if #candidates >= 100 then
-              return true
+          if (typ == 5 or count >= 1) and not seen_names[t.n_lower] then
+            local nl = t.n_lower
+            if nl:find(search_target, 1, true) or t.norm:find(target_norm, 1, true) then
+              seen_names[nl] = true
+              local pop = (typ == 5) and 0 or (math.log10(count + 1) * 10.0)
+              local score = (typ == 5) and 1000.0 or (5.0 + pop + (cat_nudge or 0))
+              candidates[#candidates + 1] = {
+                item = t,
+                score = score,
+                count = count,
+              }
+              if #candidates >= max_needed then
+                return true
+              end
             end
           end
         end
         return false
       end
 
-      check_full_list(State.series, 15)
-      if #candidates < 30 then
-        check_full_list(State.general, 0)
+      check_full_list(State.series, 2.0, 60)
+      if #candidates < 60 then
+        check_full_list(State.chars, 1.0, 80)
+      end
+      if #candidates < 80 then
+        check_full_list(State.general, 0.0, 100)
       end
     end
 
     table.sort(candidates, function(a, b)
-      if a.score ~= b.score then
+      if math.abs(a.score - b.score) > 0.0001 then
         return a.score > b.score
       end
-      return a.count > b.count
+      if a.count ~= b.count then
+        return a.count > b.count
+      end
+      return (a.item.n or "") < (b.item.n or "")
     end)
 
     for i = 1, math.min(150, #candidates) do
