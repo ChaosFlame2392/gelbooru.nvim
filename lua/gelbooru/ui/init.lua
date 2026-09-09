@@ -744,6 +744,25 @@ function M.open(initial_tags)
     local full = vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or ""
     local last_word = full:match("(%S*)$") or ""
 
+    -- If the user explicitly navigated (Tab/Down/C-n), Space always selects the
+    -- highlighted entry — even when the input buffer is empty (e.g. tabbing straight
+    -- to sort:score or rating:explicit without typing anything).
+    if State.autocomplete_navigated and State.autocomplete_cur > 0 then
+      local t = State.autocomplete_filtered[State.autocomplete_cur]
+      if t then
+        local prefix = full:sub(1, #full - #last_word)
+        local sign = last_word:match("^([-~])") or ""
+        local new_text = prefix .. sign .. t.n .. " "
+        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_text })
+        vim.api.nvim_win_set_cursor(UI.wins.input, { 1, #new_text })
+        State.autocomplete_cur = 0
+        State.autocomplete_navigated = false
+        return
+      end
+    end
+
+    -- Without explicit navigation: auto-select only if the top suggestion is an
+    -- exact or normalised match for what was typed (existing behaviour).
     if last_word == "" or State.autocomplete_cur == 0 then
       vim.api.nvim_feedkeys(" ", "n", true)
       return
@@ -759,7 +778,7 @@ function M.open(initial_tags)
     local target_norm = util.normalize_str(search_target)
     local t_norm = util.normalize_str(t.n)
 
-    if not State.autocomplete_navigated and t.n:lower() ~= search_target and t_norm ~= target_norm then
+    if t.n:lower() ~= search_target and t_norm ~= target_norm then
       vim.api.nvim_feedkeys(" ", "n", true)
       return
     end
