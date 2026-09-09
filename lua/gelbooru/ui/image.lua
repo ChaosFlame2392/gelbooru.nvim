@@ -77,21 +77,19 @@ function M.render_image(win, path, width, height)
     end
     local place_ok, placement = pcall(placement_mod.new, buf, path, opts)
     if place_ok and placement then
-      -- Save the old buffer before closing the old placement so we can wipe it.
       local old_buf = state.UI.current_placement and state.UI.current_placement.buf
       M.close_current_placement()
-      -- Wipe the old image buffer explicitly; placement.close() may not do so.
+      -- Set the new buf on the window before wiping the old one to prevent display flickering.
+      state.UI.current_placement = placement
+      pcall(vim.api.nvim_win_set_buf, win, buf)
       if old_buf and vim.api.nvim_buf_is_valid(old_buf) then
         pcall(vim.api.nvim_buf_delete, old_buf, { force = true })
       end
-      state.UI.current_placement = placement
-      pcall(vim.api.nvim_win_set_buf, win, buf)
       pcall(placement.update, placement)
       log("DEBUG", "RENDER", "Image rendered via snacks.image: %s", path)
       return true
     else
       log("WARN", "RENDER", "Failed to create snacks placement for %s: %s", path, tostring(placement))
-      -- Wipe the unused buffer we just created.
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
     end
   else

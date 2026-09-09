@@ -93,21 +93,20 @@ function M.teardown()
       pcall(vim.api.nvim_win_close, w, true)
     end
   end
-  -- Invalidate layout cache so the next open() recomputes from scratch.
   invalidate_layout()
-  -- Clear all stale buf/win IDs so they don't accumulate across open/close cycles.
   state.reset_ui()
-  -- Release the 800 k-tag heap so the GC can reclaim ~150 MB between sessions.
   state.reset_tag_state()
-  -- Force an immediate GC pass so the tag heap and post array closures are
-  -- reclaimed right away rather than waiting for the incremental collector.
-  -- Two passes handle objects that are finalised and re-queued in the first pass.
+  -- Two GC passes: first collects the tag heap, second handles resurrected objects.
   collectgarbage("collect")
   collectgarbage("collect")
 end
 
 function M.set_status(msg, reset_ms)
   local UI = state.UI
+  -- Bail if teardown has already cleared UI.bufs; in-flight callbacks reach here.
+  if not UI.bufs.status then
+    return
+  end
   if UI.status_timer then
     UI.status_timer:stop()
     if not UI.status_timer:is_closing() then
@@ -314,9 +313,13 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
 
   local function do_render()
     if not vim.api.nvim_win_is_valid(UI.wins.img) then
+      log("DEBUG", "RENDER", "do_render aborted: img win invalid (post %s)", tostring(p.id))
       return
     end
     if not State.posts[State.cur] or State.posts[State.cur].id ~= p.id then
+      log("DEBUG", "RENDER", "do_render stale: cur=%d wanted=%s got=%s",
+        State.cur, tostring(p.id),
+        State.posts[State.cur] and tostring(State.posts[State.cur].id) or "nil")
       return
     end
     M.set_status()
@@ -331,6 +334,7 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
 
     local size = vim.fn.getfsize(dest)
     if size > -1 and size < 1024 then
+      log("DEBUG", "RENDER", "file too small (%d bytes), re-fetching (post %s)", size, tostring(p.id))
       if retry_count < 1 then
         load_and_render_image(p, url_idx, retry_count + 1, true)
       elseif url_idx < #urls then
@@ -481,6 +485,10 @@ function M.render_preview(force_download)
       if State.posts[State.cur] and State.posts[State.cur].id == p.id then
         load_and_render_image(p, 1, 0, force_download)
         download.prefetch_around(State.cur)
+      else
+        log("DEBUG", "RENDER", "scroll_timer stale: wanted post %s, cur is now %s",
+          tostring(p.id),
+          State.posts[State.cur] and tostring(State.posts[State.cur].id) or "nil")
       end
     end)
   )

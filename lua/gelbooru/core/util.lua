@@ -88,7 +88,7 @@ function M.scratch()
 end
 
 function M.set_lines(buf, lines)
-  if not vim.api.nvim_buf_is_valid(buf) then
+  if type(buf) ~= "number" or not vim.api.nvim_buf_is_valid(buf) then
     return
   end
   vim.bo[buf].modifiable = true
