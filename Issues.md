@@ -1,4 +1,18 @@
-1. the image and meta data window needs to be updated automatically based on state changes, currently I have to go to another image and come back before the image resizes if i had hidden the meta data. Also since it fetches artists tag if they aren't already present, that meta info doesn't update until I switch either. Ideally meta data window hiding should trigger a refresh of the image and artist data being added should also trigger a refresh of the artist info in the meta data window
-2. Another minor issue I noticed was that the newly discovered tags all go into discovered.json which i'm not aware if the tags get merged with the actual main json files aka general.json, artists.json,characters.json and series.json? I think we could probably sort those discovered.sjon tags into these jsons by either directly adding them to them when they were get discovered and thus discovered.json is depreciated or we do a transfer when we start a new gelbooru session or when we run GelbooruTag autocommand. 
-3. I feel like GelbooruTag command isn't upto par in terms of the cleaning of the tags? It adds tags at nearly the same pace as before we added the processing of the tags and thus I believe they aren't getting filtered with it. In addition, I distinctly remember more tags being downloaded by GelbooruTag but I'm back at a smaller number of tags when I ran Gelbooru.
-4. there is severe optimisation required on the memory aspect. The plugin is leaking memory as the initial state of the plugin on opening rn is around 620mb and it gradually grows to 680 and higher in the span of a minute by just idling and if you decided to open and close gelbooru by pressing q and then running the command again then the nvim process memory climbs very high in 300mb increments each time. I only noticed this issue because I saw a 7gb nvim process one time with my device just struggling to chug along. It is highly critical and surpases the priority of the above issues. the tags by themselves around 80mb or so, should they really balloon this much on initial launch and we need to investigate why is there a increase in memory on idling and we need to cleanup state on exiting in addition to any other memory issues. If nvim was taking 50-100mb before opening gelbooru and it doesn't go back there after closing gelbooru, it is a issue.
+# gelbooru.nvim Issues
+
+## Open
+
+### 1 — Meta/image auto-update on state change
+The image and metadata windows need to reflect state changes immediately:
+- Hiding the meta panel (`m`) should trigger a re-render of the image at the new layout dimensions
+- When `resolve_post_tags` discovers an artist and calls `render_preview`, the meta window doesn't update because the `cur_id` dedup guard fires early — the tag list stays stale until the user navigates away and back
+
+### 2 — discovered.json → main tag files transfer
+Discovered tags (per-session API lookups) accumulate in `discovered.json` but never get merged back into `series.json / characters.json / artists.json / general.json`.
+
+Options:
+- Transfer on `GelbooruTag` run: prune from `discovered.json` anything now present in the main files after a full fetch
+- Transfer on open: before loading, diff discovered entries against the main files and absorb them
+
+### 3 — GelbooruTag quality / count regression
+The tag-fetch command appears to produce fewer tags than it used to, and the `is_clean_tag` filter does not seem to be taking effect (tag download rate unchanged vs. pre-filter). Needs investigation into whether the filter is applied before or after writing to disk.
