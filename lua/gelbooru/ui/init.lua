@@ -71,6 +71,8 @@ function M.teardown()
   end
 
   download.cancel_prefetch_timers()
+  -- Drop pending download callbacks so their closures are freed immediately.
+  download.active_downloads = {}
   image.close_current_placement()
 
   vim.cmd("stopinsert")
@@ -83,7 +85,10 @@ function M.teardown()
       pcall(vim.api.nvim_win_close, w, true)
     end
   end
-  UI.wins = {}
+  -- Clear all stale buf/win IDs so they don't accumulate across open/close cycles.
+  state.reset_ui()
+  -- Release the 800 k-tag heap so the GC can reclaim ~150 MB between sessions.
+  state.reset_tag_state()
 end
 
 function M.set_status(msg, reset_ms)

@@ -51,4 +51,35 @@ function M.reset_query_state()
   M.State.cur_id = nil
 end
 
+--- Clear all UI tracking tables so stale buf/win IDs don't accumulate across open/close cycles.
+function M.reset_ui()
+  M.UI.wins = {}
+  M.UI.bufs = {}
+  M.UI.aug = nil
+  M.UI.scroll_timer = nil
+  M.UI.status_timer = nil
+  M.UI.api_tag_timer = nil
+  M.UI.ac_debounce_timer = nil
+  M.UI.save_discovered_timer = nil
+  M.UI.prefetch_timers = {}
+  M.UI.current_placement = nil
+end
+
+--- Drop heavy tag index tables so the GC can reclaim the ~150 MB tag heap between sessions.
+function M.reset_tag_state()
+  M.State.series = {}
+  M.State.characters = {}
+  M.State.artists = {}
+  M.State.general = {}
+  M.State.discovered = {}
+  M.State.discovered_by_name = {}
+  M.State.chars_by_first = {}
+  M.State.series_by_first = {}
+  M.State.artists_by_first = {}
+  M.State.general_by_first = {}
+  M.State.all_tags = {}
+  M.State.tags_by_name = {}
+  M.State.autocomplete_filtered = {}
+end
+
 return M

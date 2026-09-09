@@ -107,7 +107,8 @@ end
 
 function M.cancel_prefetch_timers()
   local UI = state.UI
-  for _, timer in ipairs(UI.prefetch_timers or {}) do
+  -- Use pairs (not ipairs) to handle nil holes left by fired timers.
+  for _, timer in pairs(UI.prefetch_timers or {}) do
     if timer and not timer:is_closing() then
       timer:stop()
       timer:close()
@@ -154,7 +155,8 @@ function M.prefetch_around(idx)
     if url and dest then
       if vim.fn.filereadable(dest) == 0 and not M.active_downloads[dest] then
         local timer = vim.loop.new_timer()
-        table.insert(UI.prefetch_timers, timer)
+        local timer_idx = #UI.prefetch_timers + 1
+        UI.prefetch_timers[timer_idx] = timer
         local cap_url, cap_dest = url, dest
         local cap_pid = p.id
 
@@ -165,6 +167,8 @@ function M.prefetch_around(idx)
             if not timer:is_closing() then
               timer:close()
             end
+            -- Remove from list so it doesn't grow unboundedly across navigation.
+            UI.prefetch_timers[timer_idx] = nil
             if vim.fn.filereadable(cap_dest) == 0 and not M.active_downloads[cap_dest] then
               log("DEBUG", "PREFETCH", "Prefetching post %s (dir=%d)", tostring(cap_pid), dir)
               M.download_async(cap_url, cap_dest)

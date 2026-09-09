@@ -30,6 +30,10 @@ function M.persist_discovered_tag(item)
   }
 
   local disc_file = config.get_discovered_tags_file()
+  -- Guard: if the existing timer was already closed by teardown, discard it.
+  if UI.save_discovered_timer and UI.save_discovered_timer:is_closing() then
+    UI.save_discovered_timer = nil
+  end
   if not UI.save_discovered_timer then
     UI.save_discovered_timer = vim.loop.new_timer()
   end
@@ -38,6 +42,10 @@ function M.persist_discovered_tag(item)
     500,
     0,
     vim.schedule_wrap(function()
+      -- Timer may have been closed by teardown before this fires.
+      if not UI.save_discovered_timer then
+        return
+      end
       local ok, encoded = pcall(vim.fn.json_encode, State.discovered)
       if ok and encoded then
         local f = io.open(disc_file, "w")
