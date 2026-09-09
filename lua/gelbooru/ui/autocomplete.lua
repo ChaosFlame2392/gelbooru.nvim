@@ -120,7 +120,7 @@ function M.update_autocomplete()
 
       check_full_list(State.series, 2.0, 60)
       if #candidates < 60 then
-        check_full_list(State.chars, 1.0, 80)
+        check_full_list(State.characters, 1.0, 80)
       end
       if #candidates < 80 then
         check_full_list(State.general, 0.0, 100)

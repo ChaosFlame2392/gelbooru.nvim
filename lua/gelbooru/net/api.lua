@@ -16,12 +16,18 @@ function M.fetch(direction)
     if State.page <= 1 then
       return
     end
+    -- Posts are appended in fetch order, so the oldest page occupies
+    -- indices 1..per_page. Build a new array without those entries so we
+    -- don't mutate a table that may be shared with a history entry.
     local to_remove = math.min(config.options.per_page, #State.posts)
-    for _ = 1, to_remove do
-      table.remove(State.posts)
+    local new_posts = {}
+    for i = to_remove + 1, #State.posts do
+      new_posts[#new_posts + 1] = State.posts[i]
     end
+    State.posts = new_posts
     State.page = State.page - 1
-    State.cur = math.max(1, #State.posts)
+    -- Land on the first post of the page now at the top of the list.
+    State.cur = math.max(1, math.min(State.cur, #State.posts))
     State.cur_id = nil
     history.save_current_history()
     ui.render_list()
@@ -154,7 +160,7 @@ function M.scroll_meta(dir)
   local cur_pos = vim.api.nvim_win_get_cursor(UI.wins.meta)
   local max_lines = vim.api.nvim_buf_line_count(UI.bufs.meta)
   local new_line = math.max(1, math.min(max_lines, cur_pos[1] + dir))
-  vim.api.nvim_win_set_cursor(UI.wins.meta, { new_line, 0 })
+  pcall(vim.api.nvim_win_set_cursor, UI.wins.meta, { new_line, 0 })
 end
 
 return M

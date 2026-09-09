@@ -65,10 +65,12 @@ function M.add_tag_to_index(t, target_list, bucket_map)
 end
 
 function M.parse_tag_file(path, target_list, bucket_map)
-  if vim.fn.filereadable(path) == 0 then
+  local f = io.open(path, "r")
+  if not f then
     return false
   end
-  local content = table.concat(vim.fn.readfile(path), "")
+  local content = f:read("*a")
+  f:close()
   local ok, data = pcall(vim.fn.json_decode, content)
   if not ok or type(data) ~= "table" then
     return false
@@ -95,9 +97,13 @@ function M.load_tags()
   State.artists_by_first = {}
   State.general_by_first = {}
 
-  local all_tags = vim.deepcopy(config.META_TAGS)
-  for _, t in ipairs(all_tags) do
-    M.add_tag_to_index(t, nil, nil)
+  -- Shallow-copy META_TAGS so add_tag_to_index can stamp n_lower/norm fields
+  -- without mutating the config constants. vim.deepcopy is unnecessary here.
+  local all_tags = {}
+  for _, t in ipairs(config.META_TAGS) do
+    local copy = { n = t.n, c = t.c, t = t.t }
+    M.add_tag_to_index(copy, nil, nil)
+    all_tags[#all_tags + 1] = copy
   end
 
   local tags_dir = config.options.tags_dir
@@ -121,8 +127,10 @@ function M.load_tags()
       M.parse_tag_file(general_file, State.general, State.general_by_first)
 
       -- Load persistent discovered tags
-      if vim.fn.filereadable(disc_file) == 1 then
-        local raw = table.concat(vim.fn.readfile(disc_file), "")
+      local df = io.open(disc_file, "r")
+      if df then
+        local raw = df:read("*a")
+        df:close()
         local ok, disc = pcall(vim.fn.json_decode, raw)
         if ok and type(disc) == "table" then
           for _, t in ipairs(disc) do

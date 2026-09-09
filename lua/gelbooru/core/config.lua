@@ -5,7 +5,7 @@ M.options = {
   auth_file = vim.fn.stdpath("config") .. "/gelbooru_auth.json",
   tags_dir = vim.fn.expand("~/.local/share/nvim/gelbooru"),
   cache_dir = "/tmp/gelbooru_cache",
-  log_level = "DEBUG",
+  log_level = "WARN",
   log_file = vim.fn.stdpath("state") .. "/gelbooru.log",
   api_base = "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1",
   tags_api = "https://gelbooru.com/index.php?page=dapi&s=tag&q=index&json=1",
@@ -62,6 +62,10 @@ function M.setup(opts)
     return default
   end
 
+  local function clamp(v, lo, hi)
+    return math.max(lo, math.min(hi, math.floor(tonumber(v) or lo)))
+  end
+
   M.options.save_dir = get_opt("save_dir", "SAVE_DIR", M.options.save_dir)
   M.options.auth_file = get_opt("auth_file", "AUTH_FILE", M.options.auth_file)
   M.options.tags_dir = get_opt("tags_dir", "TAGS_DIR", M.options.tags_dir)
@@ -70,9 +74,9 @@ function M.setup(opts)
   M.options.log_file = get_opt("log_file", "LOG_FILE", M.options.log_file)
   M.options.api_base = get_opt("api_base", "API_BASE", M.options.api_base)
   M.options.tags_api = get_opt("tags_api", "TAGS_API", M.options.tags_api)
-  M.options.per_page = get_opt("per_page", "PER_PAGE", M.options.per_page)
+  M.options.per_page = clamp(get_opt("per_page", "PER_PAGE", M.options.per_page), 1, 100)
   M.options.show_tags_in_list = get_opt("show_tags_in_list", "SHOW_TAGS_IN_LIST", M.options.show_tags_in_list)
-  M.options.prefetch_radius = get_opt("prefetch_radius", "PREFETCH_RADIUS", M.options.prefetch_radius)
+  M.options.prefetch_radius = clamp(get_opt("prefetch_radius", "PREFETCH_RADIUS", M.options.prefetch_radius), 0, 20)
 end
 
 return M

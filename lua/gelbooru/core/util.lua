@@ -2,14 +2,29 @@ local config = require("gelbooru.core.config")
 
 local M = {}
 
+-- Auth is cached after first read; it never changes during a session.
+local _auth_cache = nil
+
 function M.load_auth()
-  local auth_file = config.options.auth_file
-  if vim.fn.filereadable(auth_file) == 0 then
-    return {}
+  if _auth_cache then
+    return _auth_cache
   end
-  local raw = table.concat(vim.fn.readfile(auth_file), "")
+  local auth_file = config.options.auth_file
+  local f = io.open(auth_file, "r")
+  if not f then
+    _auth_cache = {}
+    return _auth_cache
+  end
+  local raw = f:read("*a")
+  f:close()
   local ok, t = pcall(vim.fn.json_decode, raw)
-  return (ok and type(t) == "table") and t or {}
+  _auth_cache = (ok and type(t) == "table") and t or {}
+  return _auth_cache
+end
+
+--- Call this if the auth file changes on disk mid-session.
+function M.invalidate_auth_cache()
+  _auth_cache = nil
 end
 
 function M.auth_qs()

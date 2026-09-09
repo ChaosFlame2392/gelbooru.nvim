@@ -13,6 +13,14 @@ local M = {}
 M.image = image
 M.autocomplete = autocomplete
 
+-- Layout cache: recomputed only on resize or show_meta toggle, not every render.
+local _layout_cache = nil
+local _layout_show_meta = nil
+
+local function invalidate_layout()
+  _layout_cache = nil
+end
+
 function M.teardown()
   local UI = state.UI
   local State = state.State
@@ -85,10 +93,17 @@ function M.teardown()
       pcall(vim.api.nvim_win_close, w, true)
     end
   end
+  -- Invalidate layout cache so the next open() recomputes from scratch.
+  invalidate_layout()
   -- Clear all stale buf/win IDs so they don't accumulate across open/close cycles.
   state.reset_ui()
   -- Release the 800 k-tag heap so the GC can reclaim ~150 MB between sessions.
   state.reset_tag_state()
+  -- Force an immediate GC pass so the tag heap and post array closures are
+  -- reclaimed right away rather than waiting for the incremental collector.
+  -- Two passes handle objects that are finalised and re-queued in the first pass.
+  collectgarbage("collect")
+  collectgarbage("collect")
 end
 
 function M.set_status(msg, reset_ms)
@@ -121,6 +136,13 @@ end
 
 function M.calc_layout()
   local State = state.State
+  -- Return cached layout if terminal dimensions and show_meta haven't changed.
+  if _layout_cache and _layout_show_meta == State.show_meta
+    and _layout_cache._TW == vim.o.columns
+    and _layout_cache._TH == vim.o.lines then
+    return _layout_cache
+  end
+
   local TW, TH = vim.o.columns, vim.o.lines
   local W = math.floor(TW * 0.95)
   local H = math.floor(TH * 0.95)
@@ -139,7 +161,8 @@ function M.calc_layout()
   local meta_h = State.show_meta and math.min(12, math.floor(main_h * 0.35)) or 0
   local img_h = main_h - meta_h - (State.show_meta and 1 or 0)
 
-  return {
+  _layout_cache = {
+    _TW = TW, _TH = TH, -- cache keys
     frame = { row = R, col = C, width = W, height = H },
     input = { row = R + 1, col = C + 1, width = W - 2, height = 1 },
     div = { row = R + 2, col = C + 1, width = W - 2, height = 1 },
@@ -153,6 +176,8 @@ function M.calc_layout()
     status = { row = R + H - 2, col = C + 1, width = W - 2, height = 1 },
     ac = { row = R + 2, col = C + 1, width = W - 2, height = math.min(15, H - 4) },
   }
+  _layout_show_meta = State.show_meta
+  return _layout_cache
 end
 
 local function draw_dividers(layout)
@@ -233,6 +258,7 @@ function M.apply_layout(l)
 end
 
 function M.on_resize()
+  invalidate_layout()
   local l = M.calc_layout()
   M.apply_layout(l)
   M.render_preview(false)
@@ -543,8 +569,14 @@ function M.open(initial_tags)
     callback = function()
       State.autocomplete_cur = 0
       State.autocomplete_navigated = false
+      -- If the existing timer is still alive, stop and reuse it (avoids alloc).
+      -- If it was closed by teardown, create a fresh one.
       if UI.ac_debounce_timer then
-        UI.ac_debounce_timer:stop()
+        if UI.ac_debounce_timer:is_closing() then
+          UI.ac_debounce_timer = vim.loop.new_timer()
+        else
+          UI.ac_debounce_timer:stop()
+        end
       else
         UI.ac_debounce_timer = vim.loop.new_timer()
       end
@@ -630,7 +662,7 @@ function M.open(initial_tags)
 
   local function enter_search()
     State.input_focused = true
-    vim.api.nvim_set_current_win(UI.wins.input)
+    pcall(vim.api.nvim_set_current_win, UI.wins.input)
     vim.cmd("startinsert!")
     autocomplete.update_autocomplete()
     M.on_resize()
@@ -667,7 +699,7 @@ function M.open(initial_tags)
   local function exit_input()
     State.input_focused = false
     vim.cmd("stopinsert")
-    vim.api.nvim_set_current_win(UI.wins.list)
+    pcall(vim.api.nvim_set_current_win, UI.wins.list)
     M.on_resize()
   end
 

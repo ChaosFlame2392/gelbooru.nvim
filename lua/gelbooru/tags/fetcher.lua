@@ -64,16 +64,19 @@ function M.update_tags()
   -- Preload existing clean databases so we never overwrite them
   local function preload_db(file, map)
     local p = tags_dir .. "/" .. file
-    if vim.fn.filereadable(p) == 1 then
-      local raw = table.concat(vim.fn.readfile(p), "")
-      local ok, data = pcall(vim.fn.json_decode, raw)
-      if ok and type(data) == "table" then
-        for _, t in ipairs(data) do
-          if t.n and type(t.n) == "string" then
-            map[t.n:lower()] = t
-            seen[t.n] = true
-            total_fetched = total_fetched + 1
-          end
+    local f = io.open(p, "r")
+    if not f then
+      return
+    end
+    local raw = f:read("*a")
+    f:close()
+    local ok, data = pcall(vim.fn.json_decode, raw)
+    if ok and type(data) == "table" then
+      for _, t in ipairs(data) do
+        if t.n and type(t.n) == "string" then
+          map[t.n:lower()] = t
+          seen[t.n] = true
+          total_fetched = total_fetched + 1
         end
       end
     end
@@ -167,7 +170,10 @@ function M.update_tags()
           update_progress(string.format("%d tags fetched...", total_fetched))
         end
 
-        if pages_fetched % 20 == 0 then
+        -- Checkpoint every 100 pages (≈10 000 tags) instead of every 20.
+        -- save_split_files() re-encodes and rewrites up to 4 large JSON files;
+        -- doing it less often dramatically reduces I/O stalls.
+        if pages_fetched % 100 == 0 then
           save_split_files()
         end
 

@@ -39,12 +39,16 @@ function M.download_async(url, dest, cb)
     return
   end
 
-  -- 2. Hook into existing download if already running
+  -- 2. Hook into existing download if already running.
+  --    Keep only the latest explicit callback; prefetch callers pass nil so
+  --    they never accumulate closures while the download is in-flight.
   local queued = M.active_downloads[dest]
   if queued then
     log("DEBUG", "DOWNLOAD", "Hooking into running download: %s", dest)
     if cb then
-      table.insert(queued, cb)
+      -- Replace previous callback rather than accumulating: only the most
+      -- recent explicit caller cares about the result.
+      M.active_downloads[dest] = { cb }
     end
     return
   end
