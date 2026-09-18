@@ -64,6 +64,15 @@ function M.teardown()
   download.cancel_prefetch_timers()
   -- Drop pending download callbacks so their closures are freed immediately.
   download.active_downloads = {}
+  -- Kill any in-flight user-save curl processes so they don't orphan writes.
+  -- Mark interrupted BEFORE killing so the vim.schedule callback skips rename
+  -- regardless of whether curl exits with 0 (kill vs natural-exit race).
+  for dest, handle in pairs(download.active_handles or {}) do
+    download.interrupted_dests[dest] = true
+    pcall(function() handle:kill(9) end)
+  end
+  download.active_handles = {}
+  download.pending_resumes = {}
   image.close_current_placement()
 
   vim.cmd("stopinsert")
@@ -500,6 +509,11 @@ function M.open(initial_tags)
   util.ensure(config.options.save_dir)
   util.ensure(config.options.tags_dir)
   tags.load_tags()
+
+  -- Silently resume any orphaned user-save .part files from previous sessions.
+  vim.defer_fn(function()
+    download.resume_pending_saves()
+  end, 500)
 
   UI.bufs.frame = util.scratch()
   UI.bufs.input = vim.api.nvim_create_buf(false, true)

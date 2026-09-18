@@ -146,10 +146,14 @@ function M.save_current()
     ui.set_status("Already saved → " .. dest, 2500)
     return
   end
+  if download.active_downloads[dest] then
+    ui.set_status("Already downloading… " .. p.id, 2000)
+    return
+  end
   ui.set_status("Saving " .. p.id .. "…")
   download.download_async(p.file_url, dest, function(saved)
     ui.set_status(saved and ("✓ Saved → " .. dest) or "✗ Save failed!", 3000)
-  end)
+  end, { resume = true })
 end
 
 function M.scroll_meta(dir)

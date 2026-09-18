@@ -470,50 +470,28 @@ All outstanding tasks, known issues, and planned refactorings are consolidated h
   4. **Running tests**: `make test` runs all unit + integration specs. `make spec FILE=tests/integration/regressions_spec.lua` runs a single spec. `make lint` checks Lua syntax via `luajit -bl`.
 
 ### Priority 8: Persistent & Resumable Downloads
+*(RESOLVED in commit c4c3c1c, bc3b4b2, 71787cf, ef09a83)*
 
-- **Context**: `download.download_async` writes to `dest .. ".part"` atomically, then renames on success. On teardown, `download.active_downloads = {}` drops all pending Lua callbacks — but the underlying `curl` process launched via `vim.system` is **not killed**. It keeps writing to the `.part` file until either natural completion or OS-level cleanup. This means:
-  - Large images or full-res saves mid-download leave an orphaned `.part` file in `cache_dir`.
-  - On next session, `download_async` sees `filereadable(dest) == 0` and re-downloads from byte 0, wasting bandwidth and time.
-  - The user sees "Downloading preview…" again even if 95% of the file was already transferred.
+- **Implementation**:
+  - `download.download_async` supports `opts.resume = true`: when `.part` exists with > 1KB, uses `curl -C -` to continue partial downloads instead of deleting and restarting.
+  - `api.save_current()` passes `resume = true` and guards against spam clicks with an in-flight check.
+  - Cross-session orphan recovery via `download.resume_pending_saves()` scans `save_dir/*.part` on UI open, retrieves post `file_url` via API, and auto-resumes orphaned saves in the background.
+  - Teardown process safety: tracks `active_handles` and sets `interrupted_dests` before killing curl processes with SIGKILL, preventing incomplete files from being renamed to final destinations upon exit.
+  - Unit tests added in `tests/unit/download_spec.lua` covering resume flag behavior, deduplication, interrupted teardown guard, and pending resume concurrency guards.
 
-- **Approach A — Stale `.part` scan on open (cheap, session-local)**:
-  In `ui.open()`, after `util.ensure(config.options.cache_dir)`, glob `cache_dir` for `prev_*.part` orphans. For each one where the final file (`dest` without `.part`) is absent, queue it for resumption via Approach B. This silently finishes interrupted prefetches from the previous session.
+### Priority 9: Mouse Input & Metadata Window Keyboard Navigation
+- **Disable Mouse Input**: While the plugin UI is active, disable mouse handling (`vim.opt.mouse = ""`) and restore the user's prior `mouse` setting on `teardown()`. Prevents accidental clicks from disrupting window focus or layout.
+- **Keyboard Navigation for Metadata**: Provide direct keyboard navigation to focus the metadata window (`UI.wins.meta`) (e.g. `M` from list) with standard `j`/`k` scrolling, and `<Esc>` or `q` to return focus directly to the post list without closing the browser.
 
-- **Approach B — curl range resume (`--continue-at -`)**:
-  `img4.gelbooru.com` returns `Accept-Ranges: bytes`. Add `M.download_resume(url, dest, cb)` which calls curl with `-C -` so only missing bytes are fetched:
-  ```lua
-  vim.system({ "curl", "-s", "-L", "-C", "-", "-o", dest .. ".part", "-H", "Referer: https://gelbooru.com/", url }, ...)
-  ```
-  After completion, validate `getfsize(dest) > 1024` before renaming. Do **not** delete the `.part` file before attempting resume — current teardown already leaves `.part` intact so this is safe.
-  Guard against servers that ignore the `Range` header and return `200 OK` instead of `206 Partial Content` by checking `--write-out "%{http_code}"` or comparing the post-rename file size against the expected `Content-Length`.
+### Priority 10: UI Background Cleanup & Window Cleanliness
+- **Clean Window Opening**: Ensure the plugin cleans up existing buffer contents and opens on a clear, clean window state. Clean up existing visual artifacts and stale content cleanly without unnecessarily enforcing an opaque background or disabling transparency.
 
-- **Approach C — Orphan queue file (cross-session, any search)**:
-  On teardown, if `active_downloads` is non-empty, serialize `{ url = url, dest = dest }` pairs to `cache_dir .. "/pending.json"`. On `ui.open()`, load and delete this file, then silently re-queue each entry via `download_resume` as background work. This covers the case where the user opens a completely different search next session — the orphaned previews still complete in the background.
+### Priority 11: Responsive UI & Scaling
+- **Investigate & Fix Responsive Scaling**: Investigate and fix responsive scaling across terminal resizes (`VimResized`) and layout state changes (e.g. `m` metadata toggle). Debounce resize events and ensure floating window layout and snacks image placements scale smoothly without jitter or visual tearing.
 
-- **Recommended implementation order**: B → A → C. A+B alone fixes the common close-mid-scroll case; C adds full cross-session resilience.
+### Priority 12: Test Suite Distribution / End-User Download
+- **Investigate Test Suite Download**: Investigate whether end users are downloading the test suite (`tests/`, `Makefile`, etc.) when installing the plugin via package managers or release downloads. Explore options such as `.gitattributes` `export-ignore` or distribution adjustments so users don't have to download the test suite, while preserving local and CI test functionality.
 
-- **Additional invariant — job handle tracking**:
-  `vim.system` returns an object with a `:kill()` method. Store it in `M.active_handles = {}` keyed by `dest` alongside `M.active_downloads`. In `teardown()`, call `pcall(handle.kill, handle, 9)` on all entries before clearing the table. This prevents orphaned curl processes writing to disk after Neovim has shut down its file handles, which can corrupt `.part` files and make range resume unreliable.
-
-### Priority 9: Mouse Handling & Buffer Modifiability (XY Problem: Mouse clicks trigger blink.cmp / insert mode)
-- **Mouse clicks trigger accidental insert mode & completion plugins**: Clicking with the mouse anywhere in the plugin UI (e.g. clicking on the list window, image window, or metadata panel) moves the Neovim cursor into non-input windows and can trigger insert mode or cause completion plugins like `blink.cmp` to activate as if the user is about to write code where writing is prohibited.
-- **Root Cause & Solution**:
-  - **Disable mouse during session**: Disable mouse handling while the Gelbooru window is active by setting `vim.opt.mouse = ""` in `ui.open()` and reliably restoring the user's prior `vim.o.mouse` setting in `ui.teardown()`.
-  - **Strict buffer protection**: Ensure non-input buffers (`UI.bufs.list`, `UI.bufs.meta`, `UI.bufs.img`, dividers) explicitly set `modifiable = false`, `buftype = "nofile"`, and disable editor auto-insert triggers on mouse clicks.
-  - **Keyboard navigation to/from metadata panel**: Currently the metadata panel can only be scrolled indirectly from the list window via `<C-d>`/`<C-u>`. Add clean keyboard shortcuts to switch focus directly into `UI.wins.meta` (e.g. `M` or `<Tab>` from list), allow standard buffer navigation (`j`/`k`, `/` search inside tags), and provide an easy return key (`<Esc>` or `q`) to drop back to `UI.wins.list` without closing the whole UI.
-
-### Priority 10: Buffer Isolation from Global Plugins (blink.cmp / LSP / Copilot)
-- **Unwanted plugin attachment**: Ensure Gelbooru buffers are completely ignored by global coding plugins:
-  - Mark `vim.b[buf].blink_cmp = false` (or disable blink buffer completion) across all Gelbooru buffers.
-  - Set `buftype = "nofile"` and set custom filetypes (e.g. `gelbooru_input`, `gelbooru_list`, `gelbooru_meta`) so filetype-based autocorrect/completion hooks do not attach.
-  - Disable language server / diagnostics attachments (`vim.diagnostic.enable(false, { bufnr = buf })`).
-
-### Priority 11: Backdrop Opacity & Window Isolation
-- **Background pass-through**: Floating windows have transparent backgrounds (`winblend = 0` or unset with default transparent highlights), showing underlying code buffers underneath the UI and preview canvas, creating visual clutter and distracting text bleed.
-- **Solid Backdrop / Dimmer Window**:
-  - Introduce an opaque backdrop floating window (`UI.wins.backdrop` or style `NormalFloat` with solid background color) that covers the entire editor screen behind the plugin frame.
-  - Set `winblend = 0` with a dedicated solid highlight group (e.g. `Normal:Normal,FloatBorder:FloatBorder`) so editor text does not bleed through.
-
-### Priority 12: Window Dragging & Resize Performance / Jitter
-- **Resize thrashing**: Dragging terminal windows or tiling manager splits triggers a burst of `VimResized` events, causing layout recalculations, divider redraws, and snacks placement updates to fire in rapid succession, resulting in lag and visual stutter.
-- **Debounced Resizing**: Debounce `on_resize()` (e.g. 50ms timer) so layout recalculations and placement nudges execute only after terminal dimensions have stabilized following resize/drag actions.
+### Priority 13: Documentation & Test Suite Synchronization
+- **Audit & Synchronize `AGENTS.md`**: Bring `AGENTS.md` up to date with the latest codebase changes, architecture, and current runtime invariants to eliminate documentation drift.
+- **Test Suite & Docs Alignment**: Review and update test cases to accurately reflect recent code changes, and synchronize user-facing documentation (`readme.md` and `doc/gelbooru.txt`) with current functionality, keymaps, and configuration options.
