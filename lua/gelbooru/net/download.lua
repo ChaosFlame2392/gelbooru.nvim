@@ -30,7 +30,6 @@ function M.curl_async(url, cb)
 end
 
 function M.download_async(url, dest, cb)
-  -- 1. Prevent duplicate download if file is already valid on disk
   if vim.fn.filereadable(dest) == 1 and not M.active_downloads[dest] then
     log("DEBUG", "DOWNLOAD", "File already cached on disk: %s", dest)
     if cb then
@@ -39,21 +38,15 @@ function M.download_async(url, dest, cb)
     return
   end
 
-  -- 2. Hook into existing download if already running.
-  --    Keep only the latest explicit callback; prefetch callers pass nil so
-  --    they never accumulate closures while the download is in-flight.
   local queued = M.active_downloads[dest]
   if queued then
     log("DEBUG", "DOWNLOAD", "Hooking into running download: %s", dest)
     if cb then
-      -- Replace previous callback rather than accumulating: only the most
-      -- recent explicit caller cares about the result.
       M.active_downloads[dest] = { cb }
     end
     return
   end
 
-  -- 3. Start fresh download
   log("INFO", "DOWNLOAD", "Starting download: %s -> %s", url, dest)
   M.active_downloads[dest] = cb and { cb } or {}
   local tmp_dest = dest .. ".part"
@@ -111,7 +104,6 @@ end
 
 function M.cancel_prefetch_timers()
   local UI = state.UI
-  -- Use pairs (not ipairs) to handle nil holes left by fired timers.
   for _, timer in pairs(UI.prefetch_timers or {}) do
     if timer and not timer:is_closing() then
       timer:stop()

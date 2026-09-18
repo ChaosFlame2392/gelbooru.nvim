@@ -97,8 +97,6 @@ function M.load_tags()
   State.artists_by_first = {}
   State.general_by_first = {}
 
-  -- Shallow-copy META_TAGS so add_tag_to_index can stamp n_lower/norm fields
-  -- without mutating the config constants. vim.deepcopy is unnecessary here.
   local all_tags = {}
   for _, t in ipairs(config.META_TAGS) do
     local copy = { n = t.n, c = t.c, t = t.t }

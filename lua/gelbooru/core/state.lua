@@ -26,7 +26,7 @@ M.State = {
   autocomplete_cur = 1,
   autocomplete_navigated = false,
   input_focused = false,
-  scroll_dir = 1, -- 1 = down, -1 = up
+  scroll_dir = 1,
 }
 
 M.UI = {
@@ -51,7 +51,6 @@ function M.reset_query_state()
   M.State.cur_id = nil
 end
 
---- Clear all UI tracking tables so stale buf/win IDs don't accumulate across open/close cycles.
 function M.reset_ui()
   M.UI.wins = {}
   M.UI.bufs = {}
@@ -65,7 +64,6 @@ function M.reset_ui()
   M.UI.current_placement = nil
 end
 
---- Drop heavy tag index tables so the GC can reclaim the ~150 MB tag heap between sessions.
 function M.reset_tag_state()
   M.State.series = {}
   M.State.characters = {}

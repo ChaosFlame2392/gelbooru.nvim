@@ -5,11 +5,13 @@
 vim.opt.rtp:prepend(".")
 
 -- Plenary: resolved from env TEST_PLENARY or common lazy/packer paths.
-local candidates = {
-  os.getenv("TEST_PLENARY"),
-  vim.fn.expand("~/.local/share/nvim/lazy/plenary.nvim"),
-  vim.fn.expand("~/.local/share/nvim/site/pack/packer/start/plenary.nvim"),
-}
+local candidates = {}
+local env_plenary = os.getenv("TEST_PLENARY")
+if env_plenary and env_plenary ~= "" then
+  table.insert(candidates, env_plenary)
+end
+table.insert(candidates, vim.fn.expand("~/.local/share/nvim/lazy/plenary.nvim"))
+table.insert(candidates, vim.fn.expand("~/.local/share/nvim/site/pack/packer/start/plenary.nvim"))
 
 local found = false
 for _, p in ipairs(candidates) do

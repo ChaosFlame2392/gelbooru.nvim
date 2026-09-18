@@ -8,8 +8,6 @@ function M.save_current_history()
   if State.history_idx >= 1 and State.history[State.history_idx] then
     local h = State.history[State.history_idx]
     h.query = State.query
-    -- Store a reference, not a deep copy. Post objects are fetched from the API
-    -- and never mutated in-place, so sharing is safe and saves ~1 MB per save.
     h.posts = State.posts
     h.page = State.page
     h.cur = State.cur
@@ -62,7 +60,6 @@ function M.restore_history(idx)
   State.history_idx = idx
   local h = State.history[idx]
   State.query = h.query
-  -- Restore by reference; post objects are immutable after fetch.
   State.posts = h.posts or {}
   State.page = h.page or 0
   State.cur = math.max(1, math.min(h.cur or 1, math.max(1, #State.posts)))

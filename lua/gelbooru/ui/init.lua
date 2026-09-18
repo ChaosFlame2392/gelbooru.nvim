@@ -444,14 +444,15 @@ function M.render_preview(force_download)
     pcall(vim.api.nvim_win_set_cursor, UI.wins.meta, { 1, 0 })
   end
 
-  -- Background dynamic artist resolution for any unclassified tags on this post
+  -- Background dynamic artist resolution. Reset cur_id so the deduplication
+  -- guard does not block the metadata repaint after an artist is discovered.
   pcall(tags.resolve_post_tags, p, function()
     if State.posts[State.cur] and State.posts[State.cur].id == p.id then
+      State.cur_id = nil
       M.render_preview(false)
     end
   end)
 
-  -- Check cache before doing anything visual
   local _, dest = image.get_preview_targets(p)
   local is_cached = not force_download and dest and vim.fn.filereadable(dest) == 1 and not download.active_downloads[dest]
 
@@ -559,7 +560,6 @@ function M.open(initial_tags)
     end,
   })
 
-  -- Input Buffer Autocommands
   vim.api.nvim_create_autocmd("BufEnter", {
     group = UI.aug,
     buffer = UI.bufs.input,
@@ -577,8 +577,6 @@ function M.open(initial_tags)
     callback = function()
       State.autocomplete_cur = 0
       State.autocomplete_navigated = false
-      -- If the existing timer is still alive, stop and reuse it (avoids alloc).
-      -- If it was closed by teardown, create a fresh one.
       if UI.ac_debounce_timer then
         if UI.ac_debounce_timer:is_closing() then
           UI.ac_debounce_timer = vim.loop.new_timer()
@@ -610,9 +608,6 @@ function M.open(initial_tags)
   -- Keymaps for List
   local function lm(key, fn)
     util.keymap(UI.bufs.list, "n", key, fn)
-  end
-  for _, k in ipairs({ "<C-p>" }) do
-    lm(k, "<Nop>")
   end
   lm("q", M.teardown)
   lm("<Esc>", M.teardown)
@@ -744,9 +739,7 @@ function M.open(initial_tags)
     local full = vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or ""
     local last_word = full:match("(%S*)$") or ""
 
-    -- If the user explicitly navigated (Tab/Down/C-n), Space always selects the
-    -- highlighted entry — even when the input buffer is empty (e.g. tabbing straight
-    -- to sort:score or rating:explicit without typing anything).
+    -- If the user navigated with Tab/Down/C-n, Space always selects the highlighted entry.
     if State.autocomplete_navigated and State.autocomplete_cur > 0 then
       local t = State.autocomplete_filtered[State.autocomplete_cur]
       if t then
@@ -762,7 +755,7 @@ function M.open(initial_tags)
     end
 
     -- Without explicit navigation: auto-select only if the top suggestion is an
-    -- exact or normalised match for what was typed (existing behaviour).
+    -- exact or normalised match for what was typed.
     if last_word == "" or State.autocomplete_cur == 0 then
       vim.api.nvim_feedkeys(" ", "n", true)
       return

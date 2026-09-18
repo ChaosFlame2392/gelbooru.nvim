@@ -170,9 +170,6 @@ function M.update_tags()
           update_progress(string.format("%d tags fetched...", total_fetched))
         end
 
-        -- Checkpoint every 100 pages (≈10 000 tags) instead of every 20.
-        -- save_split_files() re-encodes and rewrites up to 4 large JSON files;
-        -- doing it less often dramatically reduces I/O stalls.
         if pages_fetched % 100 == 0 then
           save_split_files()
         end

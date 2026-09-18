@@ -2,15 +2,13 @@ local config = require("gelbooru.core.config")
 
 local M = {}
 
--- Auth is cached after first read; it never changes during a session.
 local _auth_cache = nil
 
 function M.load_auth()
   if _auth_cache then
     return _auth_cache
   end
-  local auth_file = config.options.auth_file
-  local f = io.open(auth_file, "r")
+  local f = io.open(config.options.auth_file, "r")
   if not f then
     _auth_cache = {}
     return _auth_cache
@@ -22,7 +20,6 @@ function M.load_auth()
   return _auth_cache
 end
 
---- Call this if the auth file changes on disk mid-session.
 function M.invalidate_auth_cache()
   _auth_cache = nil
 end
@@ -40,9 +37,9 @@ function M.ensure(path)
 end
 
 function M.url_encode(s)
-  local enc = (s or ""):gsub("([^%w%-%.%_%~])", function(c)
+  local enc = (s or ""):gsub(" ", "+"):gsub("([^%w%-%.%_%~%+])", function(c)
     return string.format("%%%02X", c:byte())
-  end):gsub(" ", "+")
+  end)
   return enc
 end
 

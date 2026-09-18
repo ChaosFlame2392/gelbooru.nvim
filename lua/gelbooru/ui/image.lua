@@ -79,7 +79,6 @@ function M.render_image(win, path, width, height)
     if place_ok and placement then
       local old_buf = state.UI.current_placement and state.UI.current_placement.buf
       M.close_current_placement()
-      -- Set the new buf on the window before wiping the old one to prevent display flickering.
       state.UI.current_placement = placement
       pcall(vim.api.nvim_win_set_buf, win, buf)
       if old_buf and vim.api.nvim_buf_is_valid(old_buf) then

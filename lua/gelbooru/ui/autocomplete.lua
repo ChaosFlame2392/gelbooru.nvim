@@ -71,13 +71,13 @@ function M.update_autocomplete()
       end
     end
 
-    -- 1. Ultra-fast path: query first-character bucket (<3ms)
+    -- 1. First-character bucket lookup
     check_bucket(State.series_by_first[first_char], 2.0, false, 100)
     check_bucket(State.chars_by_first[first_char], 1.0, false, 100)
     check_bucket(State.general_by_first[first_char], 0.0, false, 100)
-    check_bucket(State.artists_by_first[first_char], 0.5, true, 100) -- prefix only for artists
+    check_bucket(State.artists_by_first[first_char], 0.5, true, 100)
 
-    -- Also check META tags (small fixed list, always top priority)
+    -- META tags are a small fixed list, always injected at top priority
     for _, t in ipairs(config.META_TAGS) do
       local nl = t.n_lower or t.n:lower()
       if not seen_names[nl] then
@@ -88,7 +88,7 @@ function M.update_autocomplete()
       end
     end
 
-    -- 2. Substring fallback across full lists if few candidates found and query is >= 3 chars
+    -- 2. Substring fallback across full lists when few candidates found
     if #candidates < 30 and #search_target >= 3 then
       local function check_full_list(list, cat_nudge, max_needed)
         if not list then

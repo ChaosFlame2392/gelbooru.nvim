@@ -80,6 +80,7 @@ function M.execute_search(query)
   local ui = require("gelbooru.ui")
 
   if query == State.query and #State.posts > 0 then
+    ui.render_list()
     return
   end
   history.push_history(query)
