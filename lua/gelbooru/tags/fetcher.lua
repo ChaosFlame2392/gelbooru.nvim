@@ -1,6 +1,7 @@
 local config = require("gelbooru.core.config")
 local util = require("gelbooru.core.util")
 local download = require("gelbooru.net.download")
+local db = require("gelbooru.tags.db")
 
 local M = {}
 
@@ -48,19 +49,6 @@ function M.update_tags()
     pcall(vim.api.nvim_win_close, prog_win, true)
   end
 
-  local function is_valid_name(n)
-    if type(n) ~= "string" or #n < 2 then
-      return false
-    end
-    if n:match("[,%.%?!;:\"']$") then
-      return false
-    end
-    if n:match("^https?://") then
-      return false
-    end
-    return true
-  end
-
   -- Preload existing clean databases so we never overwrite them
   local function preload_db(file, map)
     local p = tags_dir .. "/" .. file
@@ -82,10 +70,74 @@ function M.update_tags()
     end
   end
 
+  local function absorb_and_prune_discovered()
+    local disc_file = config.get_discovered_tags_file()
+    local df = io.open(disc_file, "r")
+    if not df then
+      return
+    end
+    local raw = df:read("*a")
+    df:close()
+    local ok, disc_list = pcall(vim.fn.json_decode, raw)
+    if not ok or type(disc_list) ~= "table" then
+      return
+    end
+
+    local remaining = {}
+    local absorbed = 0
+    for _, t in ipairs(disc_list) do
+      if t.n and type(t.n) == "string" then
+        local count = tonumber(t.c) or 0
+        local typ = tonumber(t.t) or 0
+        local nl = t.n:lower()
+        if db.is_clean_tag(t.n, count, typ) then
+          local item = { n = t.n, c = count, t = typ }
+          local handled = false
+          if typ == 3 then
+            series_map[nl] = item
+            handled = true
+          elseif typ == 4 then
+            chars_map[nl] = item
+            handled = true
+          elseif typ == 1 then
+            artists_map[nl] = item
+            handled = true
+          elseif typ == 0 or typ == 5 then
+            if count >= 10 then
+              general_map[nl] = item
+              handled = true
+            end
+          end
+          if handled then
+            seen[t.n] = true
+            absorbed = absorbed + 1
+          else
+            remaining[#remaining + 1] = t
+          end
+        else
+          remaining[#remaining + 1] = t
+        end
+      end
+    end
+
+    if absorbed > 0 then
+      total_fetched = total_fetched + absorbed
+      local ok_w, enc = pcall(vim.fn.json_encode, remaining)
+      if ok_w and enc then
+        local f = io.open(disc_file, "w")
+        if f then
+          f:write(enc)
+          f:close()
+        end
+      end
+    end
+  end
+
   preload_db("series.json", series_map)
   preload_db("characters.json", chars_map)
   preload_db("artists.json", artists_map)
   preload_db("general.json", general_map)
+  absorb_and_prune_discovered()
 
   local next_pid = math.floor(total_fetched / LIMIT)
   local active_workers = 0
@@ -147,7 +199,7 @@ function M.update_tags()
           local name = t.name
           local count = tonumber(t.count) or 0
           local typ = tonumber(t.type) or 0
-          if name and is_valid_name(name) and count > 0 and not seen[name] then
+          if name and db.is_clean_tag(name, count, typ) and not seen[name] then
             seen[name] = true
             total_fetched = total_fetched + 1
             local item = { n = name, c = count, t = typ }

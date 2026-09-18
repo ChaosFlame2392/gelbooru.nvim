@@ -64,7 +64,14 @@ function M.add_tag_to_index(t, target_list, bucket_map)
   end
 end
 
-function M.parse_tag_file(path, target_list, bucket_map)
+local DEFAULT_TAG_CAPS = {
+  series = 35000,
+  characters = 40000,
+  artists = 40000,
+  general = 40000,
+}
+
+function M.parse_tag_file(path, target_list, bucket_map, cap)
   local f = io.open(path, "r")
   if not f then
     return false
@@ -75,15 +82,18 @@ function M.parse_tag_file(path, target_list, bucket_map)
   if not ok or type(data) ~= "table" then
     return false
   end
-  for _, t in ipairs(data) do
-    M.add_tag_to_index(t, target_list, bucket_map)
+  local max_items = cap or #data
+  local limit = math.min(#data, max_items)
+  for i = 1, limit do
+    M.add_tag_to_index(data[i], target_list, bucket_map)
   end
   return true
 end
 
-function M.load_tags()
+function M.load_tags(caps)
   local State = state.State
   local UI = state.UI
+  caps = caps or DEFAULT_TAG_CAPS
 
   State.tags_by_name = {}
   State.series = {}
@@ -117,80 +127,91 @@ function M.load_tags()
     or vim.fn.filereadable(general_file) == 1
 
   if has_split then
-    log("INFO", "TAGS", "Loading split tag databases from %s", tags_dir)
-    vim.schedule(function()
-      M.parse_tag_file(series_file, State.series, State.series_by_first)
-      M.parse_tag_file(chars_file, State.characters, State.chars_by_first)
-      M.parse_tag_file(artists_file, State.artists, State.artists_by_first)
-      M.parse_tag_file(general_file, State.general, State.general_by_first)
+    log("INFO", "TAGS", "Loading tag databases from %s", tags_dir)
 
-      -- Load persistent discovered tags
-      local df = io.open(disc_file, "r")
-      if df then
-        local raw = df:read("*a")
-        df:close()
-        local ok, disc = pcall(vim.fn.json_decode, raw)
-        if ok and type(disc) == "table" then
-          for _, t in ipairs(disc) do
-            if t.n and type(t.n) == "string" then
-              local nl = t.n:lower()
-              State.discovered_by_name[nl] = true
-              State.discovered[#State.discovered + 1] = t
-              local typ = tonumber(t.t) or 0
-              if typ == 3 then
-                M.add_tag_to_index(t, State.series, State.series_by_first)
-              elseif typ == 4 then
-                M.add_tag_to_index(t, State.characters, State.chars_by_first)
-              elseif typ == 1 then
-                M.add_tag_to_index(t, State.artists, State.artists_by_first)
-              else
-                M.add_tag_to_index(t, State.general, State.general_by_first)
-              end
+    -- Step 1: Load discovered.json synchronously (small, highly personal/relevant)
+    local df = io.open(disc_file, "r")
+    if df then
+      local raw = df:read("*a")
+      df:close()
+      local ok, disc = pcall(vim.fn.json_decode, raw)
+      if ok and type(disc) == "table" then
+        for _, t in ipairs(disc) do
+          if t.n and type(t.n) == "string" then
+            local nl = t.n:lower()
+            State.discovered_by_name[nl] = true
+            State.discovered[#State.discovered + 1] = t
+            local typ = tonumber(t.t) or 0
+            if typ == 3 then
+              M.add_tag_to_index(t, State.series, State.series_by_first)
+            elseif typ == 4 then
+              M.add_tag_to_index(t, State.characters, State.chars_by_first)
+            elseif typ == 1 then
+              M.add_tag_to_index(t, State.artists, State.artists_by_first)
+            else
+              M.add_tag_to_index(t, State.general, State.general_by_first)
             end
           end
-          log("INFO", "TAGS", "Loaded %d persisted discovered tags", #State.discovered)
         end
       end
+    end
 
-      -- Build a prioritized combined list for initial/empty autocomplete display
-      for _, t in ipairs(State.series) do
-        if #all_tags < 150 then
-          table.insert(all_tags, t)
-        end
-      end
-      for _, t in ipairs(State.characters) do
-        if #all_tags < 250 then
-          table.insert(all_tags, t)
-        end
-      end
-      for _, t in ipairs(State.general) do
-        if #all_tags < 350 then
-          table.insert(all_tags, t)
-        end
-      end
-      State.all_tags = all_tags
+    -- Step 2: Load category databases across progressive event-loop turns so
+    -- the Neovim main thread never freezes and the UI appears instantaneously.
+    vim.schedule(function()
+      M.parse_tag_file(series_file, State.series, State.series_by_first, caps.series)
 
-      log(
-        "INFO",
-        "TAGS",
-        "Loaded: series=%d, characters=%d, artists=%d, general=%d, discovered=%d",
-        #State.series,
-        #State.characters,
-        #State.artists,
-        #State.general,
-        #State.discovered
-      )
+      vim.schedule(function()
+        M.parse_tag_file(general_file, State.general, State.general_by_first, caps.general)
 
-      if
-        State.input_focused
-        and UI.bufs.input
-        and UI.wins.ac
-        and vim.api.nvim_buf_is_valid(UI.bufs.input)
-        and vim.api.nvim_win_is_valid(UI.wins.ac)
-      then
-        local autocomplete = require("gelbooru.ui.autocomplete")
-        pcall(autocomplete.update_autocomplete)
-      end
+        -- Build initial all_tags recommendation set from series and general
+        for _, t in ipairs(State.series) do
+          if #all_tags < 150 then
+            table.insert(all_tags, t)
+          end
+        end
+        for _, t in ipairs(State.general) do
+          if #all_tags < 350 then
+            table.insert(all_tags, t)
+          end
+        end
+        State.all_tags = all_tags
+
+        if State.input_focused and UI.bufs.input and UI.wins.ac
+          and vim.api.nvim_buf_is_valid(UI.bufs.input)
+          and vim.api.nvim_win_is_valid(UI.wins.ac)
+        then
+          local autocomplete = require("gelbooru.ui.autocomplete")
+          pcall(autocomplete.update_autocomplete)
+        end
+
+        vim.schedule(function()
+          M.parse_tag_file(chars_file, State.characters, State.chars_by_first, caps.characters)
+
+          vim.schedule(function()
+            M.parse_tag_file(artists_file, State.artists, State.artists_by_first, caps.artists)
+
+            log(
+              "INFO",
+              "TAGS",
+              "Tags ready: series=%d, characters=%d, artists=%d, general=%d, discovered=%d",
+              #State.series,
+              #State.characters,
+              #State.artists,
+              #State.general,
+              #State.discovered
+            )
+
+            if State.input_focused and UI.bufs.input and UI.wins.ac
+              and vim.api.nvim_buf_is_valid(UI.bufs.input)
+              and vim.api.nvim_win_is_valid(UI.wins.ac)
+            then
+              local autocomplete = require("gelbooru.ui.autocomplete")
+              pcall(autocomplete.update_autocomplete)
+            end
+          end)
+        end)
+      end)
     end)
   else
     State.all_tags = all_tags

@@ -15,6 +15,7 @@ M.parse_tag_file = db.parse_tag_file
 M.load_tags = db.load_tags
 
 M.persist_discovered_tag = resolve.persist_discovered_tag
+M.save_discovered_now = resolve.save_discovered_now
 M.resolve_post_tags = resolve.resolve_post_tags
 M.fetch_api_tags = resolve.fetch_api_tags
 

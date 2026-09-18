@@ -7,6 +7,64 @@ local db = require("gelbooru.tags.db")
 
 local M = {}
 
+function M.save_discovered_now()
+  local State = state.State
+  local UI = state.UI
+  if UI.save_discovered_timer then
+    pcall(function()
+      UI.save_discovered_timer:stop()
+      if not UI.save_discovered_timer:is_closing() then
+        UI.save_discovered_timer:close()
+      end
+    end)
+    UI.save_discovered_timer = nil
+  end
+
+  if #State.discovered == 0 then
+    return
+  end
+
+  local disc_file = config.get_discovered_tags_file()
+  -- Read existing disk entries and merge to prevent data loss across sessions
+  local existing_map = {}
+  local merged = {}
+  local df = io.open(disc_file, "r")
+  if df then
+    local raw = df:read("*a")
+    df:close()
+    local ok, disk_list = pcall(vim.fn.json_decode, raw)
+    if ok and type(disk_list) == "table" then
+      for _, t in ipairs(disk_list) do
+        if t.n and type(t.n) == "string" then
+          local nl = t.n:lower()
+          existing_map[nl] = true
+          merged[#merged + 1] = t
+        end
+      end
+    end
+  end
+
+  for _, t in ipairs(State.discovered) do
+    if t.n and type(t.n) == "string" then
+      local nl = t.n:lower()
+      if not existing_map[nl] then
+        existing_map[nl] = true
+        merged[#merged + 1] = t
+      end
+    end
+  end
+
+  local ok, encoded = pcall(vim.fn.json_encode, merged)
+  if ok and encoded then
+    local f = io.open(disc_file, "w")
+    if f then
+      f:write(encoded)
+      f:close()
+      log("INFO", "TAGS", "Persisted %d discovered tags to %s", #merged, disc_file)
+    end
+  end
+end
+
 function M.persist_discovered_tag(item)
   if not item or not item.n or item.n == "" then
     return
@@ -29,7 +87,6 @@ function M.persist_discovered_tag(item)
     c = c,
   }
 
-  local disc_file = config.get_discovered_tags_file()
   -- Guard: if the existing timer was already closed by teardown, discard it.
   if UI.save_discovered_timer and UI.save_discovered_timer:is_closing() then
     UI.save_discovered_timer = nil
@@ -42,18 +99,8 @@ function M.persist_discovered_tag(item)
     500,
     0,
     vim.schedule_wrap(function()
-      -- Timer may have been closed by teardown before this fires.
-      if not UI.save_discovered_timer then
-        return
-      end
-      local ok, encoded = pcall(vim.fn.json_encode, State.discovered)
-      if ok and encoded then
-        local f = io.open(disc_file, "w")
-        if f then
-          f:write(encoded)
-          f:close()
-          log("INFO", "TAGS", "Persisted %d discovered tags to %s", #State.discovered, disc_file)
-        end
+      if UI.save_discovered_timer then
+        M.save_discovered_now()
       end
     end)
   )

@@ -57,25 +57,8 @@ function M.teardown()
     end)
     UI.ac_debounce_timer = nil
   end
-  if UI.save_discovered_timer then
-    pcall(function()
-      UI.save_discovered_timer:stop()
-      if not UI.save_discovered_timer:is_closing() then
-        UI.save_discovered_timer:close()
-      end
-    end)
-    UI.save_discovered_timer = nil
-    if #State.discovered > 0 then
-      local ok, encoded = pcall(vim.fn.json_encode, State.discovered)
-      if ok and encoded then
-        local disc_file = config.get_discovered_tags_file()
-        local f = io.open(disc_file, "w")
-        if f then
-          f:write(encoded)
-          f:close()
-        end
-      end
-    end
+  if UI.save_discovered_timer or #State.discovered > 0 then
+    pcall(tags.save_discovered_now)
   end
 
   download.cancel_prefetch_timers()
@@ -260,6 +243,9 @@ function M.on_resize()
   invalidate_layout()
   local l = M.calc_layout()
   M.apply_layout(l)
+  -- Reset cur_id so the preview renderer forces snacks.image to update its
+  -- placement dimensions to the new canvas size immediately instead of cropping.
+  state.State.cur_id = nil
   M.render_preview(false)
 end
 
