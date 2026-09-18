@@ -27,7 +27,7 @@ function M.preview_source_name(p, url)
   return "preview"
 end
 
-function M.get_preview_targets(p)
+function M.get_preview_targets(p, url_idx)
   local urls, seen = {}, {}
   local candidates = { p and p.sample_url, p and p.preview_url, p and p.file_url }
   for i = 1, 3 do
@@ -40,7 +40,8 @@ function M.get_preview_targets(p)
   if #urls == 0 then
     return {}, nil
   end
-  local ext = M.file_ext_from_url(urls[1])
+  local chosen_idx = math.max(1, math.min(url_idx or 1, #urls))
+  local ext = M.file_ext_from_url(urls[chosen_idx])
   local cache_dir = config.options.cache_dir
   return urls, string.format("%s/prev_%s.%s", cache_dir, p.id, ext:lower())
 end
@@ -62,39 +63,75 @@ function M.clear_snacks_cache_for(post_id)
   end
 end
 
-function M.render_image(win, path, width, height)
+-- Nudge the active placement to re-render at the current window dimensions.
+-- Clears the cached state so snacks does not skip the update as a no-op.
+-- Call this after window geometry changes (e.g. 'm' toggle, VimResized).
+function M.nudge_current_placement()
+  local UI = state.UI
+  local p = UI.current_placement
+  if p and not p.closed and vim.api.nvim_buf_is_valid(p.buf) then
+    p._state = nil
+    pcall(p.update, p)
+    log("DEBUG", "RENDER", "Nudged placement for resize")
+    return true
+  end
+  return false
+end
+
+function M.render_image(win, path)
   if not vim.api.nvim_win_is_valid(win) then
     return false
   end
   local p_ok, placement_mod = pcall(require, "snacks.image.placement")
-  if p_ok and placement_mod then
-    local buf = vim.api.nvim_create_buf(false, true)
-    vim.bo[buf].bufhidden = "wipe"
-    local opts = { pos = { 1, 1 } }
-    if width and height then
-      opts.max_width = width
-      opts.max_height = height
-    end
-    local place_ok, placement = pcall(placement_mod.new, buf, path, opts)
-    if place_ok and placement then
-      local old_buf = state.UI.current_placement and state.UI.current_placement.buf
-      M.close_current_placement()
-      state.UI.current_placement = placement
-      pcall(vim.api.nvim_win_set_buf, win, buf)
-      if old_buf and vim.api.nvim_buf_is_valid(old_buf) then
-        pcall(vim.api.nvim_buf_delete, old_buf, { force = true })
-      end
-      pcall(placement.update, placement)
-      log("DEBUG", "RENDER", "Image rendered via snacks.image: %s", path)
-      return true
-    else
-      log("WARN", "RENDER", "Failed to create snacks placement for %s: %s", path, tostring(placement))
-      pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    end
-  else
+  if not p_ok or not placement_mod then
     log("WARN", "RENDER", "snacks.image.placement not available")
+    return false
   end
-  return false
+
+  local current = state.UI.current_placement
+
+  -- If we already have a live placement for this exact image, just nudge it to
+  -- refit into the (possibly resized) window instead of tearing it down and
+  -- recreating. This is the path taken on 'm' toggles and VimResized events.
+  if current and not current.closed
+    and current.img and current.img.src == path
+    and vim.api.nvim_buf_is_valid(current.buf) then
+    -- Ensure the img window is showing the placement buffer (may have been
+    -- reset to UI.bufs.img by a stale callback during download).
+    pcall(vim.api.nvim_win_set_buf, win, current.buf)
+    current._state = nil
+    pcall(current.update, current)
+    log("DEBUG", "RENDER", "In-place resize nudge: %s", path)
+    return true
+  end
+
+  -- New image: create a fresh placement with auto_resize so snacks wires its
+  -- own WinResized handler and recomputes dimensions automatically. We do NOT
+  -- pass max_width/max_height — the window itself is the constraint and snacks
+  -- reads its live dimensions on every update().
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  local opts = { pos = { 1, 1 }, auto_resize = true }
+
+  local place_ok, placement = pcall(placement_mod.new, buf, path, opts)
+  if not place_ok or not placement then
+    log("WARN", "RENDER", "Failed to create snacks placement for %s: %s", path, tostring(placement))
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    return false
+  end
+
+  local old_buf = current and current.buf
+  M.close_current_placement()
+  state.UI.current_placement = placement
+  -- Set new buffer on the window BEFORE deleting the old buffer to avoid
+  -- invalidating any in-flight snacks placement tracking.
+  pcall(vim.api.nvim_win_set_buf, win, buf)
+  if old_buf and vim.api.nvim_buf_is_valid(old_buf) then
+    pcall(vim.api.nvim_buf_delete, old_buf, { force = true })
+  end
+  pcall(placement.update, placement)
+  log("DEBUG", "RENDER", "Image rendered via snacks.image: %s", path)
+  return true
 end
 
 return M

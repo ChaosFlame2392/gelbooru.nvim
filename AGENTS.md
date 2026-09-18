@@ -414,20 +414,17 @@ The repository includes a comprehensive unit testing suite using `plenary.nvim` 
 All outstanding tasks, known issues, and planned refactorings are consolidated here:
 
 ### Priority 1: UI Auto-Update & Image Rescaling on State Changes
-- **Image rescaling on meta toggle (`m`)**: When `show_meta` is toggled in `ui/init.lua`, `calc_layout()` and `apply_layout()` resize the floating windows (`UI.wins.img`), but `snacks.image.placement` is not updated with the new floating window dimensions (`l.img.width`, `l.img.height`). This causes the terminal image renderer to crop the image canvas to the old window bounds instead of scaling it dynamically. The image only updates to the new size when navigating to another post or pressing `r`.
-  - *Required Fix*: In `ui/init.lua:on_resize()`, update active placement dimensions or trigger an in-place re-render (`load_and_render_image(p, 1, 0, false)`) so the image smoothly scales to fit the resized preview canvas immediately.
-- **Meta panel refresh on artist resolution**: *(RESOLVED)* Resetting `State.cur_id = nil` inside the `resolve_post_tags()` completion callback in `ui/init.lua` bypasses the deduplication guard and refreshes `UI.bufs.meta` when an artist tag is resolved.
+- **Image rescaling on meta toggle (`m`)**: *(IN PROGRESS on `feat/visual-scaling`)* Snacks placement created with `auto_resize = true`; in-place placement nudge via `image.nudge_current_placement()` eliminates placement recreation and enables dynamic up/down scaling without tearing.
+- **Meta panel refresh on artist resolution**: *(RESOLVED in commit 54d3aef)* Resetting `State.cur_id = nil` inside the `resolve_post_tags()` completion callback in `ui/init.lua` bypasses the deduplication guard and refreshes `UI.bufs.meta` when an artist tag is resolved.
 
 ### Priority 2: Discovered Tags Transfer to Main Tag Files
-- **Context**: During browsing, newly resolved tags accumulate in `discovered.json`. Currently, they remain in `discovered.json` indefinitely and are not incorporated into the primary category databases (`series.json`, `characters.json`, `artists.json`, `general.json`).
-- **Required Change**: When `:GelbooruTags` (`fetcher.lua`) executes a full update:
-  1. Load existing entries from `discovered.json`.
-  2. Merge matching tags into `series_map`, `chars_map`, `artists_map`, or `general_map`.
-  3. Prune transferred tags from `discovered.json` so it only retains items not yet absorbed into main databases. (Do **not** enforce a hardcap; perform clean transfer and pruning).
+*(RESOLVED in commit 54d3aef)*
+- `:GelbooruTags` (`tags/fetcher.lua`) now calls `absorb_and_prune_discovered()` to load `discovered.json`, merge valid tags into category maps (`series_map`, `chars_map`, `artists_map`, `general_map`), and prune transferred tags.
+- Added `save_discovered_now()` in `tags/resolve.lua` with on-disk read-merge to protect against data loss on teardown.
 
 ### Priority 3: Tag Scraper Filter Consistency & Quality
-- **Context**: In `tags/fetcher.lua` (line 51), a local helper `is_valid_name()` is used instead of the canonical `tags/db.lua:is_clean_tag()`.
-- **Required Change**: Unify tag filtering in `fetcher.lua` to use `db.is_clean_tag()`, ensuring that count constraints, symbol exclusions, and disambiguation paren rules are consistently applied before serializing tags to disk.
+*(RESOLVED in commit 54d3aef)*
+- Removed the ad-hoc local helper `is_valid_name()` in `tags/fetcher.lua`. All tag scraping and disk serialization now use canonical `tags/db.lua:is_clean_tag()`.
 
 ### Priority 4: Architectural Modularization
 - **Modularize `ui/init.lua` (~800 lines)**:
@@ -450,7 +447,15 @@ All outstanding tasks, known issues, and planned refactorings are consolidated h
   5. **Autocomplete hint**: Add `"id:"` to `META_TAGS` in `core/config.lua` so it appears as a suggestion when the user types `id` in the search bar.
 - **Integration test**: Add `tests/integration/search_spec.lua` coverage for the ID lookup path: mock a single-post API response and assert `State.posts[1].id == <queried_id>` and `State.cur == 1`.
 
-### Priority 6: Testing Infrastructure & Maintenance Guidelines
+### Priority 6: Real UI & Event Loop Integration Test Suite
+*(RESOLVED in commit b213867)*
+- Added integration test suite (`tests/integration/`):
+  - `search_spec.lua`: Search execution, cursor reset, list repainting, query re-submission.
+  - `layout_spec.lua`: Layout math, window visibility, and metadata formatting across `m` toggle.
+  - `autocomplete_spec.lua`: Real-time dropdown population, selection index advancement.
+  - `regressions_spec.lua`: Guards against search blanking, `m` placement tearing, and artist dedup deadlocks.
+
+### Priority 7: Testing Infrastructure & Maintenance Guidelines
 - **Suite Composition**:
   - `tests/unit/` (5 specs, 79 assertions): Fast, headless unit tests covering pure transformations (`config`, `db`, `history`, `image`, `util`).
   - `tests/integration/` (4 specs, 11 assertions): End-to-end integration tests using Neovim API + headless event loop + mock networking layer (`harness`, `mock_net`, `mock_snacks`). Covers real UI window/buffer creation, search execution, layout recalculation, autocomplete buffer population, and regression guards.
@@ -464,9 +469,51 @@ All outstanding tasks, known issues, and planned refactorings are consolidated h
   3. **Placement mock assertions**: `mock_snacks` tracks placement objects in `state.UI.current_placement`. When testing `on_resize()` or layout changes, verify placement fields (`buf`, `src`, `closed`) directly rather than checking visual terminal pixel output.
   4. **Running tests**: `make test` runs all unit + integration specs. `make spec FILE=tests/integration/regressions_spec.lua` runs a single spec. `make lint` checks Lua syntax via `luajit -bl`.
 
-### Priority 7: Real UI & Event Loop Integration Test Suite
-- **Context**: Existing unit specs (`tests/unit/`) only test headless pure Lua data transformations (`url_encode`, `is_clean_tag`, history math). They do not catch Neovim floating window buffer switching races, event loop timer ordering, or search exit list repainting.
-- **Required Integration Specs**:
-  - `tests/integration/search_spec.lua`: Test search entry, query submission, list buffer repainting (`UI.bufs.list`), cursor reset (`State.cur = 1`), and history stack updates.
-  - `tests/integration/layout_spec.lua`: Test metadata window toggle (`m`), window config updates, and buffer assignments across `on_resize()`.
-  - `tests/integration/resolve_spec.lua`: Test async tag resolution callbacks updating the metadata panel without mutating active preview cursor state.
+### Priority 8: Persistent & Resumable Downloads
+
+- **Context**: `download.download_async` writes to `dest .. ".part"` atomically, then renames on success. On teardown, `download.active_downloads = {}` drops all pending Lua callbacks — but the underlying `curl` process launched via `vim.system` is **not killed**. It keeps writing to the `.part` file until either natural completion or OS-level cleanup. This means:
+  - Large images or full-res saves mid-download leave an orphaned `.part` file in `cache_dir`.
+  - On next session, `download_async` sees `filereadable(dest) == 0` and re-downloads from byte 0, wasting bandwidth and time.
+  - The user sees "Downloading preview…" again even if 95% of the file was already transferred.
+
+- **Approach A — Stale `.part` scan on open (cheap, session-local)**:
+  In `ui.open()`, after `util.ensure(config.options.cache_dir)`, glob `cache_dir` for `prev_*.part` orphans. For each one where the final file (`dest` without `.part`) is absent, queue it for resumption via Approach B. This silently finishes interrupted prefetches from the previous session.
+
+- **Approach B — curl range resume (`--continue-at -`)**:
+  `img4.gelbooru.com` returns `Accept-Ranges: bytes`. Add `M.download_resume(url, dest, cb)` which calls curl with `-C -` so only missing bytes are fetched:
+  ```lua
+  vim.system({ "curl", "-s", "-L", "-C", "-", "-o", dest .. ".part", "-H", "Referer: https://gelbooru.com/", url }, ...)
+  ```
+  After completion, validate `getfsize(dest) > 1024` before renaming. Do **not** delete the `.part` file before attempting resume — current teardown already leaves `.part` intact so this is safe.
+  Guard against servers that ignore the `Range` header and return `200 OK` instead of `206 Partial Content` by checking `--write-out "%{http_code}"` or comparing the post-rename file size against the expected `Content-Length`.
+
+- **Approach C — Orphan queue file (cross-session, any search)**:
+  On teardown, if `active_downloads` is non-empty, serialize `{ url = url, dest = dest }` pairs to `cache_dir .. "/pending.json"`. On `ui.open()`, load and delete this file, then silently re-queue each entry via `download_resume` as background work. This covers the case where the user opens a completely different search next session — the orphaned previews still complete in the background.
+
+- **Recommended implementation order**: B → A → C. A+B alone fixes the common close-mid-scroll case; C adds full cross-session resilience.
+
+- **Additional invariant — job handle tracking**:
+  `vim.system` returns an object with a `:kill()` method. Store it in `M.active_handles = {}` keyed by `dest` alongside `M.active_downloads`. In `teardown()`, call `pcall(handle.kill, handle, 9)` on all entries before clearing the table. This prevents orphaned curl processes writing to disk after Neovim has shut down its file handles, which can corrupt `.part` files and make range resume unreliable.
+
+### Priority 9: Mouse Handling & Buffer Modifiability (XY Problem: Mouse clicks trigger blink.cmp / insert mode)
+- **Mouse clicks trigger accidental insert mode & completion plugins**: Clicking with the mouse anywhere in the plugin UI (e.g. clicking on the list window, image window, or metadata panel) moves the Neovim cursor into non-input windows and can trigger insert mode or cause completion plugins like `blink.cmp` to activate as if the user is about to write code where writing is prohibited.
+- **Root Cause & Solution**:
+  - **Disable mouse during session**: Disable mouse handling while the Gelbooru window is active by setting `vim.opt.mouse = ""` in `ui.open()` and reliably restoring the user's prior `vim.o.mouse` setting in `ui.teardown()`.
+  - **Strict buffer protection**: Ensure non-input buffers (`UI.bufs.list`, `UI.bufs.meta`, `UI.bufs.img`, dividers) explicitly set `modifiable = false`, `buftype = "nofile"`, and disable editor auto-insert triggers on mouse clicks.
+  - **Keyboard navigation to/from metadata panel**: Currently the metadata panel can only be scrolled indirectly from the list window via `<C-d>`/`<C-u>`. Add clean keyboard shortcuts to switch focus directly into `UI.wins.meta` (e.g. `M` or `<Tab>` from list), allow standard buffer navigation (`j`/`k`, `/` search inside tags), and provide an easy return key (`<Esc>` or `q`) to drop back to `UI.wins.list` without closing the whole UI.
+
+### Priority 10: Buffer Isolation from Global Plugins (blink.cmp / LSP / Copilot)
+- **Unwanted plugin attachment**: Ensure Gelbooru buffers are completely ignored by global coding plugins:
+  - Mark `vim.b[buf].blink_cmp = false` (or disable blink buffer completion) across all Gelbooru buffers.
+  - Set `buftype = "nofile"` and set custom filetypes (e.g. `gelbooru_input`, `gelbooru_list`, `gelbooru_meta`) so filetype-based autocorrect/completion hooks do not attach.
+  - Disable language server / diagnostics attachments (`vim.diagnostic.enable(false, { bufnr = buf })`).
+
+### Priority 11: Backdrop Opacity & Window Isolation
+- **Background pass-through**: Floating windows have transparent backgrounds (`winblend = 0` or unset with default transparent highlights), showing underlying code buffers underneath the UI and preview canvas, creating visual clutter and distracting text bleed.
+- **Solid Backdrop / Dimmer Window**:
+  - Introduce an opaque backdrop floating window (`UI.wins.backdrop` or style `NormalFloat` with solid background color) that covers the entire editor screen behind the plugin frame.
+  - Set `winblend = 0` with a dedicated solid highlight group (e.g. `Normal:Normal,FloatBorder:FloatBorder`) so editor text does not bleed through.
+
+### Priority 12: Window Dragging & Resize Performance / Jitter
+- **Resize thrashing**: Dragging terminal windows or tiling manager splits triggers a burst of `VimResized` events, causing layout recalculations, divider redraws, and snacks placement updates to fire in rapid succession, resulting in lag and visual stutter.
+- **Debounced Resizing**: Debounce `on_resize()` (e.g. 50ms timer) so layout recalculations and placement nudges execute only after terminal dimensions have stabilized following resize/drag actions.

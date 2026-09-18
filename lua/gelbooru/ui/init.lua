@@ -243,10 +243,16 @@ function M.on_resize()
   invalidate_layout()
   local l = M.calc_layout()
   M.apply_layout(l)
-  -- Reset cur_id so the preview renderer forces snacks.image to update its
-  -- placement dimensions to the new canvas size immediately instead of cropping.
-  state.State.cur_id = nil
-  M.render_preview(false)
+  -- Nudge the active snacks placement to refit into the resized window.
+  -- auto_resize wires WinResized on the placement, but apply_layout uses
+  -- nvim_win_set_config (not a real WinResized event), so we nudge manually.
+  -- This covers both 'm' toggles and actual VimResized events.
+  if not image.nudge_current_placement() then
+    -- No live placement (e.g. first open, or image still downloading).
+    -- Fall through to a normal render so the preview fires when ready.
+    state.State.cur_id = nil
+    M.render_preview(false)
+  end
 end
 
 function M.render_list()
@@ -276,11 +282,12 @@ end
 local function load_and_render_image(p, url_idx, retry_count, force_download)
   local UI = state.UI
   local State = state.State
-  local urls, dest = image.get_preview_targets(p)
+  url_idx = url_idx or 1
+  local urls, dest = image.get_preview_targets(p, url_idx)
   if #urls == 0 or not dest then
     return
   end
-  url_idx = math.max(1, math.min(url_idx or 1, #urls))
+  url_idx = math.max(1, math.min(url_idx, #urls))
   retry_count = retry_count or 0
   local preview_url = urls[url_idx]
 
@@ -313,6 +320,10 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
     local pext = image.file_ext_from_url(preview_url)
     local source_name = image.preview_source_name(p, preview_url)
     if pext == "mp4" or pext == "webm" then
+      if url_idx < #urls then
+        load_and_render_image(p, url_idx + 1, 0, force_download)
+        return
+      end
       util.set_lines(UI.bufs.img, { "", "  [ Video Post - Preview not playable ]", "  Press 'O' to open in browser." })
       M.set_status(string.format("Video post • no static %s available", source_name), 2200)
       return
@@ -331,8 +342,7 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
       return
     end
 
-    local l = M.calc_layout()
-    local ok = image.render_image(UI.wins.img, dest, l.img.width, l.img.height)
+    local ok = image.render_image(UI.wins.img, dest)
     if not ok then
       if retry_count < 1 then
         load_and_render_image(p, url_idx, retry_count + 1, true)
