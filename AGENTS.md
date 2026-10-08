@@ -457,6 +457,7 @@ Priorities are ordered by **user experience impact** — bugs users can observe 
 > Items marked *(RESOLVED)* have been moved to git history and removed from the active backlog.
 > Previously resolved: Discovered Tags Transfer (54d3aef), Tag Scraper Filter Consistency (54d3aef),
 > Integration Test Suite (b213867), Resumable Downloads (f965ec6), Meta Panel Artist Refresh (54d3aef).
+> Recently resolved: P1 UX-Breaking Bugs 1.1-1.8 (epoch cancellation, single-result array normalization, open re-entrancy guard, curl --fail, backward pagination tail-slice, url_encode '+', cross-platform open_url, close-reopen lifecycle & nil guards), Buffer cleanup (3.3), save_dir ensure (3.4), curl handle tracking & abort_all (3.5), real download unit tests (5.1).
 
 ---
 
