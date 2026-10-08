@@ -381,17 +381,37 @@ Any agent or contributor modifying `gelbooru.nvim` **MUST** adhere to these runt
 ### 5. Download Queue Closure Management
 - `download.active_downloads` maps destination file paths to callback arrays. During rapid scrolling, do not allow unbounded closures to accumulate. Prefetch requests must overwrite or discard superseded callbacks to release captured closures.
 
+### 6. Search Epoch / Generation Token for Async Responses
+- Every `execute_search()` must increment a monotonic `State.search_epoch`. Every `fetch()` closure must capture the current epoch. Async callbacks must compare the captured epoch against `State.search_epoch` and discard stale responses to prevent cross-query post corruption.
+
+### 7. Gelbooru API Array Normalization
+- When Gelbooru returns exactly **one** post or tag, its JSON deserializes as a **dictionary** `{ id = ... }` rather than an array `[{ id = ... }]`. All code consuming `data.post` or `data.tag` must normalize via:
+  ```lua
+  local function ensure_array(v)
+    if type(v) ~= "table" then return {} end
+    if v[1] == nil and next(v) ~= nil then return { v } end
+    return v
+  end
+  ```
+
+### 8. UI and Fetcher Re-Entrancy Guards
+- `ui.open()` must check if the UI is already active (`UI.wins.frame` valid) and either return early or call `teardown()` first. Opening twice without this guard permanently orphans floating windows.
+- `:GelbooruTags` must maintain a module-level `is_running` flag to prevent duplicate worker swarms and concurrent file write conflicts.
+- `db.load_tags()` spans multiple `vim.schedule` turns; a `loading_in_progress` flag must prevent concurrent invocations from duplicating tag indices.
+
 ---
 
 ## 7. Testing, Tooling & Verification
 
-The repository includes a comprehensive unit testing suite using `plenary.nvim` and syntax linting via `luajit`.
+The repository includes unit and integration test suites using `plenary.nvim` and syntax linting via `luajit`.
 
 ### Available Commands
 
 | Command | Action |
 |---|---|
-| `make test` | Runs all 79+ unit specs headlessly using `plenary.busted`. |
+| `make test` | Runs all 81+ specs (unit + integration) headlessly using `plenary.busted`. |
+| `make test-unit` | Runs unit specs only. |
+| `make test-integration` | Runs integration specs only. |
 | `make spec FILE=tests/unit/util_spec.lua` | Runs a single test specification file. |
 | `make lint` | Runs `luajit -bl` (bytecode check) across all 16 Lua source files. |
 
@@ -400,98 +420,321 @@ The repository includes a comprehensive unit testing suite using `plenary.nvim` 
   1. `TEST_PLENARY` environment variable.
   2. `~/.local/share/nvim/lazy/plenary.nvim`.
   3. `~/.local/share/nvim/site/pack/packer/start/plenary.nvim`.
-- `tests/unit/`:
+- `tests/unit/` (6 specs, 70+ assertions):
   - `config_spec.lua`: Default options, clamping boundaries, key aliasing.
   - `db_spec.lua`: `is_clean_tag` validation rules, tag indexing, bucketing.
+  - `download_spec.lua`: Resume flag behavior, deduplication, interrupted teardown guards, pending resume race guards.
   - `history_spec.lua`: Navigation stack push, pop, restore, reference retention.
   - `image_spec.lua`: URL parsing, video post detection, preview target generation.
-  - `util_spec.lua`: URL encoding (spaces to `+`, colons, query params), entity decoding, normalization.
+  - `util_spec.lua`: URL encoding, entity decoding, normalization, fuzzy matching.
+- `tests/integration/` (4 specs, 11 assertions):
+  - `search_spec.lua`: Search execution, cursor reset, list repainting, query re-submission.
+  - `layout_spec.lua`: Layout math, window visibility, metadata formatting across `m` toggle.
+  - `autocomplete_spec.lua`: Dropdown population, selection index advancement.
+  - `regressions_spec.lua`: Guards against search blanking, `m` placement tearing, artist dedup deadlocks.
+- `tests/integration/helpers/`:
+  - `mock_net.lua`: Stubs `download.curl_async` and `download.download_async`.
+  - `mock_snacks.lua`: Mocks `snacks.image.placement` for headless testing.
+  - `harness.lua`: Environment setup/teardown between tests.
 
----
+### Known Coverage Gaps
+- **Zero dedicated tests**: `state.lua` (reset functions, singleton defaults), `log.lua` (level filtering, format safety, I/O failures).
+- **Partially tested**: `util.lua` (`load_auth`, `auth_qs`, `ensure`, `set_lines`, `float`, `keymap` untested), `history.lua` (`history_prev`, `history_next` untested).
+- **Vacuous tests**: `download_spec.lua` tests simulate callback logic locally instead of invoking real `download_async`/`resume_pending_saves` — they pass regardless of implementation correctness.
+- **Infrastructure fragility**: Integration tests use `vim.wait(100, ...)` which is flaky on slow CI. `Makefile` test target silently reports PASSED if Neovim crashes before printing plenary's summary.
+
+### Test Brittleness & Maintenance Rules
+1. **Do not use `vim.wait()` for synchronous callback asserts**: In headless Neovim, `vim.wait()` pumps the event loop, but deeply nested `vim.schedule` callbacks may not always execute within arbitrary sleep windows. Register state directly or invoke callbacks synchronously.
+2. **Input buffer state in integration tests**: `ui.open()` initializes `UI.bufs.input` to `""`. When testing re-submitted queries, pass `state.State.query` explicitly so the early-return path is properly exercised.
+3. **Placement mock assertions**: `mock_snacks` tracks placement objects in `state.UI.current_placement`. Verify placement fields (`buf`, `src`, `closed`) directly rather than checking visual output.
+4. **Monkey-patch cleanup**: Always use `before_each`/`after_each` or `finally()` blocks when patching `package.loaded`. Never leave mocked modules in place across test boundaries.
 
 ## 8. Prioritized Roadmap & Planned Changes
 
-All outstanding tasks, known issues, and planned refactorings are consolidated here:
+All outstanding tasks, known issues, and planned refactorings are consolidated here.
+Priorities are ordered by **user experience impact** — bugs users can observe come first.
 
-### Priority 1: UI Auto-Update & Image Rescaling on State Changes
-- **Image rescaling on meta toggle (`m`)**: *(IN PROGRESS on `feat/visual-scaling`)* Snacks placement created with `auto_resize = true`; in-place placement nudge via `image.nudge_current_placement()` eliminates placement recreation and enables dynamic up/down scaling without tearing.
-- **Meta panel refresh on artist resolution**: *(RESOLVED in commit 54d3aef)* Resetting `State.cur_id = nil` inside the `resolve_post_tags()` completion callback in `ui/init.lua` bypasses the deduplication guard and refreshes `UI.bufs.meta` when an artist tag is resolved.
+> Items marked *(RESOLVED)* have been moved to git history and removed from the active backlog.
+> Previously resolved: Discovered Tags Transfer (54d3aef), Tag Scraper Filter Consistency (54d3aef),
+> Integration Test Suite (b213867), Resumable Downloads (f965ec6), Meta Panel Artist Refresh (54d3aef).
 
-### Priority 2: Discovered Tags Transfer to Main Tag Files
-*(RESOLVED in commit 54d3aef)*
-- `:GelbooruTags` (`tags/fetcher.lua`) now calls `absorb_and_prune_discovered()` to load `discovered.json`, merge valid tags into category maps (`series_map`, `chars_map`, `artists_map`, `general_map`), and prune transferred tags.
-- Added `save_discovered_now()` in `tags/resolve.lua` with on-disk read-merge to protect against data loss on teardown.
+---
 
-### Priority 3: Tag Scraper Filter Consistency & Quality
-*(RESOLVED in commit 54d3aef)*
-- Removed the ad-hoc local helper `is_valid_name()` in `tags/fetcher.lua`. All tag scraping and disk serialization now use canonical `tags/db.lua:is_clean_tag()`.
+### Priority 1: UX-Breaking Bugs (User-Visible Correctness)
 
-### Priority 4: Architectural Modularization
-- **Modularize `ui/init.lua` (~800 lines)**:
-  Partition the monolithic UI orchestrator into dedicated submodules:
-  - `lua/gelbooru/ui/layout.lua`: Window coordinate calculations and divider line generation.
-  - `lua/gelbooru/ui/keymaps.lua`: Normal and insert mode buffer keybindings.
-  - `lua/gelbooru/ui/render.lua`: Text formatting and buffer painting for post list and metadata panels.
-  - `lua/gelbooru/ui/lifecycle.lua`: Window opening, resizing, and teardown routines.
-- **Simplify `config.setup()`**: Replace manual option copying with `vim.tbl_deep_extend("force", M.options, opts)` while preserving clamping validations.
-- **Standardize Facade Imports**: Rationalize `net/init.lua` and `tags/init.lua` so callers consistently import either submodules or the facade, eliminating mixed imports.
-- **Extract Named Constants**: Replace hardcoded magic numbers (autocomplete debounce `50ms`, preview cooldown `150ms`, tag batch size `40`, truncate width `46`) with descriptive constants in `core/config.lua`.
+These bugs produce incorrect or broken behavior the user can directly observe.
 
-### Priority 5: Direct Post ID Search
-- **Context**: Users often know the exact Gelbooru post ID (from a URL, shared link, or previous session) and want to navigate directly to that post without a tag search.
-- **Required Change**:
-  1. **Input detection**: In `net/api.lua:execute_search()`, detect when the query is a bare integer (e.g. `"12345678"`) or matches the pattern `id:<number>`. When detected, short-circuit the normal tag query.
-  2. **API fetch**: Issue a direct single-post API call: `index.php?page=dapi&s=post&q=index&json=1&id=<ID>`. On success, insert the single post into `State.posts`, set `State.cur = 1`, and call `ui.render_list()` + `ui.render_preview(false)`.
-  3. **UX detail**: Set status to `"Post #<ID>"` while fetching. If the post is not found (empty response or API error), fall back to displaying `"No post found for ID <ID>"`.
-  4. **History**: Push the query string (`"id:<ID>"`) to history stack as normal so `[` / `]` navigation works.
-  5. **Autocomplete hint**: Add `"id:"` to `META_TAGS` in `core/config.lua` so it appears as a suggestion when the user types `id` in the search bar.
-- **Integration test**: Add `tests/integration/search_spec.lua` coverage for the ID lookup path: mock a single-post API response and assert `State.posts[1].id == <queried_id>` and `State.cur == 1`.
+#### 1.1 Cross-Query Response Collision — Stale API Results Corrupt Active Search
+**Files:** `net/api.lua` lines 38–75, 87–94
+**Bug:** `fetch()` and `execute_search()` callbacks lack a generation/epoch token. If Query A is in-flight when the user submits Query B, Query A's callback appends its posts into Query B's `State.posts`, corrupts pagination, and saves wrong history.
+**Additionally:** `execute_search` does NOT reset `State.loading = false` before calling `fetch(1)`. If a prior fetch was in-flight, the new fetch aborts at `if State.loading then return end` — the new search silently never loads.
+**Fix:**
+- Add a monotonic `State.search_epoch` counter. Increment in `execute_search`. Capture epoch in every `fetch` closure. In async callback, compare `epoch ~= State.search_epoch` → discard response.
+- Reset `State.loading = false` inside `execute_search` before calling `fetch(1)`.
 
-### Priority 6: Real UI & Event Loop Integration Test Suite
-*(RESOLVED in commit b213867)*
-- Added integration test suite (`tests/integration/`):
-  - `search_spec.lua`: Search execution, cursor reset, list repainting, query re-submission.
-  - `layout_spec.lua`: Layout math, window visibility, and metadata formatting across `m` toggle.
-  - `autocomplete_spec.lua`: Real-time dropdown population, selection index advancement.
-  - `regressions_spec.lua`: Guards against search blanking, `m` placement tearing, and artist dedup deadlocks.
+#### 1.2 Single-Result API Returns Dict Instead of Array — Results Silently Dropped
+**Files:** `net/api.lua` L58–66, L105–129; `tags/resolve.lua` L142–143, L217; `tags/fetcher.lua` L196–198
+**Bug:** When Gelbooru returns exactly 1 post or 1 tag, JSON deserializes as `{ id = ... }` (dict) instead of `[{ id = ... }]` (array). `ipairs(data.post)` and `ipairs(data.tag)` yield 0 iterations, silently dropping the result.
+**Fix:** Add a shared `ensure_array(v)` helper in `core/util.lua`. Apply to every `data.post` and `data.tag` usage. See Invariant §7.
 
-### Priority 7: Testing Infrastructure & Maintenance Guidelines
-- **Suite Composition**:
-  - `tests/unit/` (5 specs, 79 assertions): Fast, headless unit tests covering pure transformations (`config`, `db`, `history`, `image`, `util`).
-  - `tests/integration/` (4 specs, 11 assertions): End-to-end integration tests using Neovim API + headless event loop + mock networking layer (`harness`, `mock_net`, `mock_snacks`). Covers real UI window/buffer creation, search execution, layout recalculation, autocomplete buffer population, and regression guards.
-- **Mock Infrastructure (`tests/integration/helpers/`)**:
-  - `mock_net.lua`: Stubs `download.curl_async` (returns mock JSON payloads via `vim.schedule`) and `download.download_async` (creates a dummy 2KB image file on disk).
-  - `mock_snacks.lua`: Mocks `snacks.image.placement` to record placement objects without needing Kitty graphics hardware or terminal capabilities.
-  - `harness.lua`: Manages environment setup/teardown between tests, calling `ui.teardown()` and resetting singletons (`State`, `UI`).
-- **Test Brittleness & Maintenance Rules**:
-  1. **Do not use `vim.wait()` for synchronous callback asserts**: In headless Neovim (`nvim --headless`), `vim.wait()` pumps the event loop, but callbacks scheduled via `vim.schedule` inside deeply nested callbacks may not always execute within arbitrary sleep windows. When testing logic that depends on `vim.schedule` (such as `tags.resolve_post_tags`), register state directly or invoke the callback synchronously instead of polling with `vim.wait()`.
-  2. **Input buffer state in integration tests**: `ui.open()` initializes `UI.bufs.input` to `""`. When testing re-submitted queries via `api.execute_search(query)`, pass `state.State.query` explicitly so the early-return path (`query == State.query`) is properly exercised.
-  3. **Placement mock assertions**: `mock_snacks` tracks placement objects in `state.UI.current_placement`. When testing `on_resize()` or layout changes, verify placement fields (`buf`, `src`, `closed`) directly rather than checking visual terminal pixel output.
-  4. **Running tests**: `make test` runs all unit + integration specs. `make spec FILE=tests/integration/regressions_spec.lua` runs a single spec. `make lint` checks Lua syntax via `luajit -bl`.
+#### 1.3 Re-Opening `:Gelbooru` Orphans Existing Floating Windows
+**File:** `ui/init.lua` L503–545
+**Bug:** `open()` never checks if UI is already active. Calling `:Gelbooru` twice overwrites `UI.wins`/`UI.bufs` references. Original floating windows remain visible and permanently orphaned.
+**Fix:** At top of `open()`, check `if UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame) then return end` (or call `teardown()` first). See Invariant §8.
 
-### Priority 8: Persistent & Resumable Downloads
-*(RESOLVED in commit c4c3c1c, bc3b4b2, 71787cf, ef09a83)*
+#### 1.4 HTTP Error Pages Permanently Cached as Valid Images
+**File:** `net/download.lua` L70–107
+**Bug:** `curl` runs without `--fail` / `-f`. Server 404/403/500 responses with HTML body > 1024 bytes exit code 0. The HTML error page is renamed to `dest` (e.g. `prev_123.jpg`) and permanently cached.
+**Fix:** Add `--fail` to curl args. Optionally validate magic bytes (JPEG `FFD8`, PNG `89504E47`) before finalizing.
 
-- **Implementation**:
-  - `download.download_async` supports `opts.resume = true`: when `.part` exists with > 1KB, uses `curl -C -` to continue partial downloads instead of deleting and restarting.
-  - `api.save_current()` passes `resume = true` and guards against spam clicks with an in-flight check.
-  - Cross-session orphan recovery via `download.resume_pending_saves()` scans `save_dir/*.part` on UI open, retrieves post `file_url` via API, and auto-resumes orphaned saves in the background.
-  - Teardown process safety: tracks `active_handles` and sets `interrupted_dests` before killing curl processes with SIGKILL, preventing incomplete files from being renamed to final destinations upon exit.
-  - Unit tests added in `tests/unit/download_spec.lua` covering resume flag behavior, deduplication, interrupted teardown guard, and pending resume concurrency guards.
+#### 1.5 Backward Pagination Removes Wrong Posts
+**File:** `net/api.lua` L22–27
+**Bug:** Forward pagination appends to end of `State.posts`. Backward pagination removes from the *front* (items `1..to_remove`) instead of popping the last-appended page from the tail.
+**Fix:** Reverse the slice — remove items from the end: `for i = 1, #State.posts - to_remove do new_posts[i] = State.posts[i] end`.
 
-### Priority 9: Mouse Input & Metadata Window Keyboard Navigation
-- **Disable Mouse Input**: While the plugin UI is active, disable mouse handling (`vim.opt.mouse = ""`) and restore the user's prior `mouse` setting on `teardown()`. Prevents accidental clicks from disrupting window focus or layout.
-- **Keyboard Navigation for Metadata**: Provide direct keyboard navigation to focus the metadata window (`UI.wins.meta`) (e.g. `M` from list) with standard `j`/`k` scrolling, and `<Esc>` or `q` to return focus directly to the post list without closing the browser.
+#### 1.6 `url_encode` Leaves Literal `+` Unescaped — Breaks Tags Containing `+`
+**File:** `core/util.lua` L40
+**Bug:** `url_encode` converts spaces to `+` but excludes `+` from percent-encoding. Tags like `c++` remain `c++`, which the server interprets as `c  `. Also affects `resolve.lua` L133–135 where tags are joined with `+`.
+**Fix:** Remove `%+` from exclusion class. Encode spaces as `%20` instead of `+` (or percent-encode `+` as `%2B`).
 
-### Priority 10: UI Background Cleanup & Window Cleanliness
-- **Clean Window Opening**: Ensure the plugin cleans up existing buffer contents and opens on a clear, clean window state. Clean up existing visual artifacts and stale content cleanly without unnecessarily enforcing an opaque background or disabling transparency.
+#### 1.7 `o`/`O` Keymaps Only Work on macOS
+**File:** `ui/init.lua` L662, L668
+**Bug:** `vim.fn.system({ "open", ... })` hardcodes macOS command.
+**Fix:** Use `vim.ui.open(url)` (Neovim 0.10+) or detect platform: `open` (macOS), `xdg-open` (Linux), `start` (Windows).
 
-### Priority 11: Responsive UI & Scaling
-- **Investigate & Fix Responsive Scaling**: Investigate and fix responsive scaling across terminal resizes (`VimResized`) and layout state changes (e.g. `m` metadata toggle). Debounce resize events and ensure floating window layout and snacks image placements scale smoothly without jitter or visual tearing.
+#### 1.8 Close-Reopen Crash & Stale State Persistence
+**Files:** `ui/init.lua` (teardown, render_preview, open), `core/state.lua` (reset_query_state)
+**Bug (crash):** After closing with `q`/`<Esc>` and reopening with `:Gelbooru`, the plugin crashes at `ui/init.lua:448`:
+```
+Invalid 'win': Expected Lua number
+  nvim_win_is_valid → render_preview → on_resize → enter_search → open
+```
+**Root cause:** `teardown()` (L89–90) calls `reset_ui()` and `reset_tag_state()` but **never calls `reset_query_state()`**. This means `State.posts`, `State.query`, `State.history`, `State.show_meta`, and all search navigation fields survive across sessions. On reopen:
+1. If `State.show_meta` was toggled off (`false`) in the previous session, `calc_layout()` returns `l.meta = nil`.
+2. `open()` conditionally skips creating `UI.wins.meta` (L549–554).
+3. `enter_search()` → `on_resize()` → `render_preview()` finds `State.posts` non-empty (stale), proceeds to L448.
+4. `vim.api.nvim_win_is_valid(UI.wins.meta)` receives `nil` instead of a number → **crash**.
 
-### Priority 12: Test Suite Distribution / End-User Download
-- **Investigate Test Suite Download**: Investigate whether end users are downloading the test suite (`tests/`, `Makefile`, etc.) when installing the plugin via package managers or release downloads. Explore options such as `.gitattributes` `export-ignore` or distribution adjustments so users don't have to download the test suite, while preserving local and CI test functionality.
+**Bug (stale state):** Because `reset_query_state()` is never called, reopening preserves the entire previous session's post list and history stack. Navigating history with `[`/`]` restores old entries but image placements and download queues were wiped by teardown, so images don't render and window operations throw errors.
 
-### Priority 13: Documentation & Test Suite Synchronization
-- **Audit & Synchronize `AGENTS.md`**: Bring `AGENTS.md` up to date with the latest codebase changes, architecture, and current runtime invariants to eliminate documentation drift.
-- **Test Suite & Docs Alignment**: Review and update test cases to accurately reflect recent code changes, and synchronize user-facing documentation (`readme.md` and `doc/gelbooru.txt`) with current functionality, keymaps, and configuration options.
+**Fix — three changes required:**
+1. **`core/state.lua` — make `reset_query_state()` comprehensive:**
+   ```lua
+   function M.reset_query_state()
+     M.State.query = ""
+     M.State.posts = {}
+     M.State.page = 0
+     M.State.cur = 1
+     M.State.loading = false
+     M.State.cur_id = nil
+     M.State.show_meta = true
+     M.State.history = {}
+     M.State.history_idx = 0
+     M.State.autocomplete_cur = 1
+     M.State.autocomplete_navigated = false
+     M.State.input_focused = false
+     M.State.scroll_dir = 1
+   end
+   ```
+2. **`ui/init.lua` teardown() — call `reset_query_state()`:**
+   ```lua
+   state.reset_ui()
+   state.reset_tag_state()
+   state.reset_query_state()  -- ADD THIS
+   ```
+3. **`ui/init.lua` — add nil guards before every `nvim_win_is_valid` call:**
+   - L448: `if UI.wins.meta and vim.api.nvim_win_is_valid(UI.wins.meta) then`
+   - L465: `if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img) then`
+   - L304, L317: `if not UI.wins.img or not vim.api.nvim_win_is_valid(UI.wins.img) then`
+   - L286: `if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then`
+
+---
+
+### Priority 2: UX Features & Visual Polish
+
+User-facing improvements that enhance the browsing experience.
+
+#### 2.1 Direct Post ID Search
+**Context:** Users often know the exact Gelbooru post ID (from a URL, shared link, or previous session) and want to navigate directly without a tag search.
+**Required Changes:**
+1. In `net/api.lua:execute_search()`, detect bare integers or `id:<number>` pattern. Short-circuit normal tag query.
+2. Issue single-post API call: `json=1&id=<ID>`. Insert post into `State.posts`, set `State.cur = 1`, render.
+3. Status: `"Post #<ID>"` while fetching. `"No post found for ID <ID>"` on empty response.
+4. Push `"id:<ID>"` to history stack for `[`/`]` navigation.
+5. Add `"id:"` to `META_TAGS` in `core/config.lua`.
+6. Add integration test in `tests/integration/search_spec.lua`.
+**Prerequisite:** Fix §1.2 (dict vs array) first — single-post responses are dicts.
+
+#### 2.2 Responsive UI & Scaling (incorporates former image rescaling)
+**Problem:** Terminal resizes (`VimResized`), `m` toggle, and layout state changes can break floating window layout and leave image placements at stale dimensions.
+**Required Changes:**
+1. Listen for `VimResized` event, debounce (100ms), recalculate layout via `calc_layout()`, reposition all windows via `apply_layout()`.
+2. On `m` toggle, `image.nudge_current_placement()` should dynamically scale the existing placement instead of recreating it.
+3. Clamp layout calculations to never exceed editor dimensions (currently, sub-80×20 terminals cause windows to overflow editor bounds).
+
+#### 2.3 Mouse Input & Metadata Window Navigation
+- **Disable mouse**: Set `vim.opt.mouse = ""` on `open()`, restore prior value on `teardown()`.
+- **Metadata focus**: Add `M` keymap from list to focus `UI.wins.meta` with `j`/`k` scrolling. `<Esc>` or `q` returns focus to post list without closing browser.
+
+#### 2.4 Window Cleanliness on Open
+- Ensure `open()` starts with clean buffer state. Close stale windows, clear visual artifacts.
+- Do not enforce opaque backgrounds or disable transparency — just ensure a clean canvas.
+- Overlaps with §1.3 (re-entrancy guard).
+
+---
+
+### Priority 3: Robustness & Safety
+
+Prevent crashes, leaks, and corruption under async/concurrent conditions.
+
+#### 3.1 Async Callbacks Execute After Teardown
+**Files:** `net/api.lua`, `tags/resolve.lua`, `net/download.lua`
+**Problem:** Network callbacks fire after `teardown()` has nil'd state and closed windows.
+**Fix:** Set `State.torn_down = true` in `teardown()`. Add early-return guard in every async callback.
+
+#### 3.2 `reset_ui()` Nils Timer References Without Stopping Libuv Handles
+**File:** `core/state.lua` L54–65
+**Problem:** Setting `UI.scroll_timer = nil` orphans active libuv timers. Also sets `UI.aug = nil` without deleting the augroup.
+**Fix:** `reset_ui()` should stop/close timers and delete augroup (same pattern as `teardown()`). Or only allow `teardown()` to perform cleanup.
+
+#### 3.3 Buffer Leaks on Teardown
+**File:** `ui/init.lua` L83–87
+**Problem:** `teardown()` closes windows but only deletes `bufs.img`. Buffers `hdiv`, `meta`, `ac` use `bufhidden = "hide"` and leak.
+**Fix:** Iterate all `UI.bufs` entries and `pcall(nvim_buf_delete, buf, { force = true })`.
+
+#### 3.4 `save_current()` Doesn't Ensure `save_dir` Exists
+**File:** `net/api.lua` L144
+**Fix:** Call `util.ensure(config.options.save_dir)` at start of `save_current()`.
+
+#### 3.5 Curl Process Handles Dropped — Unkillable on Teardown
+**File:** `net/download.lua` L28
+**Problem:** `vim.system({"curl", ...})` return value is discarded. Processes can't be killed on teardown.
+**Fix:** Store handles in `active_handles`. Kill all in `teardown()`.
+
+#### 3.6 Non-Atomic File Writes Risk Corruption on Crash
+**Files:** `tags/resolve.lua` L59–65, `tags/fetcher.lua` L127–132, L158–161
+**Fix:** Write to `path .. ".tmp"`, then `vim.fn.rename(tmp, path)` for atomic swap.
+
+#### 3.7 Snacks Cache Deletion Matches Substring — Deletes Wrong Posts
+**File:** `ui/image.lua` L58–63
+**Problem:** `f:find(tostring(post_id), 1, true)` is unanchored. Post ID `123` deletes files for posts `12345`, `9123`, etc. Also hardcodes `~/.cache/` instead of `vim.fn.stdpath("cache")`.
+**Fix:** Anchor the pattern match. Use `vim.fn.stdpath("cache") .. "/snacks/image/"`.
+
+#### 3.8 Config Validation — Types, Paths, and Input Guards
+**File:** `core/config.lua` L50–80
+**Problems:**
+- No `type(opts) == "table"` guard (crashes on string input).
+- Path options with `~` stored literally — creates literal `~` directory.
+- Non-numeric strings for clamped fields silently clamp to minimum.
+- `auth_qs()` doesn't `url_encode` credentials.
+**Fix:** Add type guard, `vim.fn.expand()` paths, only apply `tonumber` when result is non-nil.
+
+#### 3.9 `WinClosed` Only Watches `frame` — Child Window Closures Break Layout
+**File:** `ui/init.lua` L611–616
+**Problem:** If user closes `list` or `input` via `:q`, layout breaks but `teardown()` never fires.
+**Fix:** Listen for `WinClosed` on all managed windows, or use `BufWinLeave` on managed buffers.
+
+#### 3.10 Uncoordinated `vim.defer_fn` Timers in `resume_pending_saves`
+**File:** `net/download.lua` L155–179
+**Problem:** Staggered timers (`i * 200ms`) are untracked. If teardown occurs during window, timers spawn transfers post-teardown.
+**Fix:** Track deferred timers. Cancel in `teardown()`.
+
+---
+
+### Priority 4: Architecture & Code Quality
+
+Structural improvements that make the codebase maintainable and extensible.
+
+#### 4.1 Modularize `ui/init.lua` (~810 lines)
+Split the monolithic UI orchestrator into:
+- `ui/layout.lua` — `calc_layout()`, `apply_layout()`, floating window creation.
+- `ui/keymaps.lua` — Normal and insert mode buffer keybindings.
+- `ui/render.lua` — `render_list()`, `render_preview()`, `format_post_metadata()`, `load_and_render_image()`.
+- `ui/lifecycle.lua` — `open()`, `teardown()`, autocommand setup.
+Keep `ui/init.lua` as a thin facade re-exporting submodules.
+
+#### 4.2 Extract Magic Numbers into Named Constants
+~60+ hardcoded magic numbers across all files (debounce timers, z-indices, layout ratios, scoring weights, batch sizes, curl timeouts). Add `config.CONSTANTS` table and reference throughout.
+Key constants: `LAYOUT_SCALE = 0.95`, `MIN_WIDTH = 80`, `AC_DEBOUNCE_MS = 50`, `PREVIEW_CACHED_MS = 30`, `PREVIEW_REMOTE_MS = 150`, `CURL_TIMEOUT = 25`, `MIN_VALID_IMAGE_BYTES = 1024`, `TAG_BATCH_SIZE = 40`, `SCORE_EXACT = 35.0`, `SCORE_META = 1000.0`, `POP_MULTIPLIER = 10.0`.
+
+#### 4.3 Layer Violations & Module Coupling
+- **`scroll_meta` in `net/api.lua`**: Buffer/window cursor navigation belongs in `ui`. Move to `ui/render.lua`.
+- **`resolve.lua` → UI**: Directly requires `gelbooru.ui.autocomplete`, checks `State.input_focused`. Should accept `on_results` callback instead.
+- **`download.lua:prefetch_around` → UI**: Requires `gelbooru.ui.image`, manipulates `UI.prefetch_timers`. Should inject image target resolver.
+- **`history.restore_history` → UI + Net**: Core module requires `gelbooru.ui` and `gelbooru.net.api`. Should only restore state; caller handles rendering.
+
+#### 4.4 `reset_query_state` Is Incomplete
+**File:** `core/state.lua` L46–52
+Resets `posts`, `page`, `cur`, `loading`, `cur_id` but leaves `query`, `scroll_dir`, `autocomplete_filtered`, `autocomplete_cur`, `autocomplete_navigated`, `input_focused` unreset. Define a `State.defaults` table and reset via `vim.tbl_extend`.
+
+#### 4.5 `:GelbooruTags` Re-Entrancy Guard & Cancellation
+**File:** `tags/fetcher.lua`
+- Add module-level `is_running` flag. Guard entry of `update_tags()`.
+- Add `stop_update()` export or `:GelbooruTagsStop` command.
+- Workers should check `is_running` before retrying. See Invariant §8.
+
+#### 4.6 `load_tags` Re-Entrancy Guard
+**File:** `tags/db.lua` L161–215
+`load_tags()` spans 4 `vim.schedule` turns. Concurrent calls duplicate all tags in memory. Add `loading_in_progress` flag. See Invariant §8.
+
+#### 4.7 Encapsulate Mutable Module State
+**File:** `net/download.lua` — `active_downloads`, `active_handles`, `pending_resumes`, `interrupted_dests` directly mutated across modules. Replace with accessor functions.
+**File:** `core/config.lua` — `M.options`, `M.TAG_TYPES`, `M.META_TAGS` are writable globals.
+
+#### 4.8 Standardize Facade Imports
+Rationalize `net/init.lua` and `tags/init.lua` so callers consistently import submodules or facades, not both.
+
+---
+
+### Priority 5: Testing & Distribution
+
+#### 5.1 Fix Vacuous `download_spec.lua` Tests
+**File:** `tests/unit/download_spec.lua`
+Tests simulate callback logic locally instead of invoking real `download_async`/`resume_pending_saves`. Rewrite to call real functions with stubbed `vim.system`, asserting actual side effects.
+
+#### 5.2 Add Missing Test Coverage
+Priority order:
+1. `state_spec.lua` — test `reset_query_state`, `reset_ui`, `reset_tag_state`, singleton defaults.
+2. `log_spec.lua` — test level filtering, format string safety, I/O failure handling.
+3. Expand `util_spec.lua` — `load_auth`, `auth_qs`, `ensure`, `set_lines`, `float`, `keymap`.
+4. Expand `history_spec.lua` — `history_prev`, `history_next`, boundary conditions (empty stack, nil index).
+
+#### 5.3 Fix Test Infrastructure Issues
+- **Monkey-patch leaks**: `history_spec.lua` patches `package.loaded` without `after_each` cleanup. Use `finally()` blocks.
+- **Brittle timeouts**: Integration tests use `vim.wait(100, ...)`. Increase to 500ms+ or use polling predicates.
+- **Makefile silent pass**: Also grep for `Success:` as positive signal. If neither success nor failure found, report ERROR.
+
+#### 5.4 Test Suite Distribution
+Add `.gitattributes` with `export-ignore` for `tests/`, `Makefile`, `AGENTS.md` so end users don't download dev files via package managers.
+
+#### 5.5 Documentation Synchronization
+- Sync `readme.md` and `doc/gelbooru.txt` with current keymaps, config options, and commands.
+- Keep `AGENTS.md` up to date with architecture and invariants after each significant change.
+
+---
+
+### Priority 6: Minor Polish
+
+#### 6.1 `is_clean_tag` Rejects Legitimate Tags
+**File:** `tags/db.lua` L20–25
+Tags with dots (`.hack`, `c.c.`) and apostrophes (`don't`) are rejected. Relax regex or whitelist known patterns.
+
+#### 6.2 Unbounded History Growth
+**File:** `core/history.lua`
+`push_history` appends indefinitely. Add `MAX_HISTORY = 50`. When exceeded, `table.remove(State.history, 1)`.
+
+#### 6.3 Synchronous `touch` Blocks Main Thread
+**File:** `net/download.lua` L117
+Replace `vim.fn.system({ "touch", dest })` with async `vim.uv.fs_utime`.
+
+#### 6.4 `log.lua` Synchronous I/O & Unsafe Format
+**File:** `core/log.lua` L32–38
+Opens/writes/closes file on every call. `string.format(fmt, ...)` crashes on unmatched `%`. Wrap format in `pcall`, batch writes.
+
+#### 6.5 UTF-8 First-Character Bucket Indexing
+**Files:** `ui/autocomplete.lua` L27, `tags/db.lua` L57
+`str:sub(1,1)` on multibyte chars produces invalid byte. Use `vim.fn.strcharpart(str, 0, 1)`.
+
+#### 6.6 Autocomplete Cursor Desync on Zero Selection
+**File:** `ui/autocomplete.lua` L171
+When `State.autocomplete_cur == 0`, forces cursor to row 1, highlighting the first item even though nothing is selected.
