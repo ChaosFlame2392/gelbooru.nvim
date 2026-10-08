@@ -553,34 +553,58 @@ Invalid 'win': Expected Lua number
 
 ### Priority 2: UX Features & Visual Polish
 
-User-facing improvements that enhance the browsing experience.
+User-facing improvements that enhance the browsing experience, prioritized by user impact.
 
-#### 2.1 Direct Post ID Search
-**Context:** Users often know the exact Gelbooru post ID (from a URL, shared link, or previous session) and want to navigate directly without a tag search.
+#### 2.1 Responsive UI & Scaling (Highest UX Priority)
+**Problem:** Terminal resizes (`VimResized`), `m` metadata toggle, and layout changes break floating window layout and leave snacks image placements at stale or desynchronized dimensions. Clamping layout to minimum 80×20 causes windows to overflow editor bounds on smaller displays.
 **Required Changes:**
-1. In `net/api.lua:execute_search()`, detect bare integers or `id:<number>` pattern. Short-circuit normal tag query.
-2. Issue single-post API call: `json=1&id=<ID>`. Insert post into `State.posts`, set `State.cur = 1`, render.
-3. Status: `"Post #<ID>"` while fetching. `"No post found for ID <ID>"` on empty response.
-4. Push `"id:<ID>"` to history stack for `[`/`]` navigation.
-5. Add `"id:"` to `META_TAGS` in `core/config.lua`.
-6. Add integration test in `tests/integration/search_spec.lua`.
-**Prerequisite:** Fix §1.2 (dict vs array) first — single-post responses are dicts.
+1. Listen for `VimResized` autocommand event, debounce (100ms), recalculate layout via `calc_layout()`, and dynamically reposition/resize all floating windows via `apply_layout()`.
+2. On `m` metadata toggle, ensure `image.nudge_current_placement()` dynamically rescales the existing placement smoothly without recreation or visual tearing.
+3. Clamp layout calculations to never exceed terminal dimensions (`vim.o.columns` / `vim.o.lines`) to prevent window placement crashes on compact terminals.
 
-#### 2.2 Responsive UI & Scaling (incorporates former image rescaling)
-**Problem:** Terminal resizes (`VimResized`), `m` toggle, and layout state changes can break floating window layout and leave image placements at stale dimensions.
+#### 2.2 Stale Image Preview Persistence on History Navigation and New Searches
+**Files:** `core/history.lua` (`restore_history`), `net/api.lua` (`execute_search`), `ui/init.lua`, `ui/image.lua`
+**Bug/Screencap:** When switching history (`[` / `]`) or submitting a new search, the image from the previous post remains visible on the canvas until the new image finishes downloading and rendering (showing "convert loading..." over the old image). If the restored history entry or new query has 0 posts or fails to load, the old image placement persists permanently on screen.
+**Fix:**
+- When navigating history (`history_prev` / `history_next` / `restore_history`) or initiating a new search (`execute_search`):
+  1. Immediately close the active placement via `image.close_current_placement()`.
+  2. Clear the image display buffer: `util.set_lines(UI.bufs.img, { "  Loading..." })` (or blank if 0 posts).
+  3. Clear the metadata display buffer: `util.set_lines(UI.bufs.meta, {})`.
+- If `#State.posts == 0`, ensure canvas displays `"  No posts found"` without any residual image placement.
+
+#### 2.3 Local Folder Browser Mode (`:GelbooruLocal [path]`)
+**Context:** Users want to browse locally downloaded/saved images (e.g. from `save_dir` or custom folder) inside Neovim, but still see live booru metadata (artists, characters, series, tags, rating, score) in the inspector window.
 **Required Changes:**
-1. Listen for `VimResized` event, debounce (100ms), recalculate layout via `calc_layout()`, reposition all windows via `apply_layout()`.
-2. On `m` toggle, `image.nudge_current_placement()` should dynamically scale the existing placement instead of recreating it.
-3. Clamp layout calculations to never exceed editor dimensions (currently, sub-80×20 terminals cause windows to overflow editor bounds).
+1. **Command / Entry point:** Add `:GelbooruLocal [dir]` (defaulting to `config.options.save_dir`).
+2. **Directory scan:** Scan directory for local image files (`.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`).
+3. **Local image rendering:** Load local file path directly into the preview canvas via `image.render_image(win, local_path)` without remote download.
+4. **Metadata resolution by ID:** Extract post ID from filename (e.g. `11802758.jpg` -> ID `11802758`). In background, query Gelbooru API by ID (`index.php?page=dapi&s=post&q=index&json=1&id=<ID>`) and populate `UI.bufs.meta` with live artist, character, series, and general tag badges.
+5. **Shared infrastructure:** Shares the single-post ID fetch and metadata formatting pipeline with §2.4.
 
-#### 2.3 Mouse Input & Metadata Window Navigation
-- **Disable mouse**: Set `vim.opt.mouse = ""` on `open()`, restore prior value on `teardown()`.
-- **Metadata focus**: Add `M` keymap from list to focus `UI.wins.meta` with `j`/`k` scrolling. `<Esc>` or `q` returns focus to post list without closing browser.
+#### 2.4 Autocomplete for `id:` Tag & Search Discoverability
+**Context:** Direct post ID searching already works natively through Gelbooru query syntax (e.g. typing `id:11802758` returns the post). However, `id:` is not in `META_TAGS`, making it undiscoverable.
+**Required Changes:**
+1. Add `"id:"` to `META_TAGS` in `core/config.lua` so typing `id` suggests `id:` in autocomplete dropdown with `[Meta]` badge.
+2. (Optional UX convenience): In `net/api.lua:execute_search()`, if the user enters a bare numeric query (e.g. `"11802758"`), automatically prepend `"id:"` before querying.
 
-#### 2.4 Window Cleanliness on Open
+#### 2.5 Mouse Input & Metadata Window Navigation
+- **Disable mouse**: Set `vim.opt.mouse = ""` on `open()`, restore prior user value on `teardown()`. Prevents accidental terminal clicks from disrupting floating window focus.
+- **Metadata focus**: Add `M` keymap from post list to focus `UI.wins.meta` with standard `j`/`k` scrolling. `<Esc>` or `q` returns focus directly to the post list without closing the browser.
+
+#### 2.6 Window Cleanliness on Open
 - Ensure `open()` starts with clean buffer state. Close stale windows, clear visual artifacts.
 - Do not enforce opaque backgrounds or disable transparency — just ensure a clean canvas.
-- Overlaps with §1.3 (re-entrancy guard).
+
+#### 2.7 Disable External Completion & LSP Popups in Search Input Bar
+**Files:** `ui/init.lua` (`UI.bufs.input` setup)
+**Problem/Screencap:** When typing in the search bar, external autocompletion plugins (`nvim-cmp`, `blink.cmp`, CoC, snippets, or native `completeopt`) pop open their own menus (e.g. date snippets, buffer words), obscuring the query and clashing with Gelbooru's dedicated tag autocomplete dropdown (`UI.wins.ac`).
+**Required Changes:**
+- In `ui/init.lua`, immediately upon creating `UI.bufs.input`:
+  1. Disable `nvim-cmp`: `pcall(function() require("cmp").setup.buffer({ enabled = false }) end)` and `vim.b[UI.bufs.input].cmp_enabled = false`.
+  2. Disable `blink.cmp`: `vim.b[UI.bufs.input].completion = false` and `vim.b[UI.bufs.input].blink_cmp_enabled = false`.
+  3. Clear buffer completion functions: `vim.bo[UI.bufs.input].omnifunc = ""`, `vim.bo[UI.bufs.input].completefunc = ""`.
+  4. In `UI.wins.input` window options: disable native completion popups.
+  5. Disable AI/ghost text plugins: `vim.b[UI.bufs.input].copilot_disabled = true`.
 
 ---
 
