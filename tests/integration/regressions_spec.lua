@@ -621,5 +621,212 @@ describe("Regression Tests for UI & Search bugs", function()
 
       ui.teardown()
     end)
+
+    it("verifies InsertLeave on UI.bufs.input exits search mode, restores list focus, and hides UI.wins.ac", function()
+      ui.open()
+      assert.is_true(state.State.input_focused)
+      assert.are.equal(state.UI.wins.input, vim.api.nvim_get_current_win())
+      assert.is_false(vim.api.nvim_win_get_config(state.UI.wins.ac).hide)
+
+      -- Fire InsertLeave autocommand on UI.bufs.input
+      vim.api.nvim_exec_autocmds("InsertLeave", { buffer = state.UI.bufs.input })
+
+      assert.is_false(state.State.input_focused, "State.input_focused was not reset on InsertLeave")
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "Focus was not restored to list on InsertLeave")
+      assert.is_true(vim.api.nvim_win_get_config(state.UI.wins.ac).hide, "UI.wins.ac was not hidden on InsertLeave")
+
+      -- Re-enter search and fire InsertLeave again
+      ui.enter_search()
+      assert.is_true(state.State.input_focused)
+      assert.are.equal(state.UI.wins.input, vim.api.nvim_get_current_win())
+      assert.is_false(vim.api.nvim_win_get_config(state.UI.wins.ac).hide)
+
+      vim.api.nvim_exec_autocmds("InsertLeave", { buffer = state.UI.bufs.input })
+      assert.is_false(state.State.input_focused)
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win())
+      assert.is_true(vim.api.nvim_win_get_config(state.UI.wins.ac).hide)
+
+      ui.teardown()
+    end)
+
+    it("verifies input normal mode mappings (q, j, k, <Esc>, i)", function()
+      ui.open()
+      local input_buf = state.UI.bufs.input
+      local nmaps = vim.api.nvim_buf_get_keymap(input_buf, "n")
+      local map_by_lhs = {}
+      for _, km in ipairs(nmaps) do
+        map_by_lhs[km.lhs] = km.callback
+      end
+
+      assert.is_not_nil(map_by_lhs["q"], "q keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["j"], "j keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["k"], "k keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["<Esc>"], "<Esc> keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["i"], "i keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["I"], "I keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["a"], "a keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["A"], "A keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["s"], "s keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["S"], "S keymap missing on input buffer in normal mode")
+
+      -- Test each of q, j, k, <Esc> exits search mode and restores list focus
+      for _, key in ipairs({ "q", "j", "k", "<Esc>" }) do
+        ui.enter_search()
+        assert.is_true(state.State.input_focused)
+        assert.are.equal(state.UI.wins.input, vim.api.nvim_get_current_win())
+
+        map_by_lhs[key]()
+
+        assert.is_false(state.State.input_focused, string.format("input was still focused after %s", key))
+        assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), string.format("list was not focused after %s", key))
+        assert.is_true(vim.api.nvim_win_get_config(state.UI.wins.ac).hide, string.format("UI.wins.ac was not hidden after %s", key))
+      end
+
+      -- Test 'i' in input normal mode re-enters search mode
+      map_by_lhs["q"]()
+      assert.is_false(state.State.input_focused)
+      vim.api.nvim_set_current_win(state.UI.wins.input)
+
+      map_by_lhs["i"]()
+      assert.is_true(state.State.input_focused, "i did not re-enter search mode")
+      assert.are.equal(state.UI.wins.input, vim.api.nvim_get_current_win())
+      assert.is_false(vim.api.nvim_win_get_config(state.UI.wins.ac).hide)
+
+      ui.teardown()
+    end)
+
+    it("verifies M hotkey from list focuses meta (even when show_meta was false), and m/q/<Esc> returns to list", function()
+      ui.open()
+      assert.is_true(state.State.show_meta)
+
+      local list_maps = vim.api.nvim_buf_get_keymap(state.UI.bufs.list, "n")
+      local m_lower_fn, m_upper_fn
+      for _, km in ipairs(list_maps) do
+        if km.lhs == "m" then m_lower_fn = km.callback end
+        if km.lhs == "M" then m_upper_fn = km.callback end
+      end
+      assert.is_not_nil(m_lower_fn, "m keymap not found on list buffer")
+      assert.is_not_nil(m_upper_fn, "M keymap not found on list buffer")
+
+      -- Toggle meta off so show_meta is false and meta window is hidden
+      m_lower_fn()
+      assert.is_false(state.State.show_meta, "m did not toggle State.show_meta to false")
+      assert.is_true(state.UI.wins.meta == nil or not vim.api.nvim_win_is_valid(state.UI.wins.meta), "meta win was not hidden")
+
+      vim.api.nvim_set_current_win(state.UI.wins.list)
+
+      -- Press M from list when show_meta was false
+      m_upper_fn()
+
+      assert.is_true(state.State.show_meta, "State.show_meta was not toggled to true by M")
+      assert.is_not_nil(state.UI.wins.meta, "UI.wins.meta was not created by M")
+      assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.meta), "UI.wins.meta is not valid")
+      assert.are.equal(state.UI.wins.meta, vim.api.nvim_get_current_win(), "meta window was not focused by M")
+      assert.is_true(vim.wo[state.UI.wins.meta].cursorline, "cursorline not enabled on meta window")
+
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      local has_hint = false
+      for _, line in ipairs(status_lines) do
+        if line:find("Viewing Metadata — %[q/Esc%] back to posts, %[/ or i%] search") then
+          has_hint = true
+          break
+        end
+      end
+      assert.is_true(has_hint, "status hint not displayed when focusing meta")
+
+      local meta_maps = vim.api.nvim_buf_get_keymap(state.UI.bufs.meta, "n")
+      local mm_by_lhs = {}
+      for _, km in ipairs(meta_maps) do
+        mm_by_lhs[km.lhs] = km.callback
+      end
+      assert.is_not_nil(mm_by_lhs["q"], "q keymap missing on meta buffer")
+      assert.is_not_nil(mm_by_lhs["<Esc>"], "<Esc> keymap missing on meta buffer")
+      assert.is_not_nil(mm_by_lhs["M"], "M keymap missing on meta buffer")
+      assert.is_not_nil(mm_by_lhs["m"], "m keymap missing on meta buffer")
+      assert.is_not_nil(mm_by_lhs["o"], "o keymap missing on meta buffer")
+      assert.is_not_nil(mm_by_lhs["O"], "O keymap missing on meta buffer")
+      assert.is_not_nil(mm_by_lhs["<CR>"], "<CR> keymap missing on meta buffer")
+
+      -- Test 'q' returns to list
+      mm_by_lhs["q"]()
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "q did not return focus to list")
+
+      -- Refocus meta and test '<Esc>' returns to list
+      m_upper_fn()
+      assert.are.equal(state.UI.wins.meta, vim.api.nvim_get_current_win())
+      mm_by_lhs["<Esc>"]()
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "<Esc> did not return focus to list")
+
+      -- Refocus meta and test 'M' returns to list
+      m_upper_fn()
+      assert.are.equal(state.UI.wins.meta, vim.api.nvim_get_current_win())
+      mm_by_lhs["M"]()
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "M did not return focus to list")
+
+      -- Refocus meta and test 'm' returns to list and hides meta
+      m_upper_fn()
+      assert.are.equal(state.UI.wins.meta, vim.api.nvim_get_current_win())
+      mm_by_lhs["m"]()
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "m did not return focus to list")
+      assert.is_false(state.State.show_meta, "m did not set State.show_meta to false")
+      assert.is_true(state.UI.wins.meta == nil or not vim.api.nvim_win_is_valid(state.UI.wins.meta), "meta window was not hidden by m")
+
+      ui.teardown()
+    end)
+
+    it("verifies defensive mappings on non-interactive buffers (frame, div, vdiv, hdiv, img, status, ac)", function()
+      state.State.show_meta = true
+      ui.open()
+
+      local non_interactive_bufs = {
+        frame = state.UI.bufs.frame,
+        div = state.UI.bufs.div,
+        vdiv = state.UI.bufs.vdiv,
+        hdiv = state.UI.bufs.hdiv,
+        img = state.UI.bufs.img,
+        status = state.UI.bufs.status,
+        ac = state.UI.bufs.ac,
+      }
+
+      local search_keys = { "i", "I", "a", "A", "s", "S", "/" }
+      local list_keys = { "q", "<Esc>" }
+
+      for name, buf in pairs(non_interactive_bufs) do
+        assert.is_not_nil(buf, "buffer " .. name .. " is nil")
+        assert.is_true(vim.api.nvim_buf_is_valid(buf), "buffer " .. name .. " is not valid")
+
+        local maps = vim.api.nvim_buf_get_keymap(buf, "n")
+        local map_by_lhs = {}
+        for _, km in ipairs(maps) do
+          map_by_lhs[km.lhs] = km.callback
+        end
+
+        for _, k in ipairs(search_keys) do
+          assert.is_not_nil(map_by_lhs[k], string.format("search key %s not mapped on %s buffer", k, name))
+        end
+        for _, k in ipairs(list_keys) do
+          assert.is_not_nil(map_by_lhs[k], string.format("list return key %s not mapped on %s buffer", k, name))
+        end
+
+        -- Test invoking search mapping from non-interactive buffer
+        map_by_lhs["q"]()
+        map_by_lhs["/"]()
+        assert.is_true(state.State.input_focused, string.format("/ on %s did not enter search", name))
+        assert.are.equal(state.UI.wins.input, vim.api.nvim_get_current_win())
+
+        -- Test invoking return to list mapping from non-interactive buffer
+        map_by_lhs["q"]()
+        assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), string.format("q on %s did not return to list", name))
+        assert.is_false(state.State.input_focused)
+
+        map_by_lhs["i"]()
+        assert.is_true(state.State.input_focused)
+        map_by_lhs["<Esc>"]()
+        assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), string.format("<Esc> on %s did not return to list", name))
+        assert.is_false(state.State.input_focused)
+      end
+
+      ui.teardown()
+    end)
   end)
 end)

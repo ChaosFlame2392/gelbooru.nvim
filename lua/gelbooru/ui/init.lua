@@ -257,6 +257,7 @@ function M.apply_layout(l)
   if l.meta then
     if not UI.wins.meta or not vim.api.nvim_win_is_valid(UI.wins.meta) then
       UI.wins.meta = util.float(UI.bufs.meta, l.meta.row, l.meta.col, l.meta.width, l.meta.height, { zindex = 51 })
+      vim.wo[UI.wins.meta].cursorline = true
     else
       upd(UI.wins.meta, l.meta)
     end
@@ -619,6 +620,7 @@ function M.open(initial_tags)
   end
   if l.meta then
     UI.wins.meta = util.float(UI.bufs.meta, l.meta.row, l.meta.col, l.meta.width, l.meta.height, { zindex = 51 })
+    vim.wo[UI.wins.meta].cursorline = true
   end
   UI.wins.status = util.float(UI.bufs.status, l.status.row, l.status.col, l.status.width, l.status.height, { zindex = 51, focusable = false })
 
@@ -647,6 +649,28 @@ function M.open(initial_tags)
             vim.schedule(handle_resize)
           end
         )
+      end
+    end,
+  })
+
+  local function exit_input()
+    State.input_focused = false
+    vim.cmd("stopinsert")
+    if UI.wins.ac and vim.api.nvim_win_is_valid(UI.wins.ac) then
+      pcall(vim.api.nvim_win_set_config, UI.wins.ac, { hide = true })
+    end
+    if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+      pcall(vim.api.nvim_set_current_win, UI.wins.list)
+    end
+    handle_resize()
+  end
+
+  vim.api.nvim_create_autocmd("InsertLeave", {
+    group = UI.aug,
+    buffer = UI.bufs.input,
+    callback = function()
+      if not State.torn_down and State.input_focused then
+        exit_input()
       end
     end,
   })
@@ -763,8 +787,14 @@ function M.open(initial_tags)
     handle_resize()
   end)
   lm("M", function()
-    if State.show_meta and UI.wins.meta and vim.api.nvim_win_is_valid(UI.wins.meta) then
+    if not State.show_meta or not (UI.wins.meta and vim.api.nvim_win_is_valid(UI.wins.meta)) then
+      State.show_meta = true
+      handle_resize()
+    end
+    if UI.wins.meta and vim.api.nvim_win_is_valid(UI.wins.meta) then
+      vim.wo[UI.wins.meta].cursorline = true
       pcall(vim.api.nvim_set_current_win, UI.wins.meta)
+      M.set_status("Viewing Metadata — [q/Esc] back to posts, [/ or i] search")
     end
   end)
 
@@ -806,19 +836,50 @@ function M.open(initial_tags)
     mm(k, M.enter_search)
   end
   local function return_to_list()
+    if State.input_focused then
+      State.input_focused = false
+      vim.cmd("stopinsert")
+      if UI.wins.ac and vim.api.nvim_win_is_valid(UI.wins.ac) then
+        pcall(vim.api.nvim_win_set_config, UI.wins.ac, { hide = true })
+      end
+    end
     if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
       pcall(vim.api.nvim_set_current_win, UI.wins.list)
+      M.set_status()
     end
   end
   mm("q", return_to_list)
   mm("<Esc>", return_to_list)
-  mm("j", function()
-    api.scroll_meta(1)
-  end)
-  mm("k", function()
-    api.scroll_meta(-1)
-  end)
   mm("M", return_to_list)
+  mm("m", function()
+    State.show_meta = false
+    return_to_list()
+    handle_resize()
+  end)
+  mm("o", function()
+    local p = State.posts[State.cur]
+    if p and p.file_url then
+      open_url(p.file_url)
+    end
+  end)
+  mm("O", function()
+    local p = State.posts[State.cur]
+    if p and p.id then
+      open_url(string.format("https://gelbooru.com/index.php?page=post&s=view&id=%s", p.id))
+    end
+  end)
+  mm("<CR>", api.save_current)
+
+  -- Defensive keymaps on non-interactive buffers in case mouse/focus lands in them
+  for _, buf in ipairs({ UI.bufs.frame, UI.bufs.div, UI.bufs.vdiv, UI.bufs.hdiv, UI.bufs.img, UI.bufs.status, UI.bufs.ac }) do
+    if buf and vim.api.nvim_buf_is_valid(buf) then
+      for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
+        util.keymap(buf, "n", k, M.enter_search)
+      end
+      util.keymap(buf, "n", "q", return_to_list)
+      util.keymap(buf, "n", "<Esc>", return_to_list)
+    end
+  end
 
   -- Keymaps for Input
   local function im_n(key, fn)
@@ -826,13 +887,6 @@ function M.open(initial_tags)
   end
   local function im_i(key, fn)
     util.keymap(UI.bufs.input, "i", key, fn)
-  end
-
-  local function exit_input()
-    State.input_focused = false
-    vim.cmd("stopinsert")
-    pcall(vim.api.nvim_set_current_win, UI.wins.list)
-    handle_resize()
   end
 
   local function submit_input()
@@ -844,8 +898,20 @@ function M.open(initial_tags)
 
   im_n("<Esc>", exit_input)
   im_i("<Esc>", exit_input)
+  im_n("q", exit_input)
+  im_n("j", exit_input)
+  im_n("k", exit_input)
   im_n("<CR>", submit_input)
   im_i("<CR>", submit_input)
+
+  for _, k in ipairs({ "i", "I", "a", "A", "s", "S" }) do
+    im_n(k, function()
+      vim.cmd("startinsert!")
+      State.input_focused = true
+      autocomplete.update_autocomplete()
+      handle_resize()
+    end)
+  end
 
   local function nav_down()
     State.autocomplete_navigated = true
