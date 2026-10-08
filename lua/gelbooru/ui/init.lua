@@ -19,6 +19,7 @@ local _layout_show_meta = nil
 
 local function invalidate_layout()
   _layout_cache = nil
+  _layout_show_meta = nil
 end
 
 function M.teardown()
@@ -85,7 +86,14 @@ function M.teardown()
       pcall(vim.api.nvim_win_close, w, true)
     end
   end
+  for _, k in ipairs({ "hdiv", "meta", "ac" }) do
+    local b = UI.bufs[k]
+    if b and vim.api.nvim_buf_is_valid(b) then
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
+    end
+  end
   invalidate_layout()
+  state.reset_query_state()
   state.reset_ui()
   state.reset_tag_state()
   -- Two GC passes: first collects the tag heap, second handles resurrected objects.
@@ -190,7 +198,7 @@ end
 function M.apply_layout(l)
   local UI = state.UI
   local State = state.State
-  if not vim.api.nvim_win_is_valid(UI.wins.frame) then
+  if not UI.wins.frame or not vim.api.nvim_win_is_valid(UI.wins.frame) then
     return
   end
 
@@ -238,11 +246,11 @@ function M.apply_layout(l)
   draw_dividers(l)
 
   if State.input_focused then
-    if vim.api.nvim_win_is_valid(UI.wins.ac) then
+    if UI.wins.ac and vim.api.nvim_win_is_valid(UI.wins.ac) then
       vim.api.nvim_win_set_config(UI.wins.ac, { hide = false })
     end
   else
-    if vim.api.nvim_win_is_valid(UI.wins.ac) then
+    if UI.wins.ac and vim.api.nvim_win_is_valid(UI.wins.ac) then
       vim.api.nvim_win_set_config(UI.wins.ac, { hide = true })
     end
   end
@@ -283,7 +291,7 @@ function M.render_list()
     lines = { State.loading and "  Fetching…" or "  No results" }
   end
   util.set_lines(UI.bufs.list, lines)
-  if vim.api.nvim_win_is_valid(UI.wins.list) then
+  if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
     pcall(vim.api.nvim_win_set_cursor, UI.wins.list, { math.max(1, State.cur), 0 })
   end
 end
@@ -301,7 +309,7 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
   local preview_url = urls[url_idx]
 
   local function fail_preview(msg)
-    if not vim.api.nvim_win_is_valid(UI.wins.img) then
+    if not UI.wins.img or not vim.api.nvim_win_is_valid(UI.wins.img) then
       return
     end
     if not State.posts[State.cur] or State.posts[State.cur].id ~= p.id then
@@ -314,7 +322,7 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
   end
 
   local function do_render()
-    if not vim.api.nvim_win_is_valid(UI.wins.img) then
+    if not UI.wins.img or not vim.api.nvim_win_is_valid(UI.wins.img) then
       log("DEBUG", "RENDER", "do_render aborted: img win invalid (post %s)", tostring(p.id))
       return
     end
@@ -445,7 +453,7 @@ function M.render_preview(force_download)
   end
   util.set_lines(UI.bufs.meta, meta)
 
-  if vim.api.nvim_win_is_valid(UI.wins.meta) then
+  if UI.wins.meta and vim.api.nvim_win_is_valid(UI.wins.meta) then
     pcall(vim.api.nvim_win_set_cursor, UI.wins.meta, { 1, 0 })
   end
 
@@ -462,7 +470,7 @@ function M.render_preview(force_download)
   local is_cached = not force_download and dest and vim.fn.filereadable(dest) == 1 and not download.active_downloads[dest]
 
   if not is_cached then
-    if vim.api.nvim_win_is_valid(UI.wins.img) and vim.api.nvim_buf_is_valid(UI.bufs.img) then
+    if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img) then
       pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
     end
     M.set_status("Loading preview…")
@@ -501,8 +509,13 @@ function M.render_preview(force_download)
 end
 
 function M.open(initial_tags)
-  local State = state.State
   local UI = state.UI
+  if UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame) then
+    return
+  end
+  state.reset_query_state()
+
+  local State = state.State
   local api = require("gelbooru.net.api")
 
   util.ensure(config.options.cache_dir)
@@ -656,16 +669,25 @@ function M.open(initial_tags)
     M.render_list()
     M.render_preview(false)
   end)
+  local function open_url(url)
+    if vim.ui and vim.ui.open then
+      pcall(vim.ui.open, url)
+    else
+      local cmd = vim.fn.has("mac") == 1 and "open" or (vim.fn.has("win32") == 1 and "start" or "xdg-open")
+      pcall(vim.fn.system, { cmd, url })
+    end
+  end
+
   lm("o", function()
     local p = State.posts[State.cur]
     if p and p.file_url then
-      vim.fn.system({ "open", p.file_url })
+      open_url(p.file_url)
     end
   end)
   lm("O", function()
     local p = State.posts[State.cur]
     if p and p.id then
-      vim.fn.system({ "open", string.format("https://gelbooru.com/index.php?page=post&s=view&id=%s", p.id) })
+      open_url(string.format("https://gelbooru.com/index.php?page=post&s=view&id=%s", p.id))
     end
   end)
   lm("m", function()

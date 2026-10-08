@@ -3,6 +3,7 @@
 -- 1. Blank list buffer on re-submitting the same search query
 -- 2. Image placement failure on 'm' toggle
 -- 3. Asynchronous tag resolution preview races (cur_id deduplication deadlock)
+-- 4. Close-reopen lifecycle, buffer cleanup, and re-entrancy
 
 local harness = require("tests.integration.helpers.harness")
 local ui = require("gelbooru.ui")
@@ -146,5 +147,69 @@ describe("Regression Tests for UI & Search bugs", function()
       if l:find("Artists : kekeflipnote") then has_artist_after = true end
     end
     assert.is_true(has_artist_after, "Metadata panel was not updated when artist was dynamically discovered!")
+  end)
+
+  -- Regression: close-reopen lifecycle
+  -- Verifies that opening, closing with teardown(), and opening again succeeds
+  -- without errors, cleans up hidden buffers (hdiv, meta, ac), resets query state,
+  -- and respects the re-entrancy guard while open.
+  it("verifies close-reopen lifecycle: teardown cleans up buffers and state, and reopening succeeds cleanly", function()
+    ui.open()
+    api.execute_search("hatsune_miku")
+
+    vim.wait(1000, function()
+      return #state.State.posts > 0
+    end, 10)
+
+    local frame_win = state.UI.wins.frame
+    local meta_buf = state.UI.bufs.meta
+    local ac_buf = state.UI.bufs.ac
+    local hdiv_buf = state.UI.bufs.hdiv
+
+    assert.is_true(vim.api.nvim_win_is_valid(frame_win))
+    assert.is_true(vim.api.nvim_buf_is_valid(meta_buf))
+    assert.is_true(vim.api.nvim_buf_is_valid(ac_buf))
+    if hdiv_buf then
+      assert.is_true(vim.api.nvim_buf_is_valid(hdiv_buf))
+    end
+
+    -- Re-entrancy guard test: calling open while already open is a no-op
+    ui.open()
+    assert.are.equal(frame_win, state.UI.wins.frame)
+
+    -- Close UI via teardown
+    ui.teardown()
+
+    -- Windows must be closed and hidden buffers deleted
+    assert.is_false(vim.api.nvim_win_is_valid(frame_win))
+    assert.is_false(vim.api.nvim_buf_is_valid(meta_buf))
+    assert.is_false(vim.api.nvim_buf_is_valid(ac_buf))
+    if hdiv_buf then
+      assert.is_false(vim.api.nvim_buf_is_valid(hdiv_buf))
+    end
+
+    -- Query state must be reset
+    assert.are.equal(0, #state.State.posts)
+    assert.are.equal(0, state.State.page)
+    assert.are.equal(1, state.State.cur)
+    assert.is_nil(state.State.cur_id)
+    assert.is_false(state.State.loading)
+
+    -- Reopen UI cleanly
+    ui.open()
+
+    assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.frame))
+    assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.list))
+    assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.img))
+    assert.is_true(vim.api.nvim_buf_is_valid(state.UI.bufs.meta))
+    assert.is_true(vim.api.nvim_buf_is_valid(state.UI.bufs.ac))
+
+    assert.are.equal(0, #state.State.posts)
+    assert.are.equal(1, state.State.cur)
+    assert.are.equal(0, state.State.page)
+    assert.is_nil(state.State.cur_id)
+    assert.is_false(state.State.loading)
+
+    ui.teardown()
   end)
 end)
