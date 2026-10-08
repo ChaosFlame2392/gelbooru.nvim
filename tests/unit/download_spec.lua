@@ -185,3 +185,217 @@ describe("download: resume flag behaviour", function()
     assert.are.equal(0, vim.fn.filereadable(part))
   end)
 end)
+
+describe("download: curl arguments and --fail flag", function()
+  local orig_system
+
+  before_each(function()
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.interrupted_dests = {}
+    download.pending_resumes = {}
+    orig_system = vim.system
+  end)
+
+  after_each(function()
+    vim.system = orig_system
+  end)
+
+  it("includes --fail in download_async curl command", function()
+    local dest = tmp()
+    local captured_cmd = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      captured_cmd = cmd
+      return { kill = function() end }
+    end
+
+    download.download_async("http://example.com/image.jpg", dest, function() end)
+
+    assert.is_not_nil(captured_cmd)
+    assert.is_true(vim.tbl_contains(captured_cmd, "--fail"))
+  end)
+
+  it("includes --fail in curl_async curl command", function()
+    local captured_cmd = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      captured_cmd = cmd
+      return { kill = function() end }
+    end
+
+    download.curl_async("http://example.com/api", function() end)
+
+    assert.is_not_nil(captured_cmd)
+    assert.is_true(vim.tbl_contains(captured_cmd, "--fail"))
+  end)
+
+  it("deletes .part when download_async curl exits non-zero (HTTP error)", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local callback_res = nil
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      -- Write a fake partial file as if curl wrote something before 404
+      local f = io.open(part, "wb")
+      f:write("404 Not Found")
+      f:close()
+      return { kill = function() end }
+    end
+
+    download.download_async("http://example.com/404.jpg", dest, function(ok)
+      callback_res = ok
+    end)
+
+    assert.is_not_nil(exit_fn)
+    -- Simulate curl exiting with code 22 (HTTP error)
+    exit_fn({ code = 22 })
+    vim.wait(200, function() return callback_res ~= nil end)
+
+    assert.is_false(callback_res)
+    assert.are.equal(0, vim.fn.filereadable(part))
+  end)
+
+  it("preserves .part when download_async curl exits non-zero and resume=true", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local callback_res = nil
+    local exit_fn = nil
+
+    -- Seed an existing .part > 1024 bytes so resume activates
+    local f = io.open(part, "wb")
+    f:write(string.rep("x", 2048))
+    f:close()
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      return { kill = function() end }
+    end
+
+    download.download_async("http://example.com/interrupted.jpg", dest, function(ok)
+      callback_res = ok
+    end, { resume = true })
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 22 })
+    vim.wait(200, function() return callback_res ~= nil end)
+
+    assert.is_false(callback_res)
+    assert.are.equal(1, vim.fn.filereadable(part))
+    vim.fn.delete(part)
+  end)
+end)
+
+describe("download: process tracking and abort_all", function()
+  local orig_system
+
+  before_each(function()
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.interrupted_dests = {}
+    download.pending_resumes = {}
+    orig_system = vim.system
+  end)
+
+  after_each(function()
+    vim.system = orig_system
+  end)
+
+  it("tracks child process handle in download_async and removes it when finished", function()
+    local dest = tmp()
+    local exit_fn = nil
+    local mock_handle = { kill = function() end }
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      return mock_handle
+    end
+
+    local handle = download.download_async("http://example.com/test.jpg", dest, function() end)
+
+    assert.are.equal(mock_handle, handle)
+    assert.are.equal(mock_handle, download.active_handles[dest])
+
+    -- Simulate process exit
+    exit_fn({ code = 1 })
+    local done = false
+    vim.schedule(function() done = true end)
+    vim.wait(200, function() return done end)
+
+    assert.is_nil(download.active_handles[dest])
+  end)
+
+  it("tracks child process handle in curl_async and removes it when finished", function()
+    local exit_fn = nil
+    local mock_handle = { kill = function() end }
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      return mock_handle
+    end
+
+    local handle = download.curl_async("http://example.com/test", function() end)
+
+    assert.are.equal(mock_handle, handle)
+    assert.are.equal(mock_handle, download.active_handles[mock_handle])
+
+    -- Simulate process exit
+    exit_fn({ code = 0, stdout = "ok" })
+    local done = false
+    vim.schedule(function() done = true end)
+    vim.wait(200, function() return done end)
+
+    assert.is_nil(download.active_handles[mock_handle])
+  end)
+
+  it("abort_all kills all active handles, flags interrupted_dests, and empties table", function()
+    local killed = {}
+    local handle1 = {
+      kill = function(self, sig)
+        table.insert(killed, { id = 1, sig = sig })
+      end,
+    }
+    local handle2 = {
+      kill = function(self, sig)
+        table.insert(killed, { id = 2, sig = sig })
+      end,
+    }
+
+    local dest1 = "/fake/path/test.jpg"
+    download.active_handles[dest1] = handle1
+    download.active_handles[handle2] = handle2
+
+    download.abort_all()
+
+    assert.are.equal(2, #killed)
+    assert.are.equal(9, killed[1].sig)
+    assert.are.equal(9, killed[2].sig)
+    assert.is_true(download.interrupted_dests[dest1])
+    assert.are.equal(0, vim.tbl_count(download.active_handles))
+  end)
+
+  it("allows teardown to iterate active_handles and call pcall(handle.kill, handle, 9)", function()
+    local killed = {}
+    local handle = {
+      kill = function(self, sig)
+        table.insert(killed, sig)
+      end,
+    }
+
+    local dest = "/fake/path/image.jpg"
+    download.active_handles[dest] = handle
+
+    for d, h in pairs(download.active_handles or {}) do
+      download.interrupted_dests[d] = true
+      pcall(h.kill, h, 9)
+    end
+    download.active_handles = {}
+
+    assert.are.equal(1, #killed)
+    assert.are.equal(9, killed[1])
+    assert.is_true(download.interrupted_dests[dest])
+    assert.are.equal(0, vim.tbl_count(download.active_handles))
+  end)
+end)
