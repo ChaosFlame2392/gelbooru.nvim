@@ -31,6 +31,38 @@ describe("util.url_encode", function()
   it("handles nil gracefully", function()
     assert.are.equal("", util.url_encode(nil))
   end)
+
+  it("encodes literal + as %2B", function()
+    assert.are.equal("c%2B%2B", util.url_encode("c++"))
+  end)
+
+  it("encodes literal + alongside spaces", function()
+    assert.are.equal("c%2B%2B+tag", util.url_encode("c++ tag"))
+  end)
+end)
+
+describe("util.ensure_array", function()
+  it("wraps dictionary table in an array", function()
+    assert.are.same({ { id = 1 } }, util.ensure_array({ id = 1 }))
+  end)
+
+  it("leaves array table unchanged", function()
+    assert.are.same({ 1, 2 }, util.ensure_array({ 1, 2 }))
+  end)
+
+  it("returns empty table for empty table", function()
+    assert.are.same({}, util.ensure_array({}))
+  end)
+
+  it("returns empty table for nil", function()
+    assert.are.same({}, util.ensure_array(nil))
+  end)
+
+  it("returns empty table for non-table values", function()
+    assert.are.same({}, util.ensure_array("string"))
+    assert.are.same({}, util.ensure_array(123))
+    assert.are.same({}, util.ensure_array(true))
+  end)
 end)
 
 describe("util.normalize_str", function()

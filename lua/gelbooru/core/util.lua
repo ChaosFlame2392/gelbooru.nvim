@@ -36,11 +36,18 @@ function M.ensure(path)
   vim.fn.mkdir(path, "p")
 end
 
+function M.ensure_array(v)
+  if type(v) ~= "table" then return {} end
+  if v[1] == nil and next(v) ~= nil then return { v } end
+  return v
+end
+
 function M.url_encode(s)
-  local enc = (s or ""):gsub(" ", "+"):gsub("([^%w%-%.%_%~%+])", function(c)
-    return string.format("%%%02X", c:byte())
-  end)
-  return enc
+  if s == nil then return "" end
+  s = tostring(s)
+  return (s:gsub("([^%w%-%.%_%~ ])", function(c)
+    return string.format("%%%02X", string.byte(c))
+  end):gsub(" ", "+"))
 end
 
 function M.normalize_str(s)
