@@ -157,6 +157,7 @@ Dynamic post tag categorization:
 #### `lua/gelbooru/ui/init.lua`
 The primary UI coordinator:
 - Computes floating window coordinates (`calc_layout()`), caching geometry against terminal width/height and `show_meta` state.
+- Handles responsive scaling: debounces `VimResized` events (`RESIZE_DEBOUNCE_MS = 100`), executes `handle_resize()` to dynamically recalculate and reposition floating windows, and invokes `image.nudge_current_placement()` on window resize and `m` toggle.
 - Creates and positions floating windows (`frame`, `input`, `div`, `list`, `vdiv`, `img`, `hdiv`, `meta`, `status`, `ac`).
 - Sets window-local options (`cursorline`, highlights) and binds all keymaps.
 - Manages image rendering queue and preview cooldown timers (`30ms` cached, `150ms` remote).
@@ -457,7 +458,7 @@ Priorities are ordered by **user experience impact** — bugs users can observe 
 > Items marked *(RESOLVED)* have been moved to git history and removed from the active backlog.
 > Previously resolved: Discovered Tags Transfer (54d3aef), Tag Scraper Filter Consistency (54d3aef),
 > Integration Test Suite (b213867), Resumable Downloads (f965ec6), Meta Panel Artist Refresh (54d3aef).
-> Recently resolved: P1 UX-Breaking Bugs 1.1-1.8 (epoch cancellation, single-result array normalization, open re-entrancy guard, curl --fail, backward pagination tail-slice, url_encode '+', cross-platform open_url, close-reopen lifecycle & nil guards), Buffer cleanup (3.3), save_dir ensure (3.4), curl handle tracking & abort_all (3.5), real download unit tests (5.1).
+> Recently resolved: P1 UX-Breaking Bugs 1.1-1.8 (epoch cancellation, single-result array normalization, open re-entrancy guard, curl --fail, backward pagination tail-slice, url_encode '+', cross-platform open_url, close-reopen lifecycle & nil guards), Buffer cleanup (3.3), save_dir ensure (3.4), curl handle tracking & abort_all (3.5), real download unit tests (5.1), Responsive UI scaling & dynamic placement nudge (2.1).
 
 ---
 
@@ -555,12 +556,13 @@ Invalid 'win': Expected Lua number
 
 User-facing improvements that enhance the browsing experience, prioritized by user impact.
 
-#### 2.1 Responsive UI & Scaling (Highest UX Priority)
+#### 2.1 Responsive UI & Scaling (RESOLVED)
 **Problem:** Terminal resizes (`VimResized`), `m` metadata toggle, and layout changes break floating window layout and leave snacks image placements at stale or desynchronized dimensions. Clamping layout to minimum 80×20 causes windows to overflow editor bounds on smaller displays.
-**Required Changes:**
-1. Listen for `VimResized` autocommand event, debounce (100ms), recalculate layout via `calc_layout()`, and dynamically reposition/resize all floating windows via `apply_layout()`.
-2. On `m` metadata toggle, ensure `image.nudge_current_placement()` dynamically rescales the existing placement smoothly without recreation or visual tearing.
-3. Clamp layout calculations to never exceed terminal dimensions (`vim.o.columns` / `vim.o.lines`) to prevent window placement crashes on compact terminals.
+**Resolution:**
+1. Implemented `VimResized` autocommand in `UI.aug` with `RESIZE_DEBOUNCE_MS = 100`, triggering `handle_resize()` to dynamically recompute layout via `calc_layout(true)` and reposition windows via `apply_layout(l)`.
+2. On `m` metadata toggle and resize events, invoked `image.nudge_current_placement()` to dynamically rescale the active image placement cleanly.
+3. Clamped `calc_layout()` coordinates to never exceed terminal dimensions (`vim.o.columns` / `vim.o.lines`), preventing geometry calculation errors on compact displays.
+4. Cleaned up `UI.resize_timer` in `M.teardown()`.
 
 #### 2.2 Stale Image Preview Persistence on History Navigation and New Searches
 **Files:** `core/history.lua` (`restore_history`), `net/api.lua` (`execute_search`), `ui/init.lua`, `ui/image.lua`

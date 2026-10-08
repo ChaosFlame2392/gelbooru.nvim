@@ -13,6 +13,8 @@ local M = {}
 M.image = image
 M.autocomplete = autocomplete
 
+local RESIZE_DEBOUNCE_MS = 100
+
 -- Layout cache: recomputed only on resize or show_meta toggle, not every render.
 local _layout_cache = nil
 local _layout_show_meta = nil
@@ -57,6 +59,15 @@ function M.teardown()
       end
     end)
     UI.ac_debounce_timer = nil
+  end
+  if UI.resize_timer then
+    pcall(function()
+      UI.resize_timer:stop()
+      if not UI.resize_timer:is_closing() then
+        UI.resize_timer:close()
+      end
+    end)
+    UI.resize_timer = nil
   end
   if UI.save_discovered_timer or #State.discovered > 0 then
     pcall(tags.save_discovered_now)
@@ -133,10 +144,13 @@ function M.set_status(msg, reset_ms)
   end
 end
 
-function M.calc_layout()
+function M.calc_layout(force)
+  if force then
+    invalidate_layout()
+  end
   local State = state.State
   -- Return cached layout if terminal dimensions and show_meta haven't changed.
-  if _layout_cache and _layout_show_meta == State.show_meta
+  if not force and _layout_cache and _layout_show_meta == State.show_meta
     and _layout_cache._TW == vim.o.columns
     and _layout_cache._TH == vim.o.lines then
     return _layout_cache
@@ -149,22 +163,26 @@ function M.calc_layout()
   W = math.max(W, 80)
   H = math.max(H, 20)
 
-  local R = math.floor((TH - H) / 2)
-  local C = math.floor((TW - W) / 2)
+  -- Clamp width and height so they never exceed vim.o.columns and vim.o.lines
+  W = math.min(W, TW)
+  H = math.min(H, TH)
+
+  local R = math.max(0, math.floor((TH - H) / 2))
+  local C = math.max(0, math.floor((TW - W) / 2))
 
   local input_h = 1
-  local main_h = H - input_h - 4
-  local list_w = math.floor(W * 0.25)
-  local prev_w = W - list_w - 3
+  local main_h = math.max(1, H - input_h - 4)
+  local list_w = math.max(1, math.floor(W * 0.25))
+  local prev_w = math.max(1, W - list_w - 3)
 
   local meta_h = State.show_meta and math.min(12, math.floor(main_h * 0.35)) or 0
-  local img_h = main_h - meta_h - (State.show_meta and 1 or 0)
+  local img_h = math.max(1, main_h - meta_h - (State.show_meta and 1 or 0))
 
   _layout_cache = {
     _TW = TW, _TH = TH, -- cache keys
     frame = { row = R, col = C, width = W, height = H },
-    input = { row = R + 1, col = C + 1, width = W - 2, height = 1 },
-    div = { row = R + 2, col = C + 1, width = W - 2, height = 1 },
+    input = { row = R + 1, col = C + 1, width = math.max(1, W - 2), height = 1 },
+    div = { row = R + 2, col = C + 1, width = math.max(1, W - 2), height = 1 },
     list = { row = R + 3, col = C + 1, width = list_w, height = main_h },
     vdiv = { row = R + 3, col = C + 1 + list_w, width = 1, height = main_h },
     img = { row = R + 3, col = C + 1 + list_w + 1, width = prev_w, height = img_h },
@@ -172,8 +190,8 @@ function M.calc_layout()
       or nil,
     meta = State.show_meta and { row = R + 3 + img_h + 1, col = C + 1 + list_w + 1, width = prev_w, height = meta_h }
       or nil,
-    status = { row = R + H - 2, col = C + 1, width = W - 2, height = 1 },
-    ac = { row = R + 2, col = C + 1, width = W - 2, height = math.min(15, H - 4) },
+    status = { row = R + H - 2, col = C + 1, width = math.max(1, W - 2), height = 1 },
+    ac = { row = R + 2, col = C + 1, width = math.max(1, W - 2), height = math.max(1, math.min(15, H - 4)) },
   }
   _layout_show_meta = State.show_meta
   return _layout_cache
@@ -182,7 +200,7 @@ end
 local function draw_dividers(layout)
   local UI = state.UI
   local W = layout.frame.width
-  util.set_lines(UI.bufs.div, { string.rep("─", W - 2) })
+  util.set_lines(UI.bufs.div, { string.rep("─", math.max(0, W - 2)) })
 
   local vdiv_lines = {}
   for _ = 1, layout.list.height do
@@ -191,7 +209,7 @@ local function draw_dividers(layout)
   util.set_lines(UI.bufs.vdiv, vdiv_lines)
 
   if layout.hdiv then
-    util.set_lines(UI.bufs.hdiv, { string.rep("─", layout.hdiv.width) })
+    util.set_lines(UI.bufs.hdiv, { string.rep("─", math.max(0, layout.hdiv.width)) })
   end
 end
 
@@ -256,20 +274,22 @@ function M.apply_layout(l)
   end
 end
 
-function M.on_resize()
-  invalidate_layout()
-  local l = M.calc_layout()
-  M.apply_layout(l)
-  -- Nudge the active snacks placement to refit into the resized window.
-  -- auto_resize wires WinResized on the placement, but apply_layout uses
-  -- nvim_win_set_config (not a real WinResized event), so we nudge manually.
-  -- This covers both 'm' toggles and actual VimResized events.
-  if not image.nudge_current_placement() then
-    -- No live placement (e.g. first open, or image still downloading).
-    -- Fall through to a normal render so the preview fires when ready.
-    state.State.cur_id = nil
-    M.render_preview(false)
+local function handle_resize()
+  local UI = state.UI
+  if not (UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame)) then
+    return
   end
+  local l = M.calc_layout(true)
+  M.apply_layout(l)
+  image.nudge_current_placement()
+end
+
+function M.handle_resize()
+  handle_resize()
+end
+
+function M.on_resize()
+  handle_resize()
 end
 
 function M.render_list()
@@ -492,7 +512,7 @@ function M.render_preview(force_download)
     delay,
     0,
     vim.schedule_wrap(function()
-      if not UI.scroll_timer:is_closing() then
+      if UI.scroll_timer and not UI.scroll_timer:is_closing() then
         UI.scroll_timer:close()
       end
       UI.scroll_timer = nil
@@ -579,7 +599,20 @@ function M.open(initial_tags)
   vim.api.nvim_create_autocmd("VimResized", {
     group = UI.aug,
     callback = function()
-      vim.schedule(M.on_resize)
+      if UI.resize_timer and not UI.resize_timer:is_closing() then
+        UI.resize_timer:stop()
+      else
+        UI.resize_timer = (vim.uv or vim.loop).new_timer()
+      end
+      if UI.resize_timer then
+        UI.resize_timer:start(
+          RESIZE_DEBOUNCE_MS,
+          0,
+          function()
+            vim.schedule(handle_resize)
+          end
+        )
+      end
     end,
   })
 
@@ -590,7 +623,7 @@ function M.open(initial_tags)
       if not State.input_focused then
         State.input_focused = true
         autocomplete.update_autocomplete()
-        M.on_resize()
+        handle_resize()
       end
     end,
   })
@@ -692,7 +725,7 @@ function M.open(initial_tags)
   end)
   lm("m", function()
     State.show_meta = not State.show_meta
-    M.on_resize()
+    handle_resize()
   end)
 
   local function enter_search()
@@ -700,7 +733,7 @@ function M.open(initial_tags)
     pcall(vim.api.nvim_set_current_win, UI.wins.input)
     vim.cmd("startinsert!")
     autocomplete.update_autocomplete()
-    M.on_resize()
+    handle_resize()
   end
   for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
     lm(k, enter_search)
@@ -735,7 +768,7 @@ function M.open(initial_tags)
     State.input_focused = false
     vim.cmd("stopinsert")
     pcall(vim.api.nvim_set_current_win, UI.wins.list)
-    M.on_resize()
+    handle_resize()
   end
 
   local function submit_input()

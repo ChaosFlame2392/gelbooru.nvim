@@ -39,6 +39,7 @@ M.UI = {
   api_tag_timer = nil,
   ac_debounce_timer = nil,
   save_discovered_timer = nil,
+  resize_timer = nil,
   prefetch_timers = {},
   current_placement = nil,
   PREVIEW_COOLDOWN_MS = 150,
@@ -70,6 +71,7 @@ function M.reset_ui()
   M.UI.api_tag_timer = nil
   M.UI.ac_debounce_timer = nil
   M.UI.save_discovered_timer = nil
+  M.UI.resize_timer = nil
   M.UI.prefetch_timers = {}
   M.UI.current_placement = nil
 end
