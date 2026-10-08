@@ -62,13 +62,15 @@ function M.fetch(direction)
       return
     end
     -- Also guard if UI has been torn down:
-    if not (UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame)) then
+    if State.torn_down or not (UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame)) then
       return
     end
     State.loading = false
     if not body then
       ui.set_status("Error: API request failed")
       ui.render_list()
+      util.set_lines(UI.bufs.img, { "  Error: API request failed" })
+      util.set_lines(UI.bufs.meta, {})
       return
     end
     local ok, data = pcall(vim.fn.json_decode, body)
@@ -76,6 +78,8 @@ function M.fetch(direction)
       ui.set_status("No results" .. (State.query ~= "" and (" for: " .. State.query) or ""))
       ui.render_list()
       history.save_current_history()
+      util.set_lines(UI.bufs.img, { "  No posts found" })
+      util.set_lines(UI.bufs.meta, {})
       return
     end
     local posts = ensure_array(data.post)
@@ -83,6 +87,8 @@ function M.fetch(direction)
       ui.set_status("No results" .. (State.query ~= "" and (" for: " .. State.query) or ""))
       ui.render_list()
       history.save_current_history()
+      util.set_lines(UI.bufs.img, { "  No posts found" })
+      util.set_lines(UI.bufs.meta, {})
       return
     end
     for _, p in ipairs(posts) do
@@ -98,14 +104,52 @@ function M.fetch(direction)
   end)
 end
 
+local function clear_preview_loading()
+  if state.State.torn_down then
+    return
+  end
+  pcall(function()
+    require("gelbooru.ui.image").close_current_placement()
+  end)
+  pcall(function()
+    local state_mod = require("gelbooru.core.state")
+    local util_mod = require("gelbooru.core.util")
+    util_mod.set_lines(state_mod.UI.bufs.img, { "  Loading..." })
+    util_mod.set_lines(state_mod.UI.bufs.meta, {})
+    if state_mod.UI.wins.img and vim.api.nvim_win_is_valid(state_mod.UI.wins.img)
+      and state_mod.UI.bufs.img and vim.api.nvim_buf_is_valid(state_mod.UI.bufs.img) then
+      pcall(vim.api.nvim_win_set_buf, state_mod.UI.wins.img, state_mod.UI.bufs.img)
+    end
+  end)
+end
+
 function M.execute_search(query)
   local State = state.State
   local ui = require("gelbooru.ui")
+
+  if State.torn_down then
+    return
+  end
+
+  if type(query) == "string" then
+    query = query:gsub("^%s*id:%s*(%d+)%s*$", "id:%1")
+    local bare_id = query:match("^%s*(%d+)%s*$")
+    if bare_id then
+      query = "id:" .. bare_id
+      local UI = state.UI
+      if UI.bufs and UI.bufs.input and vim.api.nvim_buf_is_valid(UI.bufs.input) then
+        pcall(vim.api.nvim_buf_set_lines, UI.bufs.input, 0, 1, false, { query })
+      end
+    end
+  end
 
   if query == State.query and #State.posts > 0 then
     ui.render_list()
     return
   end
+
+  clear_preview_loading()
+
   State.search_epoch = (State.search_epoch or 0) + 1
   State.loading = false  -- Must reset so in-flight fetch doesn't lock out new search!
   history.push_history(query)
@@ -115,7 +159,6 @@ function M.execute_search(query)
   State.cur = 1
   State.cur_id = nil
   ui.render_list()
-  ui.render_preview(false)
   M.fetch(1)
 
   -- Auto-resolve any unknown query tags so they are saved to discovered.json

@@ -97,4 +97,19 @@ describe("config", function()
       assert.are.equal(before, config.options.per_page)
     end)
   end)
+
+  describe("META_TAGS", function()
+    it("contains id: meta tag", function()
+      local found = false
+      for _, tag in ipairs(config.META_TAGS) do
+        if tag.n == "id:" then
+          found = true
+          assert.are.equal(5, tag.t)
+          assert.are.equal(0, tag.c)
+          break
+        end
+      end
+      assert.is_true(found, "id: meta tag not found in META_TAGS")
+    end)
+  end)
 end)

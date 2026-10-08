@@ -49,14 +49,51 @@ function M.push_history(query)
   )
 end
 
+local function clear_preview_buffers(posts_count)
+  if state.State.torn_down then
+    return
+  end
+  if posts_count == 0 then
+    pcall(function()
+      local util = require("gelbooru.core.util")
+      local state_mod = require("gelbooru.core.state")
+      util.set_lines(state_mod.UI.bufs.img, { "  No posts found" })
+      util.set_lines(state_mod.UI.bufs.meta, {})
+      if state_mod.UI.wins.img and vim.api.nvim_win_is_valid(state_mod.UI.wins.img)
+        and state_mod.UI.bufs.img and vim.api.nvim_buf_is_valid(state_mod.UI.bufs.img) then
+        pcall(vim.api.nvim_win_set_buf, state_mod.UI.wins.img, state_mod.UI.bufs.img)
+      end
+    end)
+  else
+    pcall(function()
+      local util = require("gelbooru.core.util")
+      local state_mod = require("gelbooru.core.state")
+      util.set_lines(state_mod.UI.bufs.img, { "  Loading..." })
+      util.set_lines(state_mod.UI.bufs.meta, {})
+      if state_mod.UI.wins.img and vim.api.nvim_win_is_valid(state_mod.UI.wins.img)
+        and state_mod.UI.bufs.img and vim.api.nvim_buf_is_valid(state_mod.UI.bufs.img) then
+        pcall(vim.api.nvim_win_set_buf, state_mod.UI.wins.img, state_mod.UI.bufs.img)
+      end
+    end)
+  end
+end
+
 function M.restore_history(idx)
   local State = state.State
   local UI = state.UI
+  if State.torn_down then
+    return
+  end
   if idx < 1 or idx > #State.history then
     log("DEBUG", "HISTORY", "restore_history bounds check failed: idx=%d, total=%d", idx, #State.history)
     return
   end
   M.save_current_history()
+  State.search_epoch = (State.search_epoch or 0) + 1
+  State.loading = false
+  pcall(function()
+    require("gelbooru.ui.image").close_current_placement()
+  end)
   State.history_idx = idx
   local h = State.history[idx]
   State.query = h.query
@@ -64,6 +101,8 @@ function M.restore_history(idx)
   State.page = h.page or 0
   State.cur = math.max(1, math.min(h.cur or 1, math.max(1, #State.posts)))
   State.cur_id = nil
+
+  clear_preview_buffers(#State.posts)
 
   log(
     "INFO",
@@ -87,7 +126,6 @@ function M.restore_history(idx)
   if #State.posts == 0 and State.query ~= "" then
     ui.set_status(string.format("Fetching results for: %s…", State.query))
     ui.render_list()
-    ui.render_preview(false)
     api.fetch(1)
   else
     ui.render_list()

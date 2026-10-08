@@ -27,6 +27,7 @@ end
 function M.teardown()
   local UI = state.UI
   local State = state.State
+  State.torn_down = true
   log("INFO", "LIFECYCLE", "Teardown Gelbooru UI")
   if UI.scroll_timer then
     UI.scroll_timer:stop()
@@ -107,6 +108,7 @@ function M.teardown()
   state.reset_query_state()
   state.reset_ui()
   state.reset_tag_state()
+  State.torn_down = true
   -- Two GC passes: first collects the tag heap, second handles resurrected objects.
   collectgarbage("collect")
   collectgarbage("collect")
@@ -426,7 +428,8 @@ function M.render_preview(force_download)
   local UI = state.UI
   local p = State.posts[State.cur]
   if not p then
-    util.set_lines(UI.bufs.img, { "  No post selected" })
+    local msg = #State.posts == 0 and "  No posts found" or "  No post selected"
+    util.set_lines(UI.bufs.img, { msg })
     util.set_lines(UI.bufs.meta, {})
     return
   end

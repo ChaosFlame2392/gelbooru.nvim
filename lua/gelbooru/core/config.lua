@@ -37,6 +37,7 @@ M.TAG_BADGES = {
 }
 
 M.META_TAGS = {
+  { n = "id:", c = 0, t = 5 },
   { n = "sort:score", c = 0, t = 5 },
   { n = "sort:score:asc", c = 0, t = 5 },
   { n = "sort:id", c = 0, t = 5 },

@@ -52,6 +52,10 @@ function M.close_current_placement()
     pcall(UI.current_placement.close, UI.current_placement)
     UI.current_placement = nil
   end
+  if UI.wins and UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img)
+    and UI.bufs and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img) then
+    pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
+  end
 end
 
 function M.clear_snacks_cache_for(post_id)

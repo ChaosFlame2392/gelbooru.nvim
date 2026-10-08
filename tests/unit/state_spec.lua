@@ -21,6 +21,7 @@ describe("state.reset_query_state", function()
     state.State.show_meta = false
     state.State.history = { { query = "prev" } }
     state.State.history_idx = 1
+    state.State.autocomplete_filtered = { { n = "test", t = 0, c = 10 } }
     state.State.autocomplete_cur = 4
     state.State.autocomplete_navigated = true
     state.State.input_focused = true
@@ -38,6 +39,7 @@ describe("state.reset_query_state", function()
     assert.are.equal(true, state.State.show_meta)
     assert.are.same({}, state.State.history)
     assert.are.equal(0, state.State.history_idx)
+    assert.are.same({}, state.State.autocomplete_filtered)
     assert.are.equal(1, state.State.autocomplete_cur)
     assert.are.equal(false, state.State.autocomplete_navigated)
     assert.are.equal(false, state.State.input_focused)

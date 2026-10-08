@@ -102,7 +102,7 @@ gelbooru.nvim/
 Public entry point. Exposes `setup(opts)`, `open(initial_tags)`, `browse()`, and `update_tags()`. Connects user-facing commands to core logic.
 
 #### `lua/gelbooru/core/config.lua`
-Holds the default configuration table. Normalizes user overrides, clamps numeric ranges using `math.max` and `math.min`, maps tag category IDs to badges and string names, and declares static `META_TAGS` (`sort:score`, `rating:general`, etc.).
+Holds the default configuration table. Normalizes user overrides, clamps numeric ranges using `math.max` and `math.min`, maps tag category IDs to badges and string names, and declares static `META_TAGS` (`id:`, `sort:score`, `rating:general`, etc.).
 
 #### `lua/gelbooru/core/state.lua`
 Declares the two foundational singletons:
@@ -111,7 +111,7 @@ Declares the two foundational singletons:
 Provides lifecycle cleanup routines: `reset_query_state()`, `reset_ui()`, and `reset_tag_state()`.
 
 #### `lua/gelbooru/core/history.lua`
-Maintains an undo/redo navigation stack for search queries. Implements `save_current_history()`, `push_history(query)`, `restore_history(idx)`, `history_prev()`, and `history_next()`. **Critical optimization**: Stores `posts` arrays by reference instead of deep copying, preventing megabyte-scale memory ballooning during search navigation.
+Maintains an undo/redo navigation stack for search queries. Implements `save_current_history()`, `push_history(query)`, `restore_history(idx)`, `history_prev()`, and `history_next()`. **Critical optimizations**: Stores `posts` arrays by reference instead of deep copying; in `restore_history(idx)`, immediately closes active image placement, increments `State.search_epoch`, and resets image and metadata buffers to prevent stale content persistence across history transitions.
 
 #### `lua/gelbooru/core/util.lua`
 Pure utility functions:
@@ -124,8 +124,8 @@ Pure utility functions:
 
 #### `lua/gelbooru/net/api.lua`
 Handles Gelbooru REST API interactions (`index.php?page=dapi&s=post&q=index&json=1`). Implements:
-- `fetch(direction)`: Forward (`direction=1`) and backward (`direction=-1`) post pagination.
-- `execute_search(query)`: Pushes history, clears post state, triggers initial fetch, and parses search words to discover and categorize unrecognized tags.
+- `fetch(direction)`: Forward (`direction=1`) and backward (`direction=-1`) post pagination with `search_epoch` validation.
+- `execute_search(query)`: Pushes history, clears post state, immediately closes active image placement, clears canvas to `"  Loading..."` and metadata to empty, parses search words, and automatically normalizes bare numeric queries (e.g. `query:match("^%s*(%d+)%s*$")`) and space-separated ID searches (`query:gsub("^%s*id:%s*(%d+)%s*$", "id:%1")`) to `id:<digits>`.
 - `save_current()`: Downloads the full-size `file_url` for the selected post into `save_dir`.
 - `scroll_meta(dir)`: Adjusts cursor position inside the metadata floating window.
 
@@ -457,8 +457,7 @@ Priorities are ordered by **user experience impact** — bugs users can observe 
 
 > Items marked *(RESOLVED)* have been moved to git history and removed from the active backlog.
 > Previously resolved: Discovered Tags Transfer (54d3aef), Tag Scraper Filter Consistency (54d3aef),
-> Integration Test Suite (b213867), Resumable Downloads (f965ec6), Meta Panel Artist Refresh (54d3aef).
-> Recently resolved: P1 UX-Breaking Bugs 1.1-1.8 (epoch cancellation, single-result array normalization, open re-entrancy guard, curl --fail, backward pagination tail-slice, url_encode '+', cross-platform open_url, close-reopen lifecycle & nil guards), Buffer cleanup (3.3), save_dir ensure (3.4), curl handle tracking & abort_all (3.5), real download unit tests (5.1), Responsive UI scaling & dynamic placement nudge (2.1).
+> Recently resolved: P1 UX-Breaking Bugs 1.1-1.8 (epoch cancellation, single-result array normalization, open re-entrancy guard, curl --fail, backward pagination tail-slice, url_encode '+', cross-platform open_url, close-reopen lifecycle & nil guards), Buffer cleanup (3.3), save_dir ensure (3.4), curl handle tracking & abort_all (3.5), real download unit tests (5.1), Responsive UI scaling & dynamic placement nudge (2.1), Stale preview elimination and id: autocomplete meta tag (2.2, 2.4).
 
 ---
 
@@ -564,15 +563,20 @@ User-facing improvements that enhance the browsing experience, prioritized by us
 3. Clamped `calc_layout()` coordinates to never exceed terminal dimensions (`vim.o.columns` / `vim.o.lines`), preventing geometry calculation errors on compact displays.
 4. Cleaned up `UI.resize_timer` in `M.teardown()`.
 
-#### 2.2 Stale Image Preview Persistence on History Navigation and New Searches
+#### 2.2 Stale Image Preview Persistence on History Navigation and New Searches (RESOLVED)
 **Files:** `core/history.lua` (`restore_history`), `net/api.lua` (`execute_search`), `ui/init.lua`, `ui/image.lua`
 **Bug/Screencap:** When switching history (`[` / `]`) or submitting a new search, the image from the previous post remains visible on the canvas until the new image finishes downloading and rendering (showing "convert loading..." over the old image). If the restored history entry or new query has 0 posts or fails to load, the old image placement persists permanently on screen.
-**Fix:**
-- When navigating history (`history_prev` / `history_next` / `restore_history`) or initiating a new search (`execute_search`):
-  1. Immediately close the active placement via `image.close_current_placement()`.
-  2. Clear the image display buffer: `util.set_lines(UI.bufs.img, { "  Loading..." })` (or blank if 0 posts).
-  3. Clear the metadata display buffer: `util.set_lines(UI.bufs.meta, {})`.
-- If `#State.posts == 0`, ensure canvas displays `"  No posts found"` without any residual image placement.
+**Resolution:**
+- In `restore_history(idx)`:
+  1. Immediately closes active placement via `pcall(image.close_current_placement)`.
+  2. Sets image buffer to `"  No posts found"` if `#State.posts == 0`, or `"  Loading..."` otherwise.
+  3. Clears metadata buffer to `{}`.
+  4. Increments monotonic `State.search_epoch = (State.search_epoch or 0) + 1` and resets `State.loading = false` to invalidate any in-flight requests from prior history entries.
+- In `execute_search(query)`:
+  1. Immediately closes active placement and resets canvas to `"  Loading..."` and metadata buffer to `{}`.
+  2. Increments `search_epoch` so slow network responses from prior searches are dropped.
+- In `core/state.lua:reset_query_state()`:
+  - Resets `M.State.autocomplete_filtered = {}` and `M.State.search_epoch = 0`.
 
 #### 2.3 Local Folder Browser Mode (`:GelbooruLocal [path]`)
 **Context:** Users want to browse locally downloaded/saved images (e.g. from `save_dir` or custom folder) inside Neovim, but still see live booru metadata (artists, characters, series, tags, rating, score) in the inspector window.
@@ -583,11 +587,11 @@ User-facing improvements that enhance the browsing experience, prioritized by us
 4. **Metadata resolution by ID:** Extract post ID from filename (e.g. `11802758.jpg` -> ID `11802758`). In background, query Gelbooru API by ID (`index.php?page=dapi&s=post&q=index&json=1&id=<ID>`) and populate `UI.bufs.meta` with live artist, character, series, and general tag badges.
 5. **Shared infrastructure:** Shares the single-post ID fetch and metadata formatting pipeline with §2.4.
 
-#### 2.4 Autocomplete for `id:` Tag & Search Discoverability
-**Context:** Direct post ID searching already works natively through Gelbooru query syntax (e.g. typing `id:11802758` returns the post). However, `id:` is not in `META_TAGS`, making it undiscoverable.
-**Required Changes:**
-1. Add `"id:"` to `META_TAGS` in `core/config.lua` so typing `id` suggests `id:` in autocomplete dropdown with `[Meta]` badge.
-2. (Optional UX convenience): In `net/api.lua:execute_search()`, if the user enters a bare numeric query (e.g. `"11802758"`), automatically prepend `"id:"` before querying.
+#### 2.4 Autocomplete for `id:` Tag & Search Discoverability (RESOLVED)
+**Context:** Direct post ID searching already works natively through Gelbooru query syntax (e.g. typing `id:11802758` returns the post). However, `id:` was not in `META_TAGS`, making it undiscoverable.
+**Resolution:**
+1. Added `"id:"` to `META_TAGS` in `core/config.lua`, displaying in autocomplete dropdown with `[Meta]` badge.
+2. In `net/api.lua:execute_search()`, if the user enters a bare numeric query (e.g. matching `^%s*(%d+)%s*$`) or space-separated ID search (`query:gsub("^%s*id:%s*(%d+)%s*$", "id:%1")`), automatically normalizes the query to `id:<digits>` before pushing to history and querying Gelbooru.
 
 #### 2.5 Mouse Input & Metadata Window Navigation
 - **Disable mouse**: Set `vim.opt.mouse = ""` on `open()`, restore prior user value on `teardown()`. Prevents accidental terminal clicks from disrupting floating window focus.
