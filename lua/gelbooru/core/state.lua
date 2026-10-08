@@ -29,6 +29,7 @@ M.State = {
   scroll_dir = 1,
   search_epoch = 0,
   torn_down = false,
+  prev_mouse = nil,
 }
 
 M.UI = {

@@ -77,16 +77,17 @@ function M.teardown()
   download.cancel_prefetch_timers()
   -- Drop pending download callbacks so their closures are freed immediately.
   download.active_downloads = {}
-  -- Kill any in-flight user-save curl processes so they don't orphan writes.
-  -- Mark interrupted BEFORE killing so the vim.schedule callback skips rename
-  -- regardless of whether curl exits with 0 (kill vs natural-exit race).
-  for dest, handle in pairs(download.active_handles or {}) do
-    download.interrupted_dests[dest] = true
-    pcall(function() handle:kill(9) end)
-  end
-  download.active_handles = {}
+  pcall(download.abort_all)
   download.pending_resumes = {}
   image.close_current_placement()
+
+  local State = state.State
+  if State.prev_mouse ~= nil then
+    pcall(function()
+      vim.o.mouse = State.prev_mouse
+    end)
+    State.prev_mouse = nil
+  end
 
   vim.cmd("stopinsert")
   if UI.aug then
@@ -245,7 +246,7 @@ function M.apply_layout(l)
 
   if l.hdiv then
     if not UI.wins.hdiv or not vim.api.nvim_win_is_valid(UI.wins.hdiv) then
-      UI.wins.hdiv = util.float(UI.bufs.hdiv, l.hdiv.row, l.hdiv.col, l.hdiv.width, l.hdiv.height, { zindex = 51 })
+      UI.wins.hdiv = util.float(UI.bufs.hdiv, l.hdiv.row, l.hdiv.col, l.hdiv.width, l.hdiv.height, { zindex = 51, focusable = false })
     else
       upd(UI.wins.hdiv, l.hdiv)
     end
@@ -531,6 +532,30 @@ function M.render_preview(force_download)
   )
 end
 
+local function isolate_input_buffer(buf, win)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].omnifunc = ""
+  vim.bo[buf].completefunc = ""
+  pcall(function()
+    vim.bo[buf].completeopt = ""
+  end)
+
+  vim.b[buf].cmp_enabled = false
+  pcall(function()
+    require("cmp").setup.buffer({ enabled = false })
+  end)
+
+  vim.b[buf].completion = false
+  vim.b[buf].blink_cmp_enabled = false
+
+  vim.b[buf].copilot_disabled = true
+  vim.b[buf].codecompanion_enabled = false
+  vim.b[buf].supermaven = false
+  vim.b[buf].codeium_enabled = false
+  vim.b[buf].codeium_disable = true
+end
+
 function M.open(initial_tags)
   local UI = state.UI
   if UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame) then
@@ -539,6 +564,11 @@ function M.open(initial_tags)
   state.reset_query_state()
 
   local State = state.State
+  if State.prev_mouse == nil then
+    State.prev_mouse = vim.o.mouse
+  end
+  vim.o.mouse = ""
+
   local api = require("gelbooru.net.api")
 
   util.ensure(config.options.cache_dir)
@@ -574,23 +604,25 @@ function M.open(initial_tags)
     title = "  Gelbooru  ",
     title_pos = "center",
     zindex = 50,
+    focusable = false,
   })
   vim.wo[UI.wins.frame].winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder"
 
   UI.wins.input = util.float(UI.bufs.input, l.input.row, l.input.col, l.input.width, l.input.height, { zindex = 51 })
-  UI.wins.div = util.float(UI.bufs.div, l.div.row, l.div.col, l.div.width, l.div.height, { zindex = 51 })
+  isolate_input_buffer(UI.bufs.input, UI.wins.input)
+  UI.wins.div = util.float(UI.bufs.div, l.div.row, l.div.col, l.div.width, l.div.height, { zindex = 51, focusable = false })
   UI.wins.list = util.float(UI.bufs.list, l.list.row, l.list.col, l.list.width, l.list.height, { zindex = 51 })
-  UI.wins.vdiv = util.float(UI.bufs.vdiv, l.vdiv.row, l.vdiv.col, l.vdiv.width, l.vdiv.height, { zindex = 51 })
-  UI.wins.img = util.float(UI.bufs.img, l.img.row, l.img.col, l.img.width, l.img.height, { zindex = 51 })
+  UI.wins.vdiv = util.float(UI.bufs.vdiv, l.vdiv.row, l.vdiv.col, l.vdiv.width, l.vdiv.height, { zindex = 51, focusable = false })
+  UI.wins.img = util.float(UI.bufs.img, l.img.row, l.img.col, l.img.width, l.img.height, { zindex = 51, focusable = false })
   if l.hdiv then
-    UI.wins.hdiv = util.float(UI.bufs.hdiv, l.hdiv.row, l.hdiv.col, l.hdiv.width, l.hdiv.height, { zindex = 51 })
+    UI.wins.hdiv = util.float(UI.bufs.hdiv, l.hdiv.row, l.hdiv.col, l.hdiv.width, l.hdiv.height, { zindex = 51, focusable = false })
   end
   if l.meta then
     UI.wins.meta = util.float(UI.bufs.meta, l.meta.row, l.meta.col, l.meta.width, l.meta.height, { zindex = 51 })
   end
-  UI.wins.status = util.float(UI.bufs.status, l.status.row, l.status.col, l.status.width, l.status.height, { zindex = 51 })
+  UI.wins.status = util.float(UI.bufs.status, l.status.row, l.status.col, l.status.width, l.status.height, { zindex = 51, focusable = false })
 
-  UI.wins.ac = util.float(UI.bufs.ac, l.ac.row, l.ac.col, l.ac.width, l.ac.height, { zindex = 60 })
+  UI.wins.ac = util.float(UI.bufs.ac, l.ac.row, l.ac.col, l.ac.width, l.ac.height, { zindex = 60, focusable = false })
   vim.api.nvim_win_set_config(UI.wins.ac, { hide = true })
 
   vim.wo[UI.wins.list].cursorline = true
@@ -730,16 +762,23 @@ function M.open(initial_tags)
     State.show_meta = not State.show_meta
     handle_resize()
   end)
+  lm("M", function()
+    if State.show_meta and UI.wins.meta and vim.api.nvim_win_is_valid(UI.wins.meta) then
+      pcall(vim.api.nvim_set_current_win, UI.wins.meta)
+    end
+  end)
 
-  local function enter_search()
+  function M.enter_search()
     State.input_focused = true
-    pcall(vim.api.nvim_set_current_win, UI.wins.input)
+    if UI.wins.input and vim.api.nvim_win_is_valid(UI.wins.input) then
+      pcall(vim.api.nvim_set_current_win, UI.wins.input)
+    end
     vim.cmd("startinsert!")
     autocomplete.update_autocomplete()
     handle_resize()
   end
   for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
-    lm(k, enter_search)
+    lm(k, M.enter_search)
   end
 
   lm("<C-d>", function()
@@ -758,6 +797,28 @@ function M.open(initial_tags)
   util.keymap(UI.bufs.list, "n", "<ScrollWheelUp>", function()
     api.scroll_meta(-3)
   end)
+
+  -- Keymaps for Meta
+  local function mm(key, fn)
+    util.keymap(UI.bufs.meta, "n", key, fn)
+  end
+  for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
+    mm(k, M.enter_search)
+  end
+  local function return_to_list()
+    if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+      pcall(vim.api.nvim_set_current_win, UI.wins.list)
+    end
+  end
+  mm("q", return_to_list)
+  mm("<Esc>", return_to_list)
+  mm("j", function()
+    api.scroll_meta(1)
+  end)
+  mm("k", function()
+    api.scroll_meta(-1)
+  end)
+  mm("M", return_to_list)
 
   -- Keymaps for Input
   local function im_n(key, fn)
@@ -861,7 +922,7 @@ function M.open(initial_tags)
     api.execute_search(initial_tags)
   else
     vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { "" })
-    enter_search()
+    M.enter_search()
   end
 end
 

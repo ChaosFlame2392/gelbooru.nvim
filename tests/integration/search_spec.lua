@@ -28,6 +28,29 @@ describe("Integration: Search & List flow", function()
     assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.status))
   end)
 
+  it("isolates input buffer from external completion popups", function()
+    ui.open()
+
+    local input_buf = state.UI.bufs.input
+    assert.is_not_nil(input_buf)
+    assert.is_true(vim.api.nvim_buf_is_valid(input_buf))
+
+    assert.are.equal("nofile", vim.bo[input_buf].buftype)
+    assert.are.equal("wipe", vim.bo[input_buf].bufhidden)
+    assert.are.equal("", vim.bo[input_buf].omnifunc)
+    assert.are.equal("", vim.bo[input_buf].completefunc)
+    assert.are.equal("", vim.bo[input_buf].completeopt)
+
+    assert.is_false(vim.b[input_buf].cmp_enabled)
+    assert.is_false(vim.b[input_buf].blink_cmp_enabled)
+    assert.is_false(vim.b[input_buf].completion)
+    assert.is_true(vim.b[input_buf].copilot_disabled)
+    assert.is_false(vim.b[input_buf].codecompanion_enabled)
+    assert.is_false(vim.b[input_buf].supermaven)
+    assert.is_false(vim.b[input_buf].codeium_enabled)
+    assert.is_true(vim.b[input_buf].codeium_disable)
+  end)
+
   it("executes search, resets cursor to 1, repaints list buffer, and pushes history", function()
     ui.open()
 

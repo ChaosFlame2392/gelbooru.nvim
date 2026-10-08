@@ -457,7 +457,7 @@ Priorities are ordered by **user experience impact** — bugs users can observe 
 
 > Items marked *(RESOLVED)* have been moved to git history and removed from the active backlog.
 > Previously resolved: Discovered Tags Transfer (54d3aef), Tag Scraper Filter Consistency (54d3aef),
-> Recently resolved: P1 UX-Breaking Bugs 1.1-1.8 (epoch cancellation, single-result array normalization, open re-entrancy guard, curl --fail, backward pagination tail-slice, url_encode '+', cross-platform open_url, close-reopen lifecycle & nil guards), Buffer cleanup (3.3), save_dir ensure (3.4), curl handle tracking & abort_all (3.5), real download unit tests (5.1), Responsive UI scaling & dynamic placement nudge (2.1), Stale preview elimination and id: autocomplete meta tag (2.2, 2.4).
+> Recently resolved: P1 UX-Breaking Bugs 1.1-1.8 (epoch cancellation, single-result array normalization, open re-entrancy guard, curl --fail, backward pagination tail-slice, url_encode '+', cross-platform open_url, close-reopen lifecycle & nil guards), Buffer cleanup (3.3), save_dir ensure (3.4), curl handle tracking & abort_all (3.5), real download unit tests (5.1), Responsive UI scaling & dynamic placement nudge (2.1), Stale preview elimination and id: autocomplete meta tag (2.2, 2.4), Search input popup isolation (2.7), Mouse isolation & metadata window navigation (2.5).
 
 ---
 
@@ -593,24 +593,29 @@ User-facing improvements that enhance the browsing experience, prioritized by us
 1. Added `"id:"` to `META_TAGS` in `core/config.lua`, displaying in autocomplete dropdown with `[Meta]` badge.
 2. In `net/api.lua:execute_search()`, if the user enters a bare numeric query (e.g. matching `^%s*(%d+)%s*$`) or space-separated ID search (`query:gsub("^%s*id:%s*(%d+)%s*$", "id:%1")`), automatically normalizes the query to `id:<digits>` before pushing to history and querying Gelbooru.
 
-#### 2.5 Mouse Input & Metadata Window Navigation
-- **Disable mouse**: Set `vim.opt.mouse = ""` on `open()`, restore prior user value on `teardown()`. Prevents accidental terminal clicks from disrupting floating window focus.
-- **Metadata focus**: Add `M` keymap from post list to focus `UI.wins.meta` with standard `j`/`k` scrolling. `<Esc>` or `q` returns focus directly to the post list without closing the browser.
+#### 2.5 Mouse Input & Metadata Window Navigation (RESOLVED)
+**Files:** `lua/gelbooru/core/state.lua`, `lua/gelbooru/ui/init.lua`, `tests/integration/regressions_spec.lua`
+**Problem:** Clicking floating windows with the mouse moves cursor focus into non-interactive or unhandled floating windows (e.g. `meta`, `frame`, `ac`, dividers). Because those windows lack keymaps, pressing `/` or `i` executes standard Neovim commands in unmodifiable buffers rather than returning to search mode.
+**Resolution:**
+1. **Disable mouse on open & restore on teardown:** Preserves user's original `vim.o.mouse` in `State.prev_mouse`, sets `vim.o.mouse = ""` in `open()`, and restores it on `teardown()`.
+2. **Make non-interactive windows non-focusable (`focusable = false`):** Explicitly marks `frame`, `div`, `vdiv`, `hdiv`, `img`, `status`, and `ac` windows as `focusable = false` in `util.float`, ensuring only `input`, `list`, and `meta` can ever receive window focus.
+3. **Keymaps & navigation for `meta` window:** In `UI.bufs.meta`, bound `i`, `I`, `a`, `A`, `s`, `S`, `/` to `M.enter_search()`; `q`, `<Esc>`, and `M` to return focus to `UI.wins.list`; and `j`/`k` to scroll metadata. Added `M` keymap in `UI.bufs.list` to toggle focus between `list` and `meta`.
 
 #### 2.6 Window Cleanliness on Open
 - Ensure `open()` starts with clean buffer state. Close stale windows, clear visual artifacts.
 - Do not enforce opaque backgrounds or disable transparency — just ensure a clean canvas.
 
-#### 2.7 Disable External Completion & LSP Popups in Search Input Bar
-**Files:** `ui/init.lua` (`UI.bufs.input` setup)
+#### 2.7 Disable External Completion & LSP Popups in Search Input Bar (RESOLVED)
+**Files:** `lua/gelbooru/ui/init.lua` (`UI.bufs.input` setup), `tests/integration/search_spec.lua`, `tests/integration/regressions_spec.lua`
 **Problem/Screencap:** When typing in the search bar, external autocompletion plugins (`nvim-cmp`, `blink.cmp`, CoC, snippets, or native `completeopt`) pop open their own menus (e.g. date snippets, buffer words), obscuring the query and clashing with Gelbooru's dedicated tag autocomplete dropdown (`UI.wins.ac`).
-**Required Changes:**
-- In `ui/init.lua`, immediately upon creating `UI.bufs.input`:
-  1. Disable `nvim-cmp`: `pcall(function() require("cmp").setup.buffer({ enabled = false }) end)` and `vim.b[UI.bufs.input].cmp_enabled = false`.
-  2. Disable `blink.cmp`: `vim.b[UI.bufs.input].completion = false` and `vim.b[UI.bufs.input].blink_cmp_enabled = false`.
-  3. Clear buffer completion functions: `vim.bo[UI.bufs.input].omnifunc = ""`, `vim.bo[UI.bufs.input].completefunc = ""`.
-  4. In `UI.wins.input` window options: disable native completion popups.
-  5. Disable AI/ghost text plugins: `vim.b[UI.bufs.input].copilot_disabled = true`.
+**Resolution:**
+- Implemented `isolate_input_buffer(buf, win)` in `lua/gelbooru/ui/init.lua` called immediately after creating `UI.wins.input`:
+  1. Configured buffer options: `buftype = "nofile"`, `bufhidden = "wipe"`, `omnifunc = ""`, `completefunc = ""`.
+  2. Disabled `nvim-cmp` buffer-locally via `vim.b[buf].cmp_enabled = false` and protected `pcall(function() require("cmp").setup.buffer({ enabled = false }) end)`.
+  3. Disabled `blink.cmp` via `vim.b[buf].completion = false` and `vim.b[buf].blink_cmp_enabled = false`.
+  4. Disabled AI/ghost text plugins: `vim.b[buf].copilot_disabled = true`, `vim.b[buf].codecompanion_enabled = false`, and `vim.b[buf].supermaven = false`.
+  5. Cleared window-local completion options via `vim.wo[win].completeopt = ""`.
+  6. Connected `download.abort_all` in `ui/init.lua:teardown()` to cancel and kill all active curl and download processes on UI close (§3.5).
 
 ---
 
