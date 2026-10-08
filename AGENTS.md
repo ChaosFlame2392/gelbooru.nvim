@@ -6,10 +6,12 @@ This document is the primary technical reference and development guide for AI ag
 
 ## 1. Executive Summary
 
-`gelbooru.nvim` is a high-performance, asynchronous Neovim plugin designed for searching, browsing, and inspecting images and metadata from the Gelbooru imageboard directly inside the editor.
+`gelbooru.nvim` is a high-performance, asynchronous Neovim plugin designed for searching, browsing, and inspecting images and metadata from the Gelbooru imageboard directly inside the editor, with integrated local library browsing and offline booru metadata enrichment.
 
 ### Key Capabilities
 - **Local Tag Indexing & Instant Autocomplete**: Loads and indexes 100k+ tags across five distinct categories (Series, Characters, Artists, General, Meta). Real-time debounced completion engine provides sub-3ms prefix lookups with popularity-weighted scoring, substring fallbacks, and dynamic API discovery.
+- **Unified Online & Local Library Engine**: Browse Gelbooru online or your saved local folders seamlessly through a unified query bar (`local: [tags]` or online tags), sharing layout, history, image rendering, and metadata inspector.
+- **Offline Booru Metadata Enrichment**: Enriches locally saved images and videos with live Gelbooru post metadata, tags, ratings, and artist categorization via fast ID extraction and disk caching.
 - **In-Editor Image Rendering**: Leverages `snacks.image` (supporting Kitty graphics protocol, Ghostty, Wezterm, and terminal pixel renderers) to display high-resolution post previews inside floating windows. Includes video detection, local disk caching, prefetching, and fallback chains.
 - **Interactive Multi-Window UI**: Floating layout featuring a top search bar, live autocomplete dropdown, scrollable post list, full image canvas, expandable metadata inspector, and status line.
 - **Zero Heavy Runtime Dependencies**: Pure Lua codebase requiring only Neovim (>= 0.9.0), system `curl`, and an image backend (`snacks.nvim` or `image.nvim`).
@@ -18,45 +20,81 @@ This document is the primary technical reference and development guide for AI ag
 
 ## 2. User Experience, Commands & Keymap Surface
 
-### 2.1 User Commands
+### 2.1 User Commands & Query Syntax
 - `:Gelbooru [tags]` (or `:Gelbooru`): Opens the browser window. If initial tags are passed (e.g. `:Gelbooru hatsune_miku rating:general`), immediately executes the search; otherwise opens with focus in the search bar and displays top recommended tags.
-- `:GelbooruTags` (alias `:GelbooruTag`): Initiates the background tag scraper and database builder, downloading thousands of top tags from Gelbooru and categorizing them into local JSON databases. Displays a floating progress spinner.
+- `:GelbooruLocal [dir]`: Opens the local folder browser for saved images and videos (defaults to `config.options.save_dir` if omitted).
+- `:GelbooruTags [args]` (alias `:GelbooruTag`): Initiates the background tag scraper and database builder (`:GelbooruTags`), batch tag verification and dead tag pruning (`:GelbooruTags verify`), or top-down count refresh (`:GelbooruTags refresh`). Displays a floating progress spinner.
 - `require("gelbooru").setup(opts)`: Configures paths, network limits, prefetch radius, and logging.
 
-### 2.2 Dual-Mode Interaction Model
+#### Unified Search Bar Query Syntax
+The top query bar accepts both online and local library search expressions:
+- `tag1 tag2 rating:general` — Online Gelbooru search across tags and meta modifiers.
+- `local:` or `local: [tags]` — Search your default `save_dir` local library, optionally filtering by booru tags or keywords (e.g. `local: zenless_zone_zero`).
+- `local:<dir> [tags]` — Search a custom local directory, optionally filtering by tags.
+- `id:<digits>` or bare `<digits>` — Directly loads a single post by its Gelbooru numeric ID.
 
-The UI operates in two distinct modes: **Browse Mode** (when navigating the post list) and **Search Mode** (when typing into the input bar).
+### 2.2 Three-Mode Interaction Model
 
-#### Browse Mode (List Window Focused)
-When viewing posts, the post list window is focused with cursorline enabled:
+The UI operates in three distinct, coordinated modes: **Browse Mode** (post list focused), **Metadata Inspector Mode** (`meta` window focused), and **Search Mode** (query input focused).
+
+#### 1. Browse Mode (List Window Focused)
+When viewing posts, the post list window is focused with `cursorline` enabled:
 
 | Key | Action | Technical Behavior |
 |---|---|---|
-| `j` / `k` | Move cursor down / up | Updates `State.cur` and `State.scroll_dir`. Updates history entry. Re-renders post list, triggers debounced preview render (30ms if cached, 150ms if remote), initiates background prefetching for adjacent posts, and auto-fetches the next page when nearing the boundary (`#posts - 5`). |
-| `<CR>` | Save image | Downloads the full-resolution `file_url` to `config.options.save_dir` with a status notification. |
-| `<Tab>` | Next Page | Fetches the next page (`pid = State.page + 1`) from the Gelbooru API and appends posts. |
+| `j` / `k` | Move cursor down / up | Updates `State.cur` and `State.scroll_dir`. Updates history entry. Re-renders post list, triggers debounced preview render (30ms if cached, 150ms if remote), initiates background prefetching/lookahead for adjacent posts, and auto-fetches the next page when nearing the boundary (`#posts - 5`). |
+| `<CR>` | Save image / Notice | In online mode: downloads full-resolution `file_url` to `config.options.save_dir` and automatically caches metadata to `<cache_dir>/meta_<id>.json`. In local mode (or if already saved in `save_dir`): displays local file path notice without triggering download or opening external viewer. |
+| `<Tab>` | Next Page | Fetches the next page (`pid = State.page + 1`) from the Gelbooru API and appends posts (online search). |
 | `<S-Tab>` | Previous Page | Rewinds to the previous page by removing the oldest batch of posts and decrementing `State.page`. |
-| `r` | Re-render preview | Resets `State.cur_id` and re-renders the current post preview. |
-| `R` | Force refresh | Invalidates local disk cache for the current post, deletes cached image, and re-downloads from source. |
-| `m` | Toggle metadata | Toggles `State.show_meta` boolean. Recalculates floating layout dimensions via `calc_layout()`, hides or displays the metadata window (`wins.meta`) and divider (`wins.hdiv`), and adjusts the preview canvas height. |
-| `o` | Open image URL | Spawns system default browser / viewer with `p.file_url`. |
-| `O` | Open post page | Spawns system default browser with the full post web page (`https://gelbooru.com/index.php?page=post&s=view&id=...`). |
-| `i`, `I`, `a`, `A`, `s`, `S`, `/` | Enter Search Mode | Shifts focus to the input window, enters insert mode, sets `State.input_focused = true`, pops open the autocomplete window (`wins.ac`), and updates completion candidates. |
-| `[` / `]` | Previous / Next History | Navigates the search history stack (`history_prev` / `history_next`), restoring queries, post arrays, and cursor positions. |
-| `<C-d>` / `<C-u>` | Scroll metadata | Scrolls the metadata text buffer down / up by 5 lines without shifting focus. |
+| `r` | Re-render preview | Resets `State.cur_id` and re-renders current post preview canvas and metadata without deleting cached files. |
+| `R` | Force refresh | Invalidates volatile preview cache in `/tmp/gelbooru_cache/prev_<id>.<ext>` and metadata cache in `<cache_dir>/meta_<id>.json`, clears snacks image cache, and re-fetches metadata and preview from network. Strictly **NEVER** touches, modifies, or deletes permanent files in `save_dir` or local user libraries. |
+| `m` | Toggle metadata panel | Toggles `State.show_meta` boolean. Recalculates floating layout dimensions via `calc_layout()`, hides or displays the metadata window (`wins.meta`) and divider (`wins.hdiv`), and adjusts the preview canvas height. |
+| `M` | Focus metadata inspector | Ensures `State.show_meta = true`, recalculates layout, and transfers window focus to `UI.wins.meta` with `cursorline = true` for deep tag inspection. |
+| `u` | Quick Artist Search | Single-key artist lookup (avoids conflict with `A` for search mode). Extracts the artist tag of the focused post and immediately populates and queries it in the search bar. |
+| `o` | Open post web page | Spawns system default browser with full post page (`https://gelbooru.com/index.php?page=post&s=view&id=...`). |
+| `O` | Open locally with media viewer | Opens media file directly in system media viewer (`mpv`, VLC, Preview). If post is not downloaded yet, automatically downloads it to `save_dir` first, then opens it locally either way! |
+| `<` / `>` | Adjust explorer width | Increments or decrements post list width ratio (`State.list_width_ratio`, clamped 0.10–0.40, default 0.22), dynamically resizing image canvas and nudging placement. |
+| `\` | Toggle Zen Mode | Collapses post list to 0 width, allocating 100% of display width to the image canvas for full-screen viewing; pressing `\` restores list. |
+| `i`, `I`, `a`, `A`, `s`, `S`, `/` | Enter Search Mode | Shifts focus to input window, enters insert mode, sets `State.input_focused = true`, pops open autocomplete dropdown (`wins.ac`), and updates completion candidates. |
+| `[` / `]` | Previous / Next History | Navigates search history stack (`history_prev` / `history_next`), restoring queries, post arrays, and cursor positions. |
+| `<C-d>` / `<C-u>` | Scroll metadata | Scrolls metadata text buffer down / up by 5 lines without shifting focus. |
 | `<ScrollWheelDown>` / `<ScrollWheelUp>` | Scroll metadata | Scrolls metadata text buffer by 3 lines via mouse wheel. |
 | `q` / `<Esc>` | Quit / Close | Initiates complete UI teardown: cancels timers, terminates in-flight downloads, closes all floating windows, resets state tables, and triggers garbage collection. |
 
-#### Search Mode (Input Window Focused)
+#### 2. Metadata Inspector Mode (Meta Window Focused)
+Entered via `M` from the list window:
+
+| Key | Action | Technical Behavior |
+|---|---|---|
+| `h`, `j`, `k`, `l`, `w`, `b`, `e` | Native cursor navigation | Standard Vim motion across metadata lines, artist credits, and tag badges. |
+| `gg` / `G` | Jump to top / bottom | Navigates to first line (`ID: ...`) or bottom of tag list. |
+| `<C-d>` / `<C-u>`, `<C-f>` / `<C-b>` | Page scrolling | Half-page and full-page scrolling natively in metadata buffer. |
+| `v`, `V`, `y` | Visual select & yank | Standard Vim yanking allows copying exact tag names or post IDs directly into registers. |
+| `q`, `<Esc>`, `M` | Return to post list | Restores focus to `UI.wins.list` without altering scroll position. |
+| `m` | Hide & return to list | Sets `State.show_meta = false`, recalculates layout to hide meta panel, and returns focus to `UI.wins.list`. |
+| `u` | Quick Artist Search | Immediately queries the artist of the active post in the search bar. |
+| `/`, `i`, `I`, `a`, `A`, `s`, `S` | Jump to search | Transitions directly into Search Mode in the input bar. |
+| `o` | Open web page | Opens full post URL (`https://gelbooru.com/index.php?page=post&s=view&id=...`) in default browser. |
+| `O` | Open locally | Opens local media file in system viewer (`mpv`, VLC, Preview), downloading first if not yet downloaded. |
+| `<CR>` | Save image / Notice | In online mode: downloads full-res media to `save_dir`. In local mode: displays local file notice. |
+
+#### 3. Search Mode (Input Window Focused)
 When typing in the query bar, the autocomplete window (`wins.ac`) displays matching tags ranked by relevance and category:
 
 | Key | Action | Technical Behavior |
 |---|---|---|
-| `<Tab>` / `<Down>` / `<C-n>` | Navigate suggestion down | Sets `State.autocomplete_navigated = true`, increments `State.autocomplete_cur`, highlights the candidate line in `wins.ac`. |
+| `<Tab>` / `<Down>` / `<C-n>` | Navigate suggestion down | Sets `State.autocomplete_navigated = true`, increments `State.autocomplete_cur`, highlights candidate line in `wins.ac`. |
 | `<S-Tab>` / `<Up>` / `<C-p>` | Navigate suggestion up | Sets `State.autocomplete_navigated = true`, decrements `State.autocomplete_cur`, moves highlight line. |
-| `<Space>` | Contextual select or space | **If user Tab-navigated (`autocomplete_navigated == true` and `cur > 0`)**: Selects the highlighted suggestion, appends it to the query with trailing space, resets navigation flag. Allows rapid chaining (e.g. Tab → Space selects `sort:score`).<br>**If user was typing**: Auto-selects only if typed word is an exact or normalized match to top suggestion; otherwise inserts literal space. |
-| `<CR>` | Execute search | Reads full input line, exits insert mode, pushes query to history stack, resets pagination (`page = 0`, `cur = 1`), clears current post list, triggers `api.fetch(1)`, and starts background lookup for any unindexed query tags. |
-| `<Esc>` | Cancel search | Exits insert mode, unfocuses input bar, hides autocomplete popup, returns focus to post list. |
+| `<Space>` | Contextual select or space | **If Tab-navigated (`autocomplete_navigated == true` and `cur > 0`)**: Selects highlighted suggestion, appends with trailing space, resets navigation flag (e.g. Tab → Space selects `sort:score`).<br>**If typing**: Auto-selects only if typed word is exact/normalized match; otherwise inserts literal space. |
+| `<CR>` | Execute search | Reads input line, exits insert mode, pushes query to history stack, resets pagination (`page = 0`, `cur = 1`), clears current post list, triggers `api.fetch(1)` (or `open_local`), and starts background lookup for unindexed query tags. |
+| `jk` / `<Esc>` / `<C-[>` | Exit search via `InsertLeave` | **Automatic `InsertLeave` autocommand**: Catches all insert-mode exits (including custom `inoremap jk <Esc>`), automatically clears `State.input_focused`, hides autocomplete popup (`wins.ac`), and restores focus to `UI.wins.list`. |
+| `q`, `j`, `k` (normal mode) | Defensive exit to list | If input buffer lands in normal mode, pressing `q`, `j`, `k`, or `<Esc>` exits to post list immediately. |
+| `i`, `I`, `a`, `A`, `s`, `S` (normal mode) | Defensive re-enter search | Re-enters insert mode, sets `State.input_focused = true`, and reopens autocomplete popup. |
+
+#### Mouse Disabling & Boundary Protection
+- **Mouse Isolation**: `vim.o.mouse = ""` is set in `open()` and restored to `State.prev_mouse` in `teardown()`, preventing terminal mouse clicks from stealing focus.
+- **Window Focus Guards**: All non-interactive windows (`frame`, `div`, `vdiv`, `hdiv`, `img`, `status`, `ac`) have `focusable = false`. Only `input`, `list`, and `meta` can receive window focus.
+- **Defensive Boundary Keymaps**: Even if terminal events land in non-interactive buffers (`frame`, `div`, `vdiv`, `hdiv`, `img`, `status`, `ac`), pressing `/` or `i` immediately transitions to search mode, and `q` or `<Esc>` immediately returns to the post list.
 
 ---
 
@@ -408,6 +446,33 @@ Any agent or contributor modifying `gelbooru.nvim` **MUST** adhere to these runt
 - `:GelbooruTags` must maintain a module-level `is_running` flag to prevent duplicate worker swarms and concurrent file write conflicts.
 - `db.load_tags()` spans multiple `vim.schedule` turns; a `loading_in_progress` flag must prevent concurrent invocations from duplicating tag indices.
 
+### 9. Memory-Efficient Saved File Tracking ($O(1)$ Hash Set)
+- Tracking local library downloads while browsing must never store 50,000 full file path strings or post tables in Lua heap (which would consume dozens of megabytes and cause GC stutter).
+- Store exclusively a flat integer-to-extension hash table in memory: `saved_index[tonumber(p.id)] = ext`.
+- Memory footprint: $\approx 350\text{ KB}$ for 10,000 files; $\approx 1.8\text{ MB}$ for 50,000 files.
+- Lookup speed is $O(1)$ ($0.0001\text{ ms}$) in pure memory with zero disk I/O.
+- Initialize lazily on first need, caching directory `mtime`. Never re-scan the folder unless `mtime` changes. Update incrementally in $O(1)$ on `<CR>` save.
+- Keep rich metadata on disk in `<cache_dir>/meta_<id>.json`. Hydrate only the currently focused post and the 5 prefetched lookahead posts in memory, guaranteeing constant $O(1)$ memory usage.
+
+### 10. Strict Libuv Handle & Timer Lifecycle
+- Every libuv timer (`uv_timer_t`) created for cursor lookahead, prefetching, status resets, or background indexing must be tracked in `UI.prefetch_timers` or `State.indexer_timer`.
+- On navigation, scroll direction change, query change, or `teardown()`: unconditionally call `timer:stop()` and `if not timer:is_closing() then timer:close() end`.
+- Never nil out timer references without closing the underlying C handle.
+
+### 11. Local Media File Preservation & Cache Invariant (`r` vs `R`)
+- `r` (Soft Redraw): Resets `State.cur_id = nil` and redraws the current post canvas and metadata without deleting any cached files or making network requests.
+- `R` (Force Refresh): Invalidates volatile cache files in `<cache_dir>` (`prev_<id>.<ext>`, `meta_<id>.json`) and snacks image cache, then re-fetches metadata and re-downloads preview from the network. Strictly **NEVER** touches, modifies, or deletes permanent files in `save_dir` or local user libraries. Downloaded files on disk are permanent library media, not volatile cache.
+- `<CR>`: In online mode, downloads media to `save_dir` and auto-caches metadata. In local mode (or on posts already saved in `save_dir`), displays a local file path notice without triggering duplicate downloads or opening external viewers.
+
+### 12. Bounded Background Crawler Concurrency
+- The background folder metadata crawler must be throttled to at most 1–2 concurrent `curl` processes with 100ms+ pacing to prevent network starvation or OS process table exhaustion.
+- All in-flight processes must be tracked in `download.active_handles` and aborted immediately via `download.abort_all()` on UI close or query navigation.
+
+### 13. Search Input Buffer & Window Isolation
+- Always isolate the search input buffer via `isolate_input_buffer()`: `buftype = "nofile"`, `bufhidden = "wipe"`, `cmp_enabled = false`, `blink_cmp_enabled = false`, `copilot_disabled = true`, `completeopt = ""`.
+- Catch all insert-mode exits via an `InsertLeave` autocommand on `UI.bufs.input` to prevent getting stranded in normal mode with autocomplete hovering on `jk` (`inoremap jk <Esc>`), `<Esc>`, or `<C-[>`.
+- All decorative/boundary windows (`frame`, `div`, `vdiv`, `hdiv`, `img`, `status`, `ac`) must have `focusable = false` with defensive keymap fallbacks (`/`, `i` -> search; `q`, `<Esc>` -> list).
+
 ---
 
 ## 7. Testing, Tooling & Verification
@@ -624,7 +689,72 @@ User-facing improvements that enhance the browsing experience, prioritized by us
   3. Disabled `blink.cmp` via `vim.b[buf].completion = false` and `vim.b[buf].blink_cmp_enabled = false`.
   4. Disabled AI/ghost text plugins: `vim.b[buf].copilot_disabled = true`, `vim.b[buf].codecompanion_enabled = false`, and `vim.b[buf].supermaven = false`.
   5. Cleared window-local completion options via `vim.wo[win].completeopt = ""`.
-  6. Connected `download.abort_all` in `ui/init.lua:teardown()` to cancel and kill all active curl and download processes on UI close (§3.5).
+#### 2.8 Unified Hybrid Library Engine: Metadata Caching, Cursor Lookahead, Local Tag Search, Video Pipeline, Explorer Width & Artist Jump (PLANNED)
+**Files:** `lua/gelbooru/local/init.lua`, `lua/gelbooru/local/scan.lua`, `lua/gelbooru/net/api.lua`, `lua/gelbooru/net/download.lua`, `lua/gelbooru/ui/init.lua`, `lua/gelbooru/ui/image.lua`
+**Context:** The browser must operate as a single unified system across online and local media: local browsing is simply searching `local: [tags]` (default `save_dir`) or `local:<dir> [tags]`, while online browsing instantly recognizes downloaded files, upgrades canvas quality, and supports quick artist jumps and adjustable canvas dimensions.
+
+**Actionable Architecture & Technical Requirements:**
+1. **Persistent Metadata Disk Cache & Save Auto-Caching**:
+   - Persist post metadata to `config.options.cache_dir .. "/meta_" .. id .. ".json"`.
+   - On online image save (`<CR>` in `api.save_current`), automatically write the full post metadata JSON to disk alongside the media file.
+   - On local folder scan (`local/scan.lua`), synchronously pre-hydrate posts from cached JSON files in `<5ms`, providing instant score, tags, rating, and dimensions on folder open and full offline support.
+   - Safe invalidation on `R`: deletes `<cache_dir>/meta_<id>.json` and refetches from API while strictly preserving local disk media files.
+2. **Dual-Tier Lookahead & Background Indexing Engine**:
+   - **Tier 1 (High Priority - Cursor Rush)**: Immediate prefetching in `scroll_dir` around cursor (`idx ± prefetch_radius`). Rushes ahead of navigation to eliminate metadata display lag on `j`/`k`.
+   - **Tier 2 (Background - Folder Indexer)**: Throttled async queue crawling unindexed posts in the folder, querying Gelbooru API and caching metadata without starving the cursor-rush queue.
+3. **Local Tag Filtering (`local:<dir> <tags>`)**:
+   - Syntax: `local:<dir> <tags>` or `local: <tags>` (default `save_dir`).
+   - Query parser extracts directory path and filters post list against cached metadata tags, artists, characters, rating (`rating:general`), score (`score:>=50`), and negative tags (`-tag`). Fallback matching against normalized filename words for untagged items.
+4. **Local Video Pipeline (`.mp4`, `.webm`)**:
+   - Extend `scan_local_folder` to include `.mp4` and `.webm` files.
+   - List badge: `[VIDEO]`.
+   - Media playback: `O` launches system media player (`mpv`, `vlc`, or system default via `vim.ui.open`). `o` opens online post web page. `<CR>` displays local file notice.
+5. **Unified Online ↔ Local Hybrid Integration & Consistent Keymaps**:
+   - When an online post is saved via `<CR>`, immediately replace the sample preview on canvas with the full-resolution local file from `save_dir` upon download completion.
+   - Detect existing downloads in `save_dir` when browsing online (`saved_index`) and display a `[SAVED]` or `✓` badge in the post list.
+   - Keymap dispatch:
+     - `<CR>`: in online mode, saves media and metadata to `save_dir` and cache. In local mode or if already saved, displays local file notice.
+     - `o`: opens the full Gelbooru post web page (`https://gelbooru.com/index.php?page=post&s=view&id=...`) in default browser.
+     - `O`: opens the media file in the system default viewer/player (`mpv`, VLC, Preview). If not downloaded yet, automatically downloads to `save_dir` first, then opens locally either way!
+6. **Artist Quick-Search Hotkey (`u`)**:
+   - Single-key lookup mapped in list mode and meta inspector (avoids conflict with `A` which enters search mode). Extracts artist tag from active post (`p.artist`, `tags_by_name`).
+   - Immediately populates the search bar and executes search, enabling instant 1-keystroke author discovery.
+7. **Dynamic Explorer Menu Width & Canvas Expansion (Zen Mode)**:
+   - Allow user to adjust the width of the post list window (`UI.wins.list`) to give more space to the image canvas (`UI.wins.img`).
+   - Hotkeys `<` / `>` to incrementally narrow/widen the list window by 2–5 columns (`State.list_width_ratio` clamped between 0.10 and 0.40, default 0.22).
+   - Collapsible Zen Mode toggle (`\`): collapses the list window to 0 columns, allocating 100% of the width to `UI.wins.img` for maximum-size image viewing; pressing `\` restores the list.
+   - Invokes `image.nudge_current_placement()` dynamically on list resize so the image instantly scales to fill the expanded canvas.
+8. **Memory & Performance Discipline ($O(1)$ Hash Index & Bounded Working Set)**:
+   - Store downloaded post tracking exclusively in a flat integer hash table: `saved_index[tonumber(p.id)] = ext` (<400KB for 10,000 files).
+   - Check directory `mtime` with `uv.fs_stat` to avoid re-scanning `save_dir`.
+   - Never keep whole-library metadata in memory: only active post and 5 lookahead posts are hydrated in Lua memory; remainder resides on disk in `<cache_dir>/meta_<id>.json`.
+   - Background crawler bounded to at most 1–2 concurrent `curl` requests with 100ms+ pacing, aborted cleanly on `teardown()`.
+
+#### 2.9 Tag Database Engine Overhaul: Live Verification, Dead-Tag Pruning & Count Refresh (PLANNED)
+**Files:** `lua/gelbooru/tags/init.lua`, `lua/gelbooru/tags/db.lua`, `lua/gelbooru/tags/fetcher.lua`, `lua/gelbooru/tags/resolve.lua`, `lua/gelbooru/net/api.lua`
+**Context & Root Cause Analysis:**
+1. **Append-Only Scraper Freezes Top Tag Counts (`fetcher.lua:142`)**:
+   `next_pid = math.floor(total_fetched / LIMIT)`. When `:GelbooruTags` runs, it preloads all existing tags into memory (`total_fetched = 50,000`), sets `next_pid = 500`, and scrapes from page 500 onward. Pages 0 through 499 (the most popular, frequently updated tags) are **never re-queried**. Their post counts remain permanently frozen from when they were first downloaded, distorting autocomplete popularity ranking (`log10(count + 1)`).
+2. **Booru Tag Aliasing & Renaming Leaves Ghost Tags**:
+   Gelbooru curators continuously alias and merge tags (e.g. typos, character disambiguation `amber` -> `amber_(genshin_impact)`). When a tag is aliased, all posts migrate to the new canonical tag. The old tag remains in local JSON files indefinitely with its old count. When a user selects it from autocomplete, searching `tags=old_tag` returns **0 results ("No results for: old_tag")**.
+3. **Zero-Count Tags Never Pruned**:
+   When posts are deleted or untagged, small tags can drop to 0 posts. Local databases have no deletion mechanism, accumulating phantom tags.
+
+**Actionable Architecture & Technical Requirements:**
+1. **Batch Tag Verification Engine (`:GelbooruTags verify [all|category]`)**:
+   - Gelbooru's Tag API (`index.php?page=dapi&s=tag&q=index&json=1`) accepts multiple tag names joined by `+`: `&names=tag1+tag2+tag3+...+tag50`.
+   - Batches existing indexed tags into groups of 50–100 names per HTTP GET request. Verifying 20,000 tags requires only ~200–400 fast requests instead of tens of thousands.
+   - **Count & Type Synchronization**: Updates `t.c` with live count from the API. If tag category changed on the booru (e.g. general reclassified to character), relocates tag to appropriate category table.
+   - **Dead & Aliased Tag Pruning**: If a tag is returned with `count == 0` or is missing entirely from a successful API response, purges the dead tag from memory indices (`State.tags_by_name`, category lists) and disk.
+2. **Top-Down Count Refresh in Scraper (`:GelbooruTags refresh`)**:
+   - Allows scraping from page 0 downward to refresh counts of the top 10,000–50,000 most popular tags, updating existing tags in place rather than skipping them.
+3. **Query-Time Self-Healing (0-Result Auto-Correction)**:
+   - In `net/api.lua:execute_search(query)`, if a single-tag search returns 0 results:
+   - Queries `tags_api` asynchronously for that tag. If `count == 0` or tag does not exist, automatically purges the tag from local indices and disk, displaying: `"Tag '<name>' has 0 posts on Gelbooru (pruned from local index)"`.
+4. **Safety & Invariant Guarantees**:
+   - **Zero Data Loss on Network Drop**: Only tags explicitly confirmed as dead/0-count by a valid 200 OK JSON response are pruned; failed network calls or timeouts never delete tags.
+   - **Atomic Checkpointing**: Serializes updated databases using `.tmp` write and rename every 1,000 tags.
+   - **Clean Cancellation**: `:GelbooruTagsStop` command to pause or abort verification cleanly without corrupting database state.
 
 ---
 
