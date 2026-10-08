@@ -9,11 +9,26 @@ M.active_handles = {}
 M.pending_resumes = {} -- guards the async gap between scan and active_downloads registration
 M.interrupted_dests = {} -- dests killed by teardown; callbacks skip rename and preserve .part
 
+function M.abort_all()
+  for dest, handle in pairs(M.active_handles or {}) do
+    if type(dest) == "string" then
+      M.interrupted_dests[dest] = true
+    end
+    if handle and handle.kill then
+      pcall(handle.kill, handle, 9)
+    end
+  end
+  M.active_handles = {}
+end
+
 function M.curl_async(url, cb)
   log("DEBUG", "CURL", "GET %s", url)
-  vim.system({
+  local handle
+  local done = false
+  handle = vim.system({
     "curl",
     "-s",
+    "--fail",
     "-L",
     "--max-time",
     "25",
@@ -26,10 +41,26 @@ function M.curl_async(url, cb)
     "--retry-connrefused",
     url,
   }, { text = true }, function(out)
+    done = true
+    if handle then
+      M.active_handles[handle] = nil
+      M.interrupted_dests[handle] = nil
+    end
     vim.schedule(function()
-      cb(out.code == 0 and out.stdout or nil)
+      if handle then
+        M.active_handles[handle] = nil
+        M.interrupted_dests[handle] = nil
+      end
+      if cb then
+        cb(out.code == 0 and out.stdout or nil)
+      end
     end)
   end)
+
+  if handle and not done then
+    M.active_handles[handle] = handle
+  end
+  return handle
 end
 
 -- opts: { resume = bool }
@@ -54,7 +85,7 @@ function M.download_async(url, dest, cb, opts)
   end
 
   local tmp_dest = dest .. ".part"
-  local resume = opts and opts.resume
+  local resume = opts and opts.resume == true
   local part_size = vim.fn.getfsize(tmp_dest)
   local do_resume = resume and part_size > 1024
 
@@ -68,7 +99,7 @@ function M.download_async(url, dest, cb, opts)
   M.active_downloads[dest] = cb and { cb } or {}
 
   local curl_cmd = {
-    "curl", "-s", "-L",
+    "curl", "-s", "--fail", "-L",
     "--max-time", "300",
     "--connect-timeout", "10",
     "--retry", "3", "--retry-delay", "2", "--retry-connrefused",
@@ -82,7 +113,13 @@ function M.download_async(url, dest, cb, opts)
   table.insert(curl_cmd, tmp_dest)
   table.insert(curl_cmd, url)
 
-  local handle = vim.system(curl_cmd, {}, function(out)
+  local handle
+  local done = false
+  handle = vim.system(curl_cmd, {}, function(out)
+    done = true
+    if handle then
+      M.active_handles[dest] = nil
+    end
     vim.schedule(function()
       local callbacks = M.active_downloads[dest] or {}
       M.active_downloads[dest] = nil
@@ -123,7 +160,11 @@ function M.download_async(url, dest, cb, opts)
       end
     end)
   end)
-  M.active_handles[dest] = handle
+
+  if handle and not done then
+    M.active_handles[dest] = handle
+  end
+  return handle
 end
 
 -- Scans save_dir for orphaned .part files from previous sessions and queues

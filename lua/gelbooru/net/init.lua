@@ -9,6 +9,7 @@ M.api = api
 -- Re-export common functions directly on net module for convenience
 M.curl_async = download.curl_async
 M.download_async = download.download_async
+M.abort_all = download.abort_all
 M.cancel_prefetch_timers = download.cancel_prefetch_timers
 M.prefetch_around = download.prefetch_around
 M.fetch = api.fetch
