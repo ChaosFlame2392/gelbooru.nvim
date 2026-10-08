@@ -27,6 +27,7 @@ M.State = {
   autocomplete_navigated = false,
   input_focused = false,
   scroll_dir = 1,
+  search_epoch = 0,
 }
 
 M.UI = {
@@ -44,11 +45,20 @@ M.UI = {
 }
 
 function M.reset_query_state()
+  M.State.query = ""
   M.State.posts = {}
   M.State.page = 0
   M.State.cur = 1
   M.State.loading = false
   M.State.cur_id = nil
+  M.State.show_meta = true
+  M.State.history = {}
+  M.State.history_idx = 0
+  M.State.autocomplete_cur = 1
+  M.State.autocomplete_navigated = false
+  M.State.input_focused = false
+  M.State.scroll_dir = 1
+  M.State.search_epoch = (M.State.search_epoch or 0) + 1
 end
 
 function M.reset_ui()
