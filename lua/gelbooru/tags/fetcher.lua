@@ -194,8 +194,9 @@ function M.update_tags()
       end
 
       local ok, data = pcall(vim.fn.json_decode, body)
-      if ok and data and type(data.tag) == "table" and #data.tag > 0 then
-        for _, t in ipairs(data.tag) do
+      local tag_list = (ok and data and data.tag) and util.ensure_array(data.tag) or nil
+      if tag_list and #tag_list > 0 then
+        for _, t in ipairs(tag_list) do
           local name = t.name
           local count = tonumber(t.count) or 0
           local typ = tonumber(t.type) or 0

@@ -28,6 +28,12 @@ function M.browse()
   return M.open()
 end
 
+function M.open_local(dir)
+  require("gelbooru.local").open_local(dir)
+end
+
+M.local_browser = M.open_local
+
 function M.update_tags()
   tags.update_tags()
 end

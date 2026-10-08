@@ -135,13 +135,17 @@ function M.resolve_post_tags(p, on_complete)
   local url = string.format("%s&names=%s%s", config.options.tags_api, table.concat(chunks, "+"), util.auth_qs())
 
   download.curl_async(url, function(body)
+    if state.State.torn_down then
+      return
+    end
     if not body then
       return
     end
     local ok, data = pcall(vim.fn.json_decode, body)
-    if ok and data and type(data.tag) == "table" then
+    if ok and data and data.tag then
+      local tag_list = util.ensure_array(data.tag)
       local found_artist = false
-      for _, t in ipairs(data.tag) do
+      for _, t in ipairs(tag_list) do
         if t.name and t.type then
           local count = tonumber(t.count) or 0
           local typ = tonumber(t.type) or 0
@@ -210,13 +214,17 @@ function M.fetch_api_tags(query)
 
       local url = string.format("%s&name_pattern=%%%s%%&orderby=count&limit=25%s", config.options.tags_api, util.url_encode(query), util.auth_qs())
       download.curl_async(url, function(body)
+        if state.State.torn_down then
+          return
+        end
         if not body then
           return
         end
         local ok, data = pcall(vim.fn.json_decode, body)
-        if ok and data and type(data.tag) == "table" and #data.tag > 0 then
+        local tag_list = (ok and data and data.tag) and util.ensure_array(data.tag) or {}
+        if #tag_list > 0 then
           local added = false
-          for _, t in ipairs(data.tag) do
+          for _, t in ipairs(tag_list) do
             if t.name and t.type then
               local name_lower = t.name:lower()
               if not State.tags_by_name[name_lower] then

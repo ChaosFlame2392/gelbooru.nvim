@@ -84,6 +84,15 @@ describe("image.get_preview_targets", function()
     local _, dest = image.get_preview_targets(p)
     assert.is_truthy(dest:find(config.options.cache_dir, 1, true))
   end)
+
+  it("returns local file path as dest when is_local is true", function()
+    local local_file = "/path/to/downloaded/12345.png"
+    local p = { id = "12345", file_url = local_file, sample_url = local_file, preview_url = local_file, is_local = true }
+    local urls, dest = image.get_preview_targets(p)
+    assert.are.equal(1, #urls)
+    assert.are.equal(local_file, urls[1])
+    assert.are.equal(local_file, dest)
+  end)
 end)
 
 describe("image.preview_source_name", function()

@@ -43,6 +43,9 @@ function M.get_preview_targets(p, url_idx)
   local chosen_idx = math.max(1, math.min(url_idx or 1, #urls))
   local ext = M.file_ext_from_url(urls[chosen_idx])
   local cache_dir = config.options.cache_dir
+  if p and p.is_local then
+    return urls, p.file_url
+  end
   return urls, string.format("%s/prev_%s.%s", cache_dir, p.id, ext:lower())
 end
 
@@ -58,7 +61,26 @@ function M.close_current_placement()
   end
 end
 
+function M.reset_canvas(placeholder)
+  pcall(M.close_current_placement)
+  if state.State.torn_down then
+    return
+  end
+  local UI = state.UI
+  local util = require("gelbooru.core.util")
+  placeholder = placeholder or "  Loading..."
+  util.set_lines(UI.bufs.img, { placeholder })
+  util.set_lines(UI.bufs.meta, {})
+  if UI.wins and UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img)
+    and UI.bufs and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img) then
+    pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
+  end
+end
+
 function M.clear_snacks_cache_for(post_id)
+  if not post_id or tostring(post_id) == "" or tostring(post_id) == "nil" then
+    return
+  end
   local snacks_cache = vim.fn.expand("~/.cache/nvim/snacks/image/")
   for _, f in ipairs(vim.fn.glob(snacks_cache .. "*", false, true)) do
     if f:find(tostring(post_id), 1, true) then

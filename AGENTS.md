@@ -72,6 +72,7 @@ gelbooru.nvim/
 │       ├── db_spec.lua               # Tag validation (is_clean_tag), indexing, bucketing
 │       ├── history_spec.lua          # Stack push/pop/restore, reference semantics
 │       ├── image_spec.lua            # URL parsing, video detection, cache targets
+│       ├── local_spec.lua            # Local folder scanning, ID parsing, metadata enrichment
 │       └── util_spec.lua             # URL encoding, entity decoding, fuzzy matching
 └── lua/gelbooru/
     ├── init.lua                      # Top-level API entry point & user command bindings
@@ -81,6 +82,9 @@ gelbooru.nvim/
     │   ├── history.lua               # Query navigation stack with reference sharing
     │   ├── util.lua                  # Pure helpers (encoding, HTML decode, auth cache, window helpers)
     │   └── log.lua                   # Structured disk logger writing to stdpath("state")/gelbooru.log
+    ├── local/
+    │   ├── init.lua                  # Local browser facade & open_local orchestrator
+    │   └── scan.lua                  # Fast & safe directory scanner & post ID extractor
     ├── net/
     │   ├── init.lua                  # Facade re-exporting API and download submodules
     │   ├── api.lua                   # Gelbooru XML/JSON API client & query execution
@@ -177,7 +181,11 @@ Image presentation coordinator:
 - `is_video_post(post)`: Detects `.mp4` and `.webm` media.
 - `render_image(win, path, width, height)`: Interacts with `snacks.image.placement`. Creates a wipe-buffer, establishes placement, sets the new buffer on the window **before** deleting the old buffer, and calls `placement.update()`.
 
----
+#### `lua/gelbooru/local/init.lua` & `lua/gelbooru/local/scan.lua`
+Local folder browser subsystem:
+- `scan.lua`: Directory scanning and numeric ID extraction. Uses `vim.loop.fs_scandir` to safely traverse directories and parse filenames with unicode, spaces, multiple dots, and brackets without spawning external shell processes.
+- `init.lua`: Manages the `:GelbooruLocal [dir]` entry point and `local:<dir>` search query routing, coordinates canvas clearing with `image.reset_canvas`, pushes search history, and enriches post metadata via `api.fetch_post_metadata`.
+
 
 ## 4. Subsystem Deep-Dives
 
@@ -457,7 +465,7 @@ Priorities are ordered by **user experience impact** — bugs users can observe 
 
 > Items marked *(RESOLVED)* have been moved to git history and removed from the active backlog.
 > Previously resolved: Discovered Tags Transfer (54d3aef), Tag Scraper Filter Consistency (54d3aef),
-> Recently resolved: P1 UX-Breaking Bugs 1.1-1.8 (epoch cancellation, single-result array normalization, open re-entrancy guard, curl --fail, backward pagination tail-slice, url_encode '+', cross-platform open_url, close-reopen lifecycle & nil guards), Buffer cleanup (3.3), save_dir ensure (3.4), curl handle tracking & abort_all (3.5), real download unit tests (5.1), Responsive UI scaling & dynamic placement nudge (2.1), Stale preview elimination and id: autocomplete meta tag (2.2, 2.4), Search input popup isolation (2.7), Mouse isolation & metadata window navigation (2.5).
+> Recently resolved: P1 UX-Breaking Bugs 1.1-1.8 (epoch cancellation, single-result array normalization, open re-entrancy guard, curl --fail, backward pagination tail-slice, url_encode '+', cross-platform open_url, close-reopen lifecycle & nil guards), Buffer cleanup (3.3), save_dir ensure (3.4), curl handle tracking & abort_all (3.5), real download unit tests (5.1), Responsive UI scaling & dynamic placement nudge (2.1), Stale preview elimination and id: autocomplete meta tag (2.2, 2.4), Search input popup isolation (2.7), Local folder browser mode (2.3), Mouse isolation & metadata window navigation (2.5).
 
 ---
 
@@ -578,14 +586,15 @@ User-facing improvements that enhance the browsing experience, prioritized by us
 - In `core/state.lua:reset_query_state()`:
   - Resets `M.State.autocomplete_filtered = {}` and `M.State.search_epoch = 0`.
 
-#### 2.3 Local Folder Browser Mode (`:GelbooruLocal [path]`)
+#### 2.3 Local Folder Browser Mode (`:GelbooruLocal [path]`) (RESOLVED)
+**Files:** `lua/gelbooru/init.lua`, `plugin/gelbooru.lua`, `lua/gelbooru/local/init.lua`, `lua/gelbooru/local/scan.lua`, `lua/gelbooru/ui/init.lua`, `lua/gelbooru/net/api.lua`, `lua/gelbooru/ui/image.lua`, `tests/unit/local_spec.lua`, `tests/integration/local_spec.lua`
 **Context:** Users want to browse locally downloaded/saved images (e.g. from `save_dir` or custom folder) inside Neovim, but still see live booru metadata (artists, characters, series, tags, rating, score) in the inspector window.
-**Required Changes:**
-1. **Command / Entry point:** Add `:GelbooruLocal [dir]` (defaulting to `config.options.save_dir`).
-2. **Directory scan:** Scan directory for local image files (`.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`).
-3. **Local image rendering:** Load local file path directly into the preview canvas via `image.render_image(win, local_path)` without remote download.
-4. **Metadata resolution by ID:** Extract post ID from filename (e.g. `11802758.jpg` -> ID `11802758`). In background, query Gelbooru API by ID (`index.php?page=dapi&s=post&q=index&json=1&id=<ID>`) and populate `UI.bufs.meta` with live artist, character, series, and general tag badges.
-5. **Shared infrastructure:** Shares the single-post ID fetch and metadata formatting pipeline with §2.4.
+**Resolution:**
+1. **User command & API entry point**: Added `:GelbooruLocal [dir]` command (in `plugin/gelbooru.lua` and `lua/gelbooru/init.lua:local_browser([dir])`), defaulting to `config.options.save_dir`. Also added input-bar routing: typing `local:<dir>` in search bar routes directly to `ui.open_local`.
+2. **Fast & safe directory scanner**: Implemented `scan_local_folder(dir)` in `lua/gelbooru/local/scan.lua` (re-exported via `local/init.lua` and `ui/init.lua`) using `vim.loop.fs_scandir` to safely handle filenames with unicode, spaces, multiple dots, and brackets, filtering for valid image extensions (`.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`) without executing external shell commands.
+3. **Local image rendering without download**: Preview rendering loads local disk files directly via `image.render_image(win, local_path)` without remote network downloads. Local files are strictly guarded against accidental deletion/truncation by `R` (force refresh) or `<CR>` (save).
+4. **Metadata resolution by ID & shared API**: Extracted numeric IDs from filenames (e.g. `11802758.jpg` -> ID `11802758`). Fetches booru post metadata asynchronously via shared `api.fetch_post_by_id(id)` / `api.fetch_post_metadata(p)`, populating `UI.bufs.meta` with live artist, character, series, and general tags, and dynamic artist tag indexing.
+5. **Shared canvas clearing**: Reuses `image.reset_canvas(placeholder)` across mode switches, search executions, and history transitions (`restore_history`).
 
 #### 2.4 Autocomplete for `id:` Tag & Search Discoverability (RESOLVED)
 **Context:** Direct post ID searching already works natively through Gelbooru query syntax (e.g. typing `id:11802758` returns the post). However, `id:` was not in `META_TAGS`, making it undiscoverable.

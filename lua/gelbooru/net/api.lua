@@ -20,6 +20,10 @@ function M.fetch(direction)
   local UI = state.UI
   local ui = require("gelbooru.ui")
 
+  if not State.query or State.query:match("^local:") then
+    return
+  end
+
   if direction < 0 then
     if State.page <= 1 then
       return
@@ -109,17 +113,7 @@ local function clear_preview_loading()
     return
   end
   pcall(function()
-    require("gelbooru.ui.image").close_current_placement()
-  end)
-  pcall(function()
-    local state_mod = require("gelbooru.core.state")
-    local util_mod = require("gelbooru.core.util")
-    util_mod.set_lines(state_mod.UI.bufs.img, { "  Loading..." })
-    util_mod.set_lines(state_mod.UI.bufs.meta, {})
-    if state_mod.UI.wins.img and vim.api.nvim_win_is_valid(state_mod.UI.wins.img)
-      and state_mod.UI.bufs.img and vim.api.nvim_buf_is_valid(state_mod.UI.bufs.img) then
-      pcall(vim.api.nvim_win_set_buf, state_mod.UI.wins.img, state_mod.UI.bufs.img)
-    end
+    require("gelbooru.ui.image").reset_canvas("  Loading...")
   end)
 end
 
@@ -128,6 +122,12 @@ function M.execute_search(query)
   local ui = require("gelbooru.ui")
 
   if State.torn_down then
+    return
+  end
+
+  local local_path = query and query:match("^local:%s*(.*)")
+  if local_path then
+    ui.open_local(local_path)
     return
   end
 
@@ -142,7 +142,6 @@ function M.execute_search(query)
       end
     end
   end
-
   if query == State.query and #State.posts > 0 then
     ui.render_list()
     return
@@ -209,6 +208,14 @@ function M.save_current()
     ui.set_status("No file URL for this post", 2000)
     return
   end
+  if p.is_local then
+    ui.set_status("Local file: " .. p.file_url, 2500)
+    return
+  end
+  if not p.id or tostring(p.id) == "" or tostring(p.id) == "nil" then
+    ui.set_status("No post ID available to save", 2000)
+    return
+  end
   local ext = p.file_url:match("%.(%w+)$") or "jpg"
   local dest = string.format("%s/%s.%s", config.options.save_dir, p.id, ext)
   if vim.fn.filereadable(dest) == 1 then
@@ -224,6 +231,63 @@ function M.save_current()
   download.download_async(p.file_url, dest, function(saved)
     ui.set_status(saved and ("✓ Saved → " .. dest) or "✗ Save failed!", 3000)
   end, { resume = true })
+end
+
+function M.fetch_post_by_id(id, cb)
+  if not id or tostring(id) == "" or tostring(id) == "nil" then
+    if cb then cb(nil) end
+    return
+  end
+  local url = string.format("%s&id=%s%s", config.options.api_base, util.url_encode(tostring(id)), util.auth_qs())
+  download.curl_async(url, function(body)
+    if state.State.torn_down then
+      return
+    end
+    if not body then
+      if cb then cb(nil) end
+      return
+    end
+    local ok, data = pcall(vim.fn.json_decode, body)
+    if not ok or not data or not data.post then
+      if cb then cb(nil) end
+      return
+    end
+    local posts = ensure_array(data.post)
+    if #posts > 0 and posts[1] then
+      if cb then cb(posts[1]) end
+    else
+      if cb then cb(nil) end
+    end
+  end)
+end
+
+function M.fetch_post_metadata(p, cb)
+  if not p or not p.id or tostring(p.id) == "" or p._metadata_fetched or p._metadata_loading then
+    return
+  end
+  p._metadata_loading = true
+  M.fetch_post_by_id(p.id, function(d)
+    p._metadata_loading = false
+    p._metadata_fetched = true
+    if not d or state.State.torn_down then
+      return
+    end
+    p.tags = d.tags or p.tags
+    p.rating = d.rating or p.rating
+    p.score = tonumber(d.score) or d.score or p.score
+    if d.width then
+      p.width = tonumber(d.width) or d.width
+    end
+    if d.height then
+      p.height = tonumber(d.height) or d.height
+    end
+    if d.source then
+      p.source = d.source
+    end
+    if cb then
+      cb(p)
+    end
+  end)
 end
 
 function M.scroll_meta(dir)

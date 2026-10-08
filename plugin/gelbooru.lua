@@ -10,3 +10,8 @@ end, { desc = "Browse Gelbooru: tag picker → image browser" })
 vim.api.nvim_create_user_command("GelbooruTags", function()
   require("gelbooru").update_tags()
 end, { desc = "Download & cache Gelbooru tags for autocomplete" })
+
+vim.api.nvim_create_user_command("GelbooruLocal", function(opts)
+  local arg = opts.args and vim.trim(opts.args)
+  require("gelbooru").open_local((arg and arg ~= "") and arg or nil)
+end, { nargs = "?", complete = "dir", desc = "Browse local Gelbooru image folder" })

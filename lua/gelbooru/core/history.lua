@@ -53,29 +53,12 @@ local function clear_preview_buffers(posts_count)
   if state.State.torn_down then
     return
   end
-  if posts_count == 0 then
-    pcall(function()
-      local util = require("gelbooru.core.util")
-      local state_mod = require("gelbooru.core.state")
-      util.set_lines(state_mod.UI.bufs.img, { "  No posts found" })
-      util.set_lines(state_mod.UI.bufs.meta, {})
-      if state_mod.UI.wins.img and vim.api.nvim_win_is_valid(state_mod.UI.wins.img)
-        and state_mod.UI.bufs.img and vim.api.nvim_buf_is_valid(state_mod.UI.bufs.img) then
-        pcall(vim.api.nvim_win_set_buf, state_mod.UI.wins.img, state_mod.UI.bufs.img)
-      end
-    end)
-  else
-    pcall(function()
-      local util = require("gelbooru.core.util")
-      local state_mod = require("gelbooru.core.state")
-      util.set_lines(state_mod.UI.bufs.img, { "  Loading..." })
-      util.set_lines(state_mod.UI.bufs.meta, {})
-      if state_mod.UI.wins.img and vim.api.nvim_win_is_valid(state_mod.UI.wins.img)
-        and state_mod.UI.bufs.img and vim.api.nvim_buf_is_valid(state_mod.UI.bufs.img) then
-        pcall(vim.api.nvim_win_set_buf, state_mod.UI.wins.img, state_mod.UI.bufs.img)
-      end
-    end)
+  local img_mod = require("gelbooru.ui.image")
+  local msg = posts_count == 0 and "  No posts found" or "  Loading..."
+  if state.State.query and state.State.query:match("^local:") and posts_count == 0 then
+    msg = "  No images found"
   end
+  pcall(img_mod.reset_canvas, msg)
 end
 
 function M.restore_history(idx)
@@ -117,13 +100,14 @@ function M.restore_history(idx)
   )
 
   if UI.bufs.input and vim.api.nvim_buf_is_valid(UI.bufs.input) then
+    vim.bo[UI.bufs.input].modifiable = true
     vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { State.query })
   end
 
   local ui = require("gelbooru.ui")
   local api = require("gelbooru.net.api")
 
-  if #State.posts == 0 and State.query ~= "" then
+  if #State.posts == 0 and State.query ~= "" and not State.query:match("^local:") then
     ui.set_status(string.format("Fetching results for: %s…", State.query))
     ui.render_list()
     api.fetch(1)

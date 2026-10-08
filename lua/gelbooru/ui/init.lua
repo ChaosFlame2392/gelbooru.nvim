@@ -7,6 +7,7 @@ local image = require("gelbooru.ui.image")
 local tags = require("gelbooru.tags")
 local autocomplete = require("gelbooru.ui.autocomplete")
 local history = require("gelbooru.core.history")
+local api = require("gelbooru.net.api")
 
 local M = {}
 
@@ -79,7 +80,15 @@ function M.teardown()
   download.active_downloads = {}
   pcall(download.abort_all)
   download.pending_resumes = {}
-  image.close_current_placement()
+  pcall(image.close_current_placement)
+
+  local State = state.State
+  if State.prev_mouse ~= nil then
+    pcall(function()
+      vim.o.mouse = State.prev_mouse
+    end)
+    State.prev_mouse = nil
+  end
 
   local State = state.State
   if State.prev_mouse ~= nil then
@@ -312,12 +321,29 @@ function M.render_list()
     lines[i] = string.format("%s%s ★%-5s %-15s%s", prefix, r, score, dims, tags_s)
   end
   if #lines == 0 then
-    lines = { State.loading and "  Fetching…" or "  No results" }
+    local no_res_msg = "  No results"
+    if State.query and State.query:match("^local:") then
+      no_res_msg = "  No images found"
+    end
+    lines = { State.loading and "  Fetching…" or no_res_msg }
   end
   util.set_lines(UI.bufs.list, lines)
   if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
     pcall(vim.api.nvim_win_set_cursor, UI.wins.list, { math.max(1, State.cur), 0 })
   end
+end
+
+local function is_same_post(p1, p2)
+  if not p1 or not p2 then
+    return false
+  end
+  if p1 == p2 then
+    return true
+  end
+  if p1.is_local or p2.is_local then
+    return p1.file_url ~= nil and p1.file_url == p2.file_url
+  end
+  return p1.id ~= nil and p2.id ~= nil and tostring(p1.id) == tostring(p2.id)
 end
 
 local function load_and_render_image(p, url_idx, retry_count, force_download)
@@ -336,24 +362,24 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
     if not UI.wins.img or not vim.api.nvim_win_is_valid(UI.wins.img) then
       return
     end
-    if not State.posts[State.cur] or State.posts[State.cur].id ~= p.id then
+    if not is_same_post(State.posts[State.cur], p) then
       return
     end
     pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
     util.set_lines(UI.bufs.img, { "", "  [ " .. msg .. " ]" })
     M.set_status(msg, 2500)
-    log("WARN", "PREVIEW", "Preview failed for post %s: %s", tostring(p.id), msg)
+    log("WARN", "PREVIEW", "Preview failed for post %s: %s", tostring(p.id or p.file_url), msg)
   end
 
   local function do_render()
     if not UI.wins.img or not vim.api.nvim_win_is_valid(UI.wins.img) then
-      log("DEBUG", "RENDER", "do_render aborted: img win invalid (post %s)", tostring(p.id))
+      log("DEBUG", "RENDER", "do_render aborted: img win invalid (post %s)", tostring(p.id or p.file_url))
       return
     end
-    if not State.posts[State.cur] or State.posts[State.cur].id ~= p.id then
+    if not is_same_post(State.posts[State.cur], p) then
       log("DEBUG", "RENDER", "do_render stale: cur=%d wanted=%s got=%s",
-        State.cur, tostring(p.id),
-        State.posts[State.cur] and tostring(State.posts[State.cur].id) or "nil")
+        State.cur, tostring(p.id or p.file_url),
+        State.posts[State.cur] and tostring(State.posts[State.cur].id or State.posts[State.cur].file_url) or "nil")
       return
     end
     M.set_status()
@@ -371,8 +397,8 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
     end
 
     local size = vim.fn.getfsize(dest)
-    if size > -1 and size < 1024 then
-      log("DEBUG", "RENDER", "file too small (%d bytes), re-fetching (post %s)", size, tostring(p.id))
+    if not p.is_local and size > -1 and size < 1024 then
+      log("DEBUG", "RENDER", "file too small (%d bytes), re-fetching (post %s)", size, tostring(p.id or p.file_url))
       if retry_count < 1 then
         load_and_render_image(p, url_idx, retry_count + 1, true)
       elseif url_idx < #urls then
@@ -385,9 +411,9 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
 
     local ok = image.render_image(UI.wins.img, dest)
     if not ok then
-      if retry_count < 1 then
+      if not p.is_local and retry_count < 1 then
         load_and_render_image(p, url_idx, retry_count + 1, true)
-      elseif url_idx < #urls then
+      elseif not p.is_local and url_idx < #urls then
         load_and_render_image(p, url_idx + 1, 0, true)
       else
         fail_preview("Image Conversion Failed - File may be corrupted or unsupported")
@@ -395,7 +421,15 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
     end
   end
 
-  if vim.fn.filereadable(dest) == 0 or force_download then
+  if p.is_local then
+    if force_download and p.id then
+      image.clear_snacks_cache_for(p.id)
+    end
+    do_render()
+    return
+  end
+
+  if not p.is_local and (vim.fn.filereadable(dest) == 0 or force_download) then
     if force_download and vim.fn.filereadable(dest) == 1 then
       vim.fn.delete(dest)
       image.clear_snacks_cache_for(p.id)
@@ -425,21 +459,12 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
   end
 end
 
-function M.render_preview(force_download)
-  local State = state.State
+function M.render_metadata(p)
   local UI = state.UI
-  local p = State.posts[State.cur]
-  if not p then
-    local msg = #State.posts == 0 and "  No posts found" or "  No post selected"
-    util.set_lines(UI.bufs.img, { msg })
-    util.set_lines(UI.bufs.meta, {})
+  local State = state.State
+  if not p or not UI.bufs.meta or not vim.api.nvim_buf_is_valid(UI.bufs.meta) then
     return
   end
-
-  if p.id == State.cur_id and not force_download then
-    return
-  end
-  State.cur_id = p.id
 
   local ext_info = image.file_ext_from_url(p.file_url)
   local is_vid = image.is_video_post(p)
@@ -481,15 +506,65 @@ function M.render_preview(force_download)
   if UI.wins.meta and vim.api.nvim_win_is_valid(UI.wins.meta) then
     pcall(vim.api.nvim_win_set_cursor, UI.wins.meta, { 1, 0 })
   end
+end
 
-  -- Background dynamic artist resolution. Reset cur_id so the deduplication
-  -- guard does not block the metadata repaint after an artist is discovered.
+function M.render_preview(force_download)
+  local State = state.State
+  local UI = state.UI
+  local p = State.posts[State.cur]
+  if not p then
+    local no_img_msg = (State.query and State.query:match("^local:")) and "  No images found"
+      or (#State.posts == 0 and "  No posts found" or "  No post selected")
+    image.reset_canvas(no_img_msg)
+    return
+  end
+
+  local item_key = p.is_local and p.file_url or p.id
+  if item_key and item_key == State.cur_id and not force_download then
+    return
+  end
+  State.cur_id = item_key
+
+  M.render_metadata(p)
+
+  -- Background dynamic artist resolution.
   pcall(tags.resolve_post_tags, p, function()
-    if State.posts[State.cur] and State.posts[State.cur].id == p.id then
-      State.cur_id = nil
-      M.render_preview(false)
+    if state.State.torn_down then
+      return
+    end
+    if is_same_post(State.posts[State.cur], p) then
+      M.render_metadata(p)
     end
   end)
+
+  -- If post has an ID, asynchronously fetch its booru metadata via single-post API call
+  -- to enrich p.tags, p.rating, p.score and refresh metadata buffer when focused!
+  if p.is_local and p.id and (not p._metadata_fetched or force_download) then
+    if force_download then
+      p._metadata_fetched = nil
+    end
+    api.fetch_post_metadata(p, function(updated_p)
+      if state.State.torn_down then
+        return
+      end
+      local UI_cur = state.UI
+      if not UI_cur.wins.frame or not vim.api.nvim_win_is_valid(UI_cur.wins.frame) then
+        return
+      end
+      if is_same_post(state.State.posts[state.State.cur], updated_p) then
+        M.render_metadata(updated_p)
+        M.render_list()
+        pcall(tags.resolve_post_tags, updated_p, function()
+          if state.State.torn_down then
+            return
+          end
+          if is_same_post(state.State.posts[state.State.cur], updated_p) then
+            M.render_metadata(updated_p)
+          end
+        end)
+      end
+    end)
+  end
 
   local _, dest = image.get_preview_targets(p)
   local is_cached = not force_download and dest and vim.fn.filereadable(dest) == 1 and not download.active_downloads[dest]
@@ -521,13 +596,18 @@ function M.render_preview(force_download)
         UI.scroll_timer:close()
       end
       UI.scroll_timer = nil
-      if State.posts[State.cur] and State.posts[State.cur].id == p.id then
+      if state.State.torn_down then
+        return
+      end
+      if is_same_post(State.posts[State.cur], p) then
         load_and_render_image(p, 1, 0, force_download)
-        download.prefetch_around(State.cur)
+        if not p.is_local then
+          download.prefetch_around(State.cur)
+        end
       else
         log("DEBUG", "RENDER", "scroll_timer stale: wanted post %s, cur is now %s",
-          tostring(p.id),
-          State.posts[State.cur] and tostring(State.posts[State.cur].id) or "nil")
+          tostring(p.id or p.file_url),
+          State.posts[State.cur] and tostring(State.posts[State.cur].id or State.posts[State.cur].file_url) or "nil")
       end
     end)
   )
@@ -557,19 +637,29 @@ local function isolate_input_buffer(buf, win)
   vim.b[buf].codeium_disable = true
 end
 
-function M.open(initial_tags)
+function M.enter_search()
+  local UI = state.UI
+  local State = state.State
+  State.input_focused = true
+  if UI.wins.input and vim.api.nvim_win_is_valid(UI.wins.input) then
+    pcall(vim.api.nvim_set_current_win, UI.wins.input)
+  end
+  vim.cmd("startinsert!")
+  autocomplete.update_autocomplete()
+  handle_resize()
+end
+
+function M.ensure_ui()
   local UI = state.UI
   if UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame) then
-    return
+    return false
   end
-  state.reset_query_state()
 
   local State = state.State
   if State.prev_mouse == nil then
     State.prev_mouse = vim.o.mouse
   end
   vim.o.mouse = ""
-
   local api = require("gelbooru.net.api")
 
   util.ensure(config.options.cache_dir)
@@ -741,6 +831,9 @@ function M.open(initial_tags)
     M.render_preview(false)
   end)
   lm("j", function()
+    if #State.posts == 0 then
+      return
+    end
     State.cur = math.min(State.cur + 1, #State.posts)
     State.scroll_dir = 1
     if State.history[State.history_idx] then
@@ -753,6 +846,9 @@ function M.open(initial_tags)
     end
   end)
   lm("k", function()
+    if #State.posts == 0 then
+      return
+    end
     State.cur = math.max(State.cur - 1, 1)
     State.scroll_dir = -1
     if State.history[State.history_idx] then
@@ -778,8 +874,13 @@ function M.open(initial_tags)
   end)
   lm("O", function()
     local p = State.posts[State.cur]
-    if p and p.id then
+    if not p then
+      return
+    end
+    if p.id and tostring(p.id) ~= "" and tostring(p.id) ~= "nil" then
       open_url(string.format("https://gelbooru.com/index.php?page=post&s=view&id=%s", p.id))
+    else
+      M.set_status("No post ID available for browser lookup", 2000)
     end
   end)
   lm("m", function()
@@ -798,15 +899,7 @@ function M.open(initial_tags)
     end
   end)
 
-  function M.enter_search()
-    State.input_focused = true
-    if UI.wins.input and vim.api.nvim_win_is_valid(UI.wins.input) then
-      pcall(vim.api.nvim_set_current_win, UI.wins.input)
-    end
-    vim.cmd("startinsert!")
-    autocomplete.update_autocomplete()
-    handle_resize()
-  end
+
   for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
     lm(k, M.enter_search)
   end
@@ -980,6 +1073,23 @@ function M.open(initial_tags)
     State.autocomplete_navigated = false
   end)
 
+  return true
+end
+
+function M.scan_local_folder(dir)
+  return require("gelbooru.local").scan_local_folder(dir)
+end
+
+
+function M.open(initial_tags)
+  local UI = state.UI
+  if UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame) then
+    return
+  end
+  state.reset_query_state()
+
+  M.ensure_ui()
+
   vim.api.nvim_set_current_win(UI.wins.list)
   M.set_status()
 
@@ -991,5 +1101,10 @@ function M.open(initial_tags)
     M.enter_search()
   end
 end
+
+function M.open_local(dir)
+  return require("gelbooru.local").open_local(dir)
+end
+
 
 return M
