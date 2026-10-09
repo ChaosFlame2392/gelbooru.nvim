@@ -50,4 +50,65 @@ describe("Integration: Autocomplete Engine", function()
     assert.is_true(state.State.autocomplete_navigated)
     assert.are.equal(1, state.State.autocomplete_cur)
   end)
+
+  it("does not show local_only tags (sort:date, sort:mtime) without local: prefix", function()
+    ui.open()
+    vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { "sort:d" })
+    autocomplete.update_autocomplete()
+
+    local names = {}
+    for _, item in ipairs(state.State.autocomplete_filtered or {}) do
+      names[item.n] = true
+    end
+    assert.is_nil(names["sort:date"])
+    assert.is_nil(names["sort:date:asc"])
+
+    vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { "sort:m" })
+    autocomplete.update_autocomplete()
+    names = {}
+    for _, item in ipairs(state.State.autocomplete_filtered or {}) do
+      names[item.n] = true
+    end
+    assert.is_nil(names["sort:mtime"])
+  end)
+
+  it("shows local_only tags when local: prefix is present", function()
+    ui.open()
+    vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { "local: sort:d" })
+    autocomplete.update_autocomplete()
+
+    local names = {}
+    for _, item in ipairs(state.State.autocomplete_filtered or {}) do
+      names[item.n] = true
+    end
+    assert.is_true(names["sort:date"] == true)
+    assert.is_true(names["sort:date:asc"] == true)
+
+    vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { "local: sort:m" })
+    autocomplete.update_autocomplete()
+    names = {}
+    for _, item in ipairs(state.State.autocomplete_filtered or {}) do
+      names[item.n] = true
+    end
+    assert.is_true(names["sort:mtime"] == true)
+  end)
+
+  it("shows non-local meta tags (such as sort:random) in both online and local modes", function()
+    ui.open()
+    vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { "sort:r" })
+    autocomplete.update_autocomplete()
+    local names = {}
+    for _, item in ipairs(state.State.autocomplete_filtered or {}) do
+      names[item.n] = true
+    end
+    assert.is_true(names["sort:random"] == true)
+
+    vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { "local: sort:r" })
+    autocomplete.update_autocomplete()
+    names = {}
+    for _, item in ipairs(state.State.autocomplete_filtered or {}) do
+      names[item.n] = true
+    end
+    assert.is_true(names["sort:random"] == true)
+  end)
 end)

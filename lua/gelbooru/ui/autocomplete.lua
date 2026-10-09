@@ -33,13 +33,22 @@ function M.update_autocomplete(query)
     query_part = full:match("(%S*)$") or ""
   end
 
+  local line = full or ""
+  local is_local = line:match("^[Ll][Oo][Cc][Aa][Ll]:") ~= nil
+
   local search_target = query_part:gsub("^[-~]", ""):lower()
   local target_norm = util.normalize_str(search_target)
   local has_norm = target_norm ~= "" and #target_norm > 0
 
   if search_target == "" then
-    for i = 1, math.min(300, #State.all_tags) do
-      table.insert(State.autocomplete_filtered, State.all_tags[i])
+    for i = 1, #State.all_tags do
+      local t = State.all_tags[i]
+      if is_local or not t.local_only then
+        table.insert(State.autocomplete_filtered, t)
+        if #State.autocomplete_filtered >= 300 then
+          break
+        end
+      end
     end
   else
     local seen_names = {}
@@ -54,9 +63,10 @@ function M.update_autocomplete(query)
       local limit = max_per_bucket or 100
       for i = 1, #bucket do
         local t = bucket[i]
+        local is_local_only = t.local_only or false
         local count = tonumber(t.c) or 0
         local typ = tonumber(t.t) or 0
-        if typ == 5 or count >= 1 then
+        if (is_local or not is_local_only) and (typ == 5 or count >= 1) then
           local nl = t.n_lower
           if not seen_names[nl] then
             local base = 0
@@ -99,11 +109,13 @@ function M.update_autocomplete(query)
 
     -- META tags are a small fixed list, always injected at top priority
     for _, t in ipairs(config.META_TAGS) do
-      local nl = t.n_lower or t.n:lower()
-      if not seen_names[nl] then
-        if nl == search_target or vim.startswith(nl, search_target) then
-          seen_names[nl] = true
-          candidates[#candidates + 1] = { item = t, score = 1000.0, count = 0 }
+      if is_local or not t.local_only then
+        local nl = t.n_lower or t.n:lower()
+        if not seen_names[nl] then
+          if nl == search_target or vim.startswith(nl, search_target) then
+            seen_names[nl] = true
+            candidates[#candidates + 1] = { item = t, score = 1000.0, count = 0 }
+          end
         end
       end
     end
@@ -116,9 +128,10 @@ function M.update_autocomplete(query)
         end
         for i = 1, #list do
           local t = list[i]
+          local is_local_only = t.local_only or false
           local count = tonumber(t.c) or 0
           local typ = tonumber(t.t) or 0
-          if (typ == 5 or count >= 1) and not seen_names[t.n_lower] then
+          if (is_local or not is_local_only) and (typ == 5 or count >= 1) and not seen_names[t.n_lower] then
             local nl = t.n_lower
             if nl:find(search_target, 1, true) or (has_norm and t.norm:find(target_norm, 1, true)) then
               seen_names[nl] = true

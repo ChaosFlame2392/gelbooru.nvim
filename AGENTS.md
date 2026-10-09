@@ -28,9 +28,14 @@ This document is the primary technical reference and architectural specification
 
 ### 2.2 Unified Query Bar Syntax
 The top query bar accepts both online and local library search expressions:
-- `tag1 tag2 rating:general` — Online Gelbooru search across tags and meta modifiers.
+- `tag1 tag2 rating:general` — Online Gelbooru search across tags and meta modifiers. Direct API pass-through preserves remote sorting directives (`sort:score`, `sort:id`, `sort:random`).
 - `local:` or `local: [tags]` — Search default `save_dir` local library, optionally filtering by booru tags or keywords (e.g. `local: zenless_zone_zero`).
 - `local:<dir> [tags]` — Search a custom local directory, optionally filtering by tags.
+- `local: sort:<key>[:<dir>]` — Local library sorting directives:
+  - `sort:score` / `sort:score:asc` — Sort local posts by metadata score (descending/ascending), utilizing disk metadata cache for instant sorting.
+  - `sort:id` / `sort:id:asc` — Sort local posts by Gelbooru post ID (newest/oldest).
+  - `sort:date` / `sort:date:asc` (`sort:mtime`) — Sort local posts by file modification timestamp (`mtime`).
+  - `sort:random` / `order:random` / `random` — Randomly shuffle matching local files using Fisher-Yates algorithm.
 - `id:<digits>` or bare `<digits>` — Directly loads a single post by its Gelbooru numeric ID.
 
 ### 2.3 Three-Mode Interaction Model
@@ -203,13 +208,13 @@ Dual-tier lookahead engine:
 - **Tier 2 (Background - Folder Indexer)**: Throttled async queue crawling unindexed posts with max 2 concurrent workers and 100ms pacing, aborted cleanly on navigation or teardown.
 
 #### `lua/gelbooru/local/query.lua`
-Unified query expression parser and post filter: parses `local:` and `local:<dir>` prefixes, tags, exact negative exclusions (`-tag`), rating filters (`rating:general`), and numeric score comparisons (`score:>=50`).
+Unified query expression parser, filter, and sorting engine: parses `local:` and `local:<dir>` prefixes, tags, exact negative exclusions (`-tag`), rating filters (`rating:general`), numeric score comparisons (`score:>=50`), and sorting directives (`sort:score`, `sort:id`, `sort:date`/`sort:mtime`, `sort:random`/`order:random`). Isolates sort directives from tag matching and provides `M.sort_posts(posts, sort_opt)` with disk metadata fallback.
 
 #### `lua/gelbooru/local/scan.lua`
 Safe directory traversal and post ID extractor using `vim.loop.fs_scandir`. Safely parses filenames with unicode, spaces, multiple dots, and brackets without external shell subshells. Falls back to `fs_stat` when filesystem returns nil `ftype`.
 
 #### `lua/gelbooru/tags/db.lua`
-Local tag indexing and categorization: strict validation heuristic (`is_clean_tag`), memory indexing into first-letter bucket tables, and category composite list creation.
+Local tag indexing and categorization: strict validation heuristic (`is_clean_tag`), memory indexing into first-letter bucket tables, and category composite list creation. Preserves `local_only` flags on metadata tags.
 
 #### `lua/gelbooru/tags/fetcher.lua`
 Tag database scraper (`:GelbooruTags`): concurrent worker loops, JSON response verification with exponential backoff on Cloudflare/429 HTML responses, live animated progress spinner, memory synchronization on tag absorption, and atomic checkpointing.
@@ -218,13 +223,13 @@ Tag database scraper (`:GelbooruTags`): concurrent worker loops, JSON response v
 Dynamic post tag categorization: extracts unindexed tags from posts, batches queries to the Gelbooru tag API, persists discovered tags to `discovered.json` (debounced 500ms), and provides live API fallback when local matches are sparse.
 
 #### `lua/gelbooru/ui/init.lua`
-The primary UI coordinator: floating window coordinate math (`calc_layout()`), responsive scaling handling (`VimResized`), window lifecycle, cursor motion synchronization (`gg`, `G`, `CursorMoved`), autocomplete commitment on `<CR>`, preview cooldown timers, and clean teardown.
+The primary UI coordinator: floating window coordinate math (`calc_layout()`), responsive scaling handling (`VimResized`), window lifecycle, cursor motion synchronization (`gg`, `G`, `CursorMoved`), autocomplete commitment on `<CR>`, preview cooldown timers, video preview rendering (prioritizing high-quality local `ffmpeg` thumbnails in both local and online modes), and clean teardown.
 
 #### `lua/gelbooru/ui/autocomplete.lua`
-Real-time tag autocompletion engine: cursor-column token extraction, sub-3ms lookup using first-character bucket tables, empty token protection, popularity-weighted candidate scoring, and category badge formatting.
+Real-time tag autocompletion engine: cursor-column token extraction, sub-3ms lookup using first-character bucket tables, empty token protection, popularity-weighted candidate scoring, category badge formatting, and context-aware scoping (suppressing `local_only` sorting tags in online queries with zero keystroke lag).
 
 #### `lua/gelbooru/ui/image.lua`
-Image presentation coordinator: preview URL hierarchy resolution (`sample_url` -> `preview_url` -> `file_url`), video detection (`.mp4`, `.webm`), canvas resets, and `snacks.image.placement` management with non-modifiable buffers and defensive boundary keymaps.
+Image presentation coordinator: preview URL hierarchy resolution (`sample_url` -> `preview_url` -> `file_url`), video detection (`.mp4`, `.webm`), strictly local `ffmpeg` frame extraction (`extract_video_thumbnail`), saved video lookup (`get_saved_video_path`), corrupt/extreme DPI header sanitization (`sanitize_dpi` clamping to 96 DPI), canvas resets, and `snacks.image.placement` management with non-modifiable buffers and defensive boundary keymaps.
 
 ---
 
@@ -499,47 +504,70 @@ The repository includes unit and integration test suites using `plenary.nvim` an
 This branch introduces unified local library browsing, offline booru metadata enrichment, and advanced viewing controls to `gelbooru.nvim`. It bridges online imageboard exploration and offline collection management into a single seamless interface.
 
 ### 8.2 Completed Architectural Features
-- **Unified Query Expression Engine**: Implemented `local:` and `local:<dir>` query support in `lua/gelbooru/local/query.lua`, handling booru tags, negative exclusions (`-tag`), ratings (`rating:general`), and score operators (`score:>=50`).
+- **Unified Query Expression & Local Sorting Engine**: Implemented `local:` and `local:<dir>` query support in `lua/gelbooru/local/query.lua`, handling booru tags, negative exclusions (`-tag`), ratings (`rating:general`), score operators (`score:>=50`), and sorting directives (`sort:score`, `sort:id`, `sort:date`/`sort:mtime`, `sort:random`/`order:random`). Isolates sort directives from `positive_tags` and supports instant offline score sorting via disk metadata cache fallback.
+- **Strictly Local FFMPEG Video Previews**: Integrated asynchronous frame extraction in `lua/gelbooru/ui/image.lua` using `ffmpeg -ss 00:00:01 -i ... -frames:v 1 -q:v 2 <cache>/vthumb_<id>.jpg -y` with atomic `.part` guards and 0-byte validation. Zero online queries for local videos.
+- **Hybrid Video High-Quality Upgrade**: When saving videos in online mode, `save_current()` immediately extracts the high-quality local `ffmpeg` frame and renders it; both online and local browsing automatically prioritize the high-quality local `ffmpeg` frame over compressed web previews.
+- **Context-Aware Autocomplete Scoping**: Designated `sort:date`, `sort:date:asc`, and `sort:mtime` as `local_only` in `core/config.lua` and `ui/autocomplete.lua`, suppressing them in online searches via a single $O(1)$ prefix check without keystroke lag.
+- **Extreme DPI Sanitization**: Added `sanitize_dpi` in `ui/image.lua` to normalize corrupted or astronomical image DPI headers (e.g. 42 million DPI) to standard 96 DPI, fixing the 1×1 character dot rendering bug in `snacks.image`.
 - **High-Performance File Index**: Implemented flat hash table `saved_index[tonumber(p.id)] = ext` in `lua/gelbooru/local/index.lua` with directory `mtime` validation to avoid redundant disk I/O.
 - **Dual-Tier Lookahead Engine**: Implemented cursor rush prefetcher in scroll direction and throttled background metadata crawler in `lua/gelbooru/local/indexer.lua`.
+- **Download Process Spawn Safety & Resumption Pipeline**: Wrapped `vim.system` invocations in `pcall` within `lua/gelbooru/net/download.lua` to guard against file descriptor exhaustion or invalid argument crashes. On spawn error, `active_downloads[dest]` and process handles are cleanly drained and queued callbacks are invoked with `false`, preventing queue deadlocks. Handled orphaned `.part` files with automatic startup resumption and non-blocking `uv.fs_utime` timestamp synchronization.
+- **Queue Head-Pointer Optimization in Local Indexer**: Replaced shift-based `table.remove(queue, 1)` ($O(N)$ overhead) in `lua/gelbooru/local/indexer.lua` with a high-speed integer cursor (`M.queue_head`), eliminating GC churn and array shifting overhead when crawling thousands of images.
+- **In-Flight Tag Deduplication & Negative Caching**: Added `in_flight_tags` deduplication and `negative_tag_cache` hash set in `lua/gelbooru/tags/resolve.lua` to suppress duplicate concurrent network queries and eliminate redundant requests for non-existent tags.
+- **Native JSON Deserialization Modernization**: Replaced legacy `vim.fn.json_decode` across all network, tag scraper, and metadata modules with native C-speed `vim.json.decode()` (falling back to `vim.fn.json_decode` on older Neovim versions), significantly reducing bridge overhead and peak memory allocations during bulk tag ingestion.
+- **Decoupled Autocomplete Cursor Navigation**: Separated candidate evaluation from visual selection via `autocomplete.navigate(dir)` in `lua/gelbooru/ui/autocomplete.lua` and `lua/gelbooru/ui/init.lua`, enabling fast `<Tab>`/`<Down>` suggestion movement without re-tokenizing input or re-scoring candidate buckets.
+- **Anchored Snacks Image Cache Purge**: Hardened image cache invalidation in `lua/gelbooru/ui/image.lua` using boundary regex `%f[%d]<id>%f[%D]` and `vim.fn.stdpath("cache")` resolution to prevent accidental deletion of posts sharing prefix substrings.
+- **System Default Media Opener**: Configured `util.open_media` to delegate to system default viewer (`open` on macOS honoring Finder default player like IINA, `xdg-open` on Linux, or user-configured `config.options.media_player`).
 - **Canvas & Playback Polish**: Implemented Zen Mode (`\`), dynamic explorer width adjustment (`<` / `>`), quick artist lookup (`u`), video badge detection (`[VIDEO]`), and instant full-resolution preview upgrades on `<CR>`.
-- **Process & Lifecycle Hardening**: Added managed resume timers, teardown guards, non-blocking `uv.fs_utime`, and history FIFO capacity caps.
-
-### 8.3 Active Polish & Integration Focus
-- **System Default Media Opener**: Ensuring `util.open_media` delegates to Finder / system default player (e.g. IINA on macOS) rather than hardcoding `mpv`.
-- **Snacks Spinner Suppression**: Eliminating persistent `convert loading ...` virtual text extmarks on placement row 0.
-- **Zen Mode Focus & Cursor Removal**: Hiding list cursorline and transferring focus to the image canvas in Zen mode.
-- **Search Mode Usability**: Enabling mouse click-to-focus recovery, mapping `/` and `<BS>` smoothly in input normal mode, and providing helpful hints on empty queries.
+- **Process & Lifecycle Hardening**: Added managed resume timers, teardown guards, and history FIFO capacity caps.
+- **Search Mode Usability & Recovery**: Defensive boundary keymaps (`/` and `i` re-enter insert mode, `<BS>` in normal mode smoothly edits query, and status line hints on empty query).
 
 ---
 
 ## 9. Prioritized Backlog & Future Improvements (Ordered by Severity)
 
-### 9.1 High Severity (Reliability, Process Safety & Network Resilience)
+### 9.1 High Severity (Reliability, Network & Query Mechanics)
 
 #### 1. Tag Database Engine Overhaul (Live API Verification, Dead Tag Pruning & Top-Down Count Refresh)
-- **Problem**: Tag counts in local databases (`series.json`, `characters.json`, etc.) remain frozen from the initial scrape, distorting autocomplete popularity ranking (`log10(count + 1)`). Furthermore, aliased or renamed booru tags leave phantom entries locally that return 0 results when selected from autocomplete.
+- **Problem**: Tag counts in local databases (`series.json`, `characters.json`, etc.) remain frozen from the initial scrape, distorting autocomplete popularity ranking (`log10(count + 1)`). Furthermore, aliased or renamed booru tags leave phantom entries locally that return 0 results when selected from autocomplete. This remains the primary pending architectural task for the tag subsystem.
 - **Resolution**:
   - Implement batch verification (`:GelbooruTags verify`) utilizing Gelbooru's multi-tag API (`&names=tag1+tag2+...`) in batches of 50–100 names per request to synchronize counts and reclassify changed tag types across thousands of tags in seconds.
   - Purge dead or aliased tags (tags returning `count == 0` or absent from API responses) from memory and disk.
   - Implement top-down count refresh (`:GelbooruTags refresh`) scraping from page 0 downward to update the top 50,000 most popular tags in place.
   - Implement query-time self-healing: when a single-tag search returns 0 results, query the tag API asynchronously and prune the tag if confirmed dead or aliased.
 
-#### 2. Process Spawn Safety & Queue Deadlock Prevention in `download_async`
-- **Problem**: In `lua/gelbooru/net/download.lua`, if `vim.system({"curl", ...})` throws an unhandled error during process spawn (e.g. system file descriptor exhaustion or invalid arguments), `active_downloads[dest]` remains populated with pending callbacks that never resolve, permanently deadlocking subsequent downloads for that destination.
+#### 2. Online `sort:random` Query Reseeding & Cache Invalidation
+- **Problem**: In online search mode, executing a query with `sort:random` (or re-submitting `<CR>` on the same random query) returns the exact same list of posts rather than a fresh randomized batch. In contrast, local `sort:random` correctly reshuffles on every execution.
+- **Root Cause**: Gelbooru's remote API or intermediate HTTP caches treat identical search queries as idempotent when `pid = 0`, caching the result set. Furthermore, internal search dispatchers short-circuit re-queries when the query string is identical.
 - **Resolution**:
-  - Wrap the `vim.system` invocation in `pcall`. If process spawning fails, log the error, delete `active_downloads[dest]`, and immediately invoke queued callbacks with `saved = false` to guarantee queue drainage.
+  - In `net/api.lua`, when `sort:random` is present in an online search, bypass identical-query equality guards to force an immediate re-fetch on `<CR>`.
+  - Append a randomized query nonce or cache-busting timestamp param to the outgoing API request.
+  - Add `Cache-Control: no-cache` and `Pragma: no-cache` headers to `curl_async` requests for random searches.
 
-#### 3. In-Flight Background Indexer Process Cancellation
-- **Problem**: When navigating directories or exiting the local library browser, `local/indexer.stop()` clears the queue and stops the libuv timer, but any `curl` processes already in flight are not tracked or killed. Their completion callbacks can execute after directory navigation, mutating stale metadata states.
+#### 3. Eager Lookahead & Network Prefetch Pipeline Optimization (~500ms Delay)
+- **Problem**: Scrolling between posts in online mode exhibits noticeable latency (~500ms delay before preview renders), even on high-speed internet connections (50+ MB/s). The lookahead engine does not adequately mask network transit times.
+- **Root Cause**:
+  1. **Deferred Prefetch**: In `lua/gelbooru/ui/init.lua`, `download.prefetch_around()` is called strictly *inside* the 150ms `UI.scroll_timer` cooldown callback, meaning lookahead downloads do not even start until 150ms *after* the user pauses cursor movement.
+  2. **Premature Timer Cancellation**: Every cursor motion (`j`/`k`) calls `M.cancel_prefetch_timers()`, destroying in-flight prefetch timers before their staggered delays fire.
+  3. **Staggered Delays**: Prefetch items are scheduled with artificial 50ms incremental delays (`delay = delay + 50`), stalling adjacent posts.
+  4. **Process Concurrency & Handshake Overhead**: Each prefetch spawns an independent child `curl` process without HTTP keep-alive connection reuse, incurring full TCP and TLS handshakes on every image.
 - **Resolution**:
-  - Store active `vim.system` process handles in `indexer.active_handles`.
-  - In `indexer.stop()`, iterate and terminate all active handles using `pcall(handle.kill, handle, 9)` to ensure immediate process cancellation.
+  - Decouple lookahead prefetch scheduling from the active preview cooldown timer, triggering eager prefetch downloads immediately on cursor movement in `State.scroll_dir`.
+  - Maintain active prefetch workers across cursor steps in the same direction instead of aggressively cancelling in-flight downloads for nearby posts.
+  - Eliminate the artificial 50ms delay for the immediate next post (`cur + dir`).
+  - Pass `--keepalive` / persistent connection parameters to `curl` where supported.
 
-### 9.2 Medium Severity (Performance, Memory & Component Modularization)
+#### 4. Flexible `local:` Syntax Anywhere in Query Bar
+- **Problem**: Querying `tag1 tag2 local:` or `solo local: tag2` fails to trigger local browsing mode; the parser treats `local:` as an unrecognized remote booru tag rather than switching the query engine into local library mode.
+- **Root Cause**: `local/query.lua`, `init.lua`, and `autocomplete.lua` use strict prefix matching (`line:match("^[Ll][Oo][Cc][Aa][Ll]:")`), expecting `local:` strictly as the first token.
+- **Resolution**:
+  - Update query tokenizer in `lua/gelbooru/local/query.lua` and `lua/gelbooru/init.lua` to detect `local:` or `local:<dir>` anywhere in the input token stream.
+  - Extract the local directory and normalize the remaining tokens into local positive/negative tag filters, ensuring consistent local routing regardless of token ordering in the query bar.
 
-#### 4. UI Orchestrator Modularization (`ui/init.lua`)
-- **Problem**: `lua/gelbooru/ui/init.lua` is over 1,300 lines long, tightly coupling floating window coordinate math, buffer-local keymap dispatch, preview cooldown timers, and window lifecycle orchestration into a single file.
+### 9.2 Medium Severity (Performance, Memory & UI Polish)
+
+#### 5. UI Orchestrator Modularization (`ui/init.lua`)
+- **Problem**: `lua/gelbooru/ui/init.lua` is over 1,450 lines long, tightly coupling floating window coordinate math, buffer-local keymap dispatch, preview cooldown timers, and window lifecycle orchestration into a single file.
 - **Resolution**:
   - Split `ui/init.lua` into four specialized submodules:
     - `ui/layout.lua`: Layout geometry math (`calc_layout`), responsive scaling, and floating window coordinate calculation.
@@ -548,50 +576,40 @@ This branch introduces unified local library browsing, offline booru metadata en
     - `ui/lifecycle.lua`: Open, close, teardown, and autocommand management.
   - Retain `ui/init.lua` as a thin facade re-exporting the submodules without breaking external call sites.
 
-#### 5. Queue Head-Pointer Optimization in Local Indexer
-- **Problem**: In `lua/gelbooru/local/indexer.lua`, `process_next_batch()` calls `table.remove(M.queue, 1)`. In large folders containing thousands of images, repeated removal from index 1 shifts all remaining table elements $O(N)$ times, causing avoidable CPU cycles and Lua GC churn.
-- **Resolution**:
-  - Replace `table.remove(queue, 1)` with an integer cursor pointer (`local head = 1; head = head + 1`). Reclaim the table only when the queue is fully drained or when `M.stop()` is invoked.
-
-#### 6. In-Flight Deduplication & Negative Caching in Tag Resolution
-- **Problem**: In `lua/gelbooru/tags/resolve.lua`, `resolve_post_tags()` batches unindexed tags and queries `tags_api`. If multiple posts contain the same unknown tag, concurrent requests fire duplicate queries. Furthermore, tags that return no results from the booru are repeatedly re-queried on subsequent posts.
-- **Resolution**:
-  - Maintain an `in_flight_queries` set to deduplicate concurrent requests for the same tag.
-  - Implement a `negative_tag_cache` hash set for tags confirmed non-existent by the API, skipping redundant network calls during the browsing session.
-
-#### 7. JSON Deserialization Modernization
-- **Problem**: Modules across `net/api.lua`, `tags/fetcher.lua`, `tags/resolve.lua`, and `core/util.lua` call `vim.fn.json_decode()`, which incurs Vimscript bridge overhead and extra string allocations.
-- **Resolution**:
-  - Upgrade all JSON decoding calls to native C-speed `vim.json.decode()` (supported in Neovim >= 0.8), reducing latency and peak memory usage during large API response parsing.
-
-#### 8. Decoupled Autocomplete Cursor Navigation
-- **Problem**: In `lua/gelbooru/ui/init.lua`, navigating autocomplete candidates via `<Down>`, `<Up>`, or `<Tab>` calls `autocomplete.update_autocomplete()`, which re-queries first-character buckets, re-scores all candidate tags, and re-sorts the array on every keystroke.
-- **Resolution**:
-  - Separate candidate query evaluation from dropdown visual selection. When navigating up/down without changing the input string, only update `State.autocomplete_cur` and update the highlight cursor line in `UI.wins.ac` without re-running the scoring pipeline.
-
-#### 9. Centralized Named Constants Table
+#### 6. Centralized Named Constants Table (`core/constants.lua`)
 - **Problem**: Hardcoded magic numbers for layout ratios, debounce timeouts, curl limits, and scoring weights are scattered across modules.
 - **Resolution**:
   - Consolidate all constants into a centralized `core/constants.lua` table (`LAYOUT_SCALE = 0.95`, `MIN_WIDTH = 80`, `AC_DEBOUNCE_MS = 50`, `PREVIEW_CACHED_MS = 30`, `PREVIEW_REMOTE_MS = 150`, `TAG_BATCH_SIZE = 40`, `SCORE_EXACT = 35.0`, `POP_MULTIPLIER = 10.0`).
 
-### 9.3 Low Severity (Edge Cases, Isolation & Distribution)
+#### 7. Local File Deletion Workflow (`d` / `D`)
+- **Problem**: Users browsing local libraries (`:GelbooruLocal` or `local:`) currently have no in-plugin mechanism to delete unwanted images or videos from disk; managing local collections requires exiting Neovim or running manual shell commands.
+- **Resolution**:
+  - Bind `d` (or `D` / `<Del>`) in Browse Mode and Metadata Inspector Mode to trigger local file deletion.
+  - Guard with an interactive confirmation modal (e.g. `vim.ui.select` or `vim.fn.confirm("Delete " .. fname .. "?", "&Yes\n&No")`).
+  - Upon confirmation, safely delete the file from disk (using `uv.fs_unlink`), purge cached metadata (`meta_<id>.json`), remove generated video thumbnail (`vthumb_<id>.jpg`), clear snacks image cache, update `saved_index`, remove the post from `State.posts`, and advance the cursor seamlessly to the adjacent item without UI flickering.
+  - Strictly disable the keymap on remote, un-downloaded posts to prevent undefined states.
 
-#### 10. Sequential Filename Collision Guard in Local Scanner
+#### 8. Zen Mode Cursor Artifact Elimination
+- **Problem**: When entering Zen Mode (`\`), a solid white rectangular block cursor (`█`) is left visible in the top-left cell (row 1, col 1) of the image placement window, cluttering full-canvas viewing (verified in user screenshot).
+- **Root Cause**: When Zen Mode transfers window focus to `UI.wins.img` to capture hotkeys without list distractions, Neovim's terminal cursor is rendered at `{1, 0}` on the canvas buffer using standard `guicursor` rules.
+- **Resolution**:
+  - Hide the terminal cursor in Zen Mode (e.g. via `set guicursor+=a:ver0` or linking a transparent/hidden cursor highlight group `Cursor` / `TermCursor`).
+  - Alternatively, park the cursor out of view or retain list window focus while mapping global Zen navigation, completely preventing terminal cursor artifacts on the image canvas.
+
+#### 9. Tiny Image Canvas Scaling & Minimum Dimension Guard
+- **Problem**: Despite extreme DPI sanitization (`sanitize_dpi` clamping DPIs >300 to 96), certain images with small native pixel dimensions or unusual aspect ratios still render miniature or stamp-sized on the canvas instead of scaling up to fill available window space.
+- **Root Cause**: `snacks.image` calculates terminal cell coverage based on native pixel resolution divided by terminal font cell geometry. If an image has small native dimensions (e.g. 150×200 or low-res thumbnails), snacks renders it 1:1 without upscaling to the floating window bounds.
+- **Resolution**:
+  - Implement an upscaling policy or configure snacks image placement options (such as `max_width`, `max_height`, or scaling transforms via ImageMagick) to enforce a minimum rendered canvas footprint, ensuring small media files scale smoothly to fit floating window dimensions.
+
+### 9.3 Low Severity (Edge Cases & Distribution)
+
+#### 10. Sequential Filename Collision Guard in Local Scanner (`local/scan.lua`)
 - **Problem**: In `lua/gelbooru/local/scan.lua`, `extract_post_id` matches bare numeric filenames (`filename:match("^(%d+)%..+$")`). If a user opens a folder with sequential non-booru files (e.g. `001.jpg`, `1.png`), the scanner extracts IDs `1`, `2`, and queries Gelbooru for unrelated historic posts.
 - **Resolution**:
   - Require a minimum post ID threshold (e.g. numeric ID $\ge 10000$ or minimum 5 digits) for bare numeric filenames to be considered Gelbooru post IDs, or check for known booru prefix patterns.
 
-#### 11. Anchored Snacks Image Cache Purge Pattern
-- **Problem**: In `lua/gelbooru/ui/image.lua`, `clear_snacks_cache_for(post_id)` globs `~/.cache/nvim/snacks/image/*` and matches `f:find(tostring(post_id), 1, true)`. Unanchored substring matching on small post IDs (e.g. ID `123`) can delete cache files for unrelated posts (e.g. `prev_12345.jpg`).
-- **Resolution**:
-  - Anchor the pattern match using regex `%f[%d]" .. post_id .. "%f[%D]` and resolve cache paths using `vim.fn.stdpath("cache") .. "/snacks/image/"`.
-
-#### 12. Buffer-Local `mini.completion` Suppression
-- **Problem**: `isolate_input_buffer()` disables `nvim-cmp`, `blink.cmp`, and AI plugins, but does not disable `mini.completion`, which can spawn completion windows in the search bar.
-- **Resolution**:
-  - Add `vim.b[buf].minicompletion_disable = true` to `isolate_input_buffer()`.
-
-#### 13. Distribution Packaging & Metadata Exclusions
+#### 11. Distribution Packaging & Metadata Exclusions (`.gitattributes`)
 - **Problem**: Package managers download developer test suites, makefiles, and documentation artifacts into user runtimes.
 - **Resolution**:
   - Add `.gitattributes` configuring `export-ignore` for `tests/`, `Makefile`, and `AGENTS.md` to ensure lightweight installation for end users.
@@ -600,7 +618,18 @@ This branch introduces unified local library browsing, offline booru metadata en
 
 ### 9.4 Future Product Directions & Architectural Roadmap (Future Scope)
 
-#### 14. Interactive Tag Picker / Deep-Dive Selection Modal (Achievable / High Usability)
+#### 12. Multi-Stage Piped Search & Cascading Sorting Pipeline
+- **Concept**: A composable, multi-stage sorting and filtering engine allowing users to chain query operations in sequence.
+- **Example Use Case**:
+  - Fetch the latest 1,000 uploaded posts (`sort:id:1000`), sort those 1,000 by score to extract the top 500 highest-rated posts (`sort:score:500`), and randomly shuffle those 500 for browsing (`sort:random`).
+- **Syntax & Execution**:
+  - Support Unix-style pipe syntax in the search bar: `tag1 tag2 | sort:id:1000 | sort:score:500 | sort:random`.
+  - Stage 1 fetches the candidate pool from Gelbooru API or local storage.
+  - Stage 2 applies intermediate filtering/sorting on the in-memory pool.
+  - Final stage orders the results for the post list display.
+- **Benefit**: Unlocks sophisticated media exploration combining recency, quality ranking, and novelty without requiring complex external scripts.
+
+#### 13. Interactive Tag Picker / Deep-Dive Selection Modal (Achievable / High Usability)
 - **Concept**: A dedicated floating modal for quickly exploring and querying individual or multiple tags belonging to the active post.
 - **Workflow & Interaction**:
   - Hotkey (e.g. `t` or `T` from Browse Mode or Metadata Inspector Mode) opens a centered floating selection window populated with the current post's tags, categorized and badged (Artist, Character, Series, General, Meta).
@@ -609,7 +638,7 @@ This branch introduces unified local library browsing, offline booru metadata en
   - Press `<CR>` to commit the selected tag(s) directly into the query bar and trigger a fresh search.
 - **Benefit**: Provides an instant, tactile deep-dive mechanism for pivoting to related art and tags without manually typing complex tag names in the search bar.
 
-#### 15. Generalized Multi-Booru Provider Engine & Aggregator Mode (Long-Term Architectural Scope)
+#### 14. Generalized Multi-Booru Provider Engine & Aggregator Mode (Long-Term Architectural Scope)
 - **Concept**: Generalize the API and scraper layers beyond Gelbooru to support arbitrary booru engines (Danbooru, Moebooru, Safebooru, e621, etc.) through a pluggable provider interface.
 - **Architectural Scope**:
   - **Pluggable Provider Abstraction**: Decouple REST endpoints, authentication query params, and JSON schema parsing behind a uniform booru client contract (`search(tags, page)`, `fetch_metadata(id)`, `autocomplete(query)`).

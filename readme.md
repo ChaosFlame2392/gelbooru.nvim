@@ -162,6 +162,25 @@ This roadmap outlines the architecture and implementation milestones for turning
    - Bind `u` to quick artist search.
    - Bind `<` / `>` to adjust explorer width ratio and `\` to toggle Zen Mode canvas expansion.
 
+### Milestone 7: Advanced Query Engine, Flexible Syntax & Pipeline Sorting
+* **Flexible `local:` Placement**: Support placing `local:` or `local:<dir>` anywhere in the search query (e.g. `tag1 tag2 local:` or `solo local: tag2`), normalizing tokens automatically so token ordering does not dictate engine mode.
+* **Online `sort:random` Reseeding & Cache Invalidation**: Ensure online `sort:random` queries fetch a fresh randomized assortment on each `<CR>` execution by bypassing identical-query deduplication and sending nonces / cache-busting headers.
+* **Multi-Stage Piped Sorting Pipeline (`sort:id:1000 | sort:score:500 | sort:random`)**:
+  - Unix-style composable query pipe syntax allowing chained operations.
+  - Example: Fetch the 1,000 most recent posts (`sort:id:1000`), sort those by score to keep the top 500 (`sort:score:500`), and randomly shuffle the remaining 500 (`sort:random`).
+
+### Milestone 8: Visual Rendering Polish, Eager Lookahead & Local Deletion
+* **Eager Lookahead Network Prefetch Pipeline**:
+  - Eliminate ~500ms delay during navigation by decoupling prefetching from the 150ms preview cooldown.
+  - Maintain active prefetch workers across cursor steps in the same direction and eliminate artificial 50ms queuing delays for adjacent posts.
+* **Zen Mode Cursor Artifact Elimination**:
+  - Hide Neovim's terminal cursor (`█`) in the image canvas window during Zen Mode (`\`) via `guicursor` adjustment or cursor parking to ensure an uncluttered, borderless viewing canvas.
+* **Tiny Image Canvas Scaling & Minimum Dimension Guard**:
+  - Ensure small native pixel images scale smoothly to fill available canvas bounds rather than rendering as tiny dots/postage stamps.
+* **Local Media Deletion Workflow (`d` / `D`)**:
+  - In local mode, allow deleting the focused image/video file directly from disk via `d` or `D`.
+  - Prompts with an interactive confirmation modal, safely unlinks the file, purges metadata and thumbnail caches, updates `saved_index`, and smoothly advances the post list cursor.
+
 ---
 
 ### Performance & Memory Safety Invariants (Zero Leaks & Sub-3ms Latency)

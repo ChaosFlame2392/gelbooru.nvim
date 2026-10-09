@@ -257,7 +257,17 @@ function M.save_current(cb)
         end
         local UI = state.UI
         if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and State.posts[State.cur] == p then
-          image.render_image(UI.wins.img, dest)
+          if image.is_video_post(p) then
+            image.extract_video_thumbnail(dest, p.id, function(thumb)
+              if thumb and UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and State.posts[State.cur] == p then
+                image.render_image(UI.wins.img, thumb)
+              end
+            end)
+          else
+            image.render_image(UI.wins.img, dest)
+          end
+        elseif image.is_video_post(p) then
+          image.extract_video_thumbnail(dest, p.id)
         end
         ui.render_list()
       end
@@ -286,7 +296,17 @@ function M.save_current(cb)
       end
       local UI = state.UI
       if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and State.posts[State.cur] == p then
-        image.render_image(UI.wins.img, dest)
+        if image.is_video_post(p) then
+          image.extract_video_thumbnail(dest, p.id, function(thumb)
+            if thumb and UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and State.posts[State.cur] == p then
+              image.render_image(UI.wins.img, thumb)
+            end
+          end)
+        else
+          image.render_image(UI.wins.img, dest)
+        end
+      elseif image.is_video_post(p) then
+        image.extract_video_thumbnail(dest, p.id)
       end
       ui.render_list()
     end
@@ -349,6 +369,12 @@ function M.fetch_post_metadata(p, cb)
       if cached.source then
         p.source = cached.source
       end
+      if cached.preview_url and (not p.preview_url or p.preview_url == p.file_url) then
+        p.preview_url = cached.preview_url
+      end
+      if cached.sample_url and (not p.sample_url or p.sample_url == p.file_url) then
+        p.sample_url = cached.sample_url
+      end
       p._metadata_fetched = true
       if not state.State.torn_down and cb then
         cb(p)
@@ -382,6 +408,12 @@ function M.fetch_post_metadata(p, cb)
     if d.source then
       p.source = d.source
     end
+    if d.preview_url and (not p.preview_url or p.preview_url == p.file_url) then
+      p.preview_url = d.preview_url
+    end
+    if d.sample_url and (not p.sample_url or p.sample_url == p.file_url) then
+      p.sample_url = d.sample_url
+    end
     if meta_path then
       local meta_data = {
         id = p.id,
@@ -391,6 +423,8 @@ function M.fetch_post_metadata(p, cb)
         width = p.width,
         height = p.height,
         source = p.source,
+        preview_url = p.preview_url,
+        sample_url = p.sample_url,
       }
       util.write_json(meta_path, meta_data)
     end

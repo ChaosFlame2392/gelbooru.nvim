@@ -429,6 +429,50 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
   retry_count = retry_count or 0
   local preview_url = urls[url_idx]
 
+  if image.is_video_post(p) then
+    if force_download and p.id then
+      image.clear_snacks_cache_for(p.id)
+    end
+    local thumb_path = image.get_video_thumbnail_path(p.file_url, p.id)
+    if not force_download and vim.fn.filereadable(thumb_path) == 1 and (vim.fn.getfsize(thumb_path) or 0) > 512 then
+      local ok = image.render_image(UI.wins.img, thumb_path)
+      if ok then
+        M.set_status("Video preview [VIDEO] • Press 'O' to play", 2500)
+        return
+      end
+    end
+
+    local video_to_extract = nil
+    if p.is_local then
+      video_to_extract = dest or p.file_url
+    else
+      video_to_extract = image.get_saved_video_path(p.id)
+    end
+
+    if p.is_local or video_to_extract then
+      image.render_video_placeholder(p, "Extracting video thumbnail…")
+      M.set_status("Video post • extracting thumbnail…", 2000)
+      image.extract_video_thumbnail(video_to_extract or dest or p.file_url, p.id, function(extracted_path)
+        if state.State.torn_down then
+          return
+        end
+        if not is_same_post(State.posts[State.cur], p) then
+          return
+        end
+        if extracted_path and vim.fn.filereadable(extracted_path) == 1 and (vim.fn.getfsize(extracted_path) or 0) > 512 then
+          local ok = image.render_image(UI.wins.img, extracted_path)
+          if ok then
+            M.set_status("Video preview [VIDEO] • Press 'O' to play", 2500)
+            return
+          end
+        end
+        image.render_video_placeholder(p, "Preview not playable in terminal • Press 'O' to open")
+        M.set_status("Video post • Press 'O' to play", 2500)
+      end)
+      return
+    end
+  end
+
   local function fail_preview(msg)
     if not UI.wins.img or not vim.api.nvim_win_is_valid(UI.wins.img) then
       return
@@ -436,6 +480,7 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
     if not is_same_post(State.posts[State.cur], p) then
       return
     end
+    pcall(image.close_current_placement)
     pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
     util.set_lines(UI.bufs.img, { "", "  [ " .. msg .. " ]" })
     M.set_status(msg, 2500)
@@ -462,9 +507,41 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
         load_and_render_image(p, url_idx + 1, 0, force_download)
         return
       end
-      util.set_lines(UI.bufs.img, { "", "  [ Video Post - Preview not playable ]", "  Press 'O' to open in browser." })
-      M.set_status(string.format("Video post • no static %s available", source_name), 2200)
-      return
+      if dest and vim.fn.filereadable(dest) == 1 then
+        local thumb_path = image.get_video_thumbnail_path(dest, p.id)
+        if vim.fn.filereadable(thumb_path) == 1 and (vim.fn.getfsize(thumb_path) or 0) > 512 then
+          local ok = image.render_image(UI.wins.img, thumb_path)
+          if ok then
+            M.set_status("Video preview [VIDEO] • Press 'O' to play", 2500)
+            return
+          end
+        end
+
+        image.render_video_placeholder(p, "Extracting video thumbnail…")
+        M.set_status("Video post • extracting thumbnail…", 2000)
+        image.extract_video_thumbnail(dest, p.id, function(extracted_path)
+          if state.State.torn_down then
+            return
+          end
+          if not is_same_post(State.posts[State.cur], p) then
+            return
+          end
+          if extracted_path and vim.fn.filereadable(extracted_path) == 1 and (vim.fn.getfsize(extracted_path) or 0) > 512 then
+            local ok = image.render_image(UI.wins.img, extracted_path)
+            if ok then
+              M.set_status("Video preview [VIDEO] • Press 'O' to play", 2500)
+              return
+            end
+          end
+          image.render_video_placeholder(p, "Preview not playable in terminal • Press 'O' to open")
+          M.set_status("Video post • Press 'O' to play", 2500)
+        end)
+        return
+      else
+        image.render_video_placeholder(p, string.format("No static %s available • Press 'O' to open", source_name))
+        M.set_status(string.format("Video post • no static %s available", source_name), 2500)
+        return
+      end
     end
 
     local size = vim.fn.getfsize(dest)
@@ -648,6 +725,12 @@ function M.render_preview(force_download)
 
   local _, dest = image.get_preview_targets(p)
   local is_cached = not force_download and dest and vim.fn.filereadable(dest) == 1 and not download.active_downloads[dest]
+  if not is_cached and not force_download and image.is_video_post(p) then
+    local thumb_path = image.get_video_thumbnail_path(p.file_url, p.id)
+    if vim.fn.filereadable(thumb_path) == 1 and (vim.fn.getfsize(thumb_path) or 0) > 512 then
+      is_cached = true
+    end
+  end
 
   if not is_cached then
     if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img) then

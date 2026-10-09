@@ -93,6 +93,109 @@ describe("image.get_preview_targets", function()
     assert.are.equal(local_file, urls[1])
     assert.are.equal(local_file, dest)
   end)
+
+  it("returns local video thumb target and NO online URLs when is_local is true for video", function()
+    local local_vid = "/path/to/downloaded/54321.mp4"
+    local p = {
+      id = "54321",
+      file_url = local_vid,
+      sample_url = "https://img.gelbooru.com/samples/sample.jpg",
+      preview_url = "https://img.gelbooru.com/thumbnails/thumb.jpg",
+      is_local = true,
+    }
+    local urls, dest = image.get_preview_targets(p)
+    assert.are.equal(1, #urls)
+    assert.is_false(urls[1]:match("^https?://") ~= nil)
+    local expected_thumb = image.get_video_thumbnail_path(local_vid, p.id)
+    assert.are.equal(expected_thumb, dest)
+    assert.are.equal(expected_thumb, urls[1])
+  end)
+end)
+
+describe("image.extract_video_thumbnail & cache", function()
+  it("immediately returns nil callback for non-existent, 0-byte, or .part files", function()
+    local cb_called = false
+    local result = "unset"
+    image.extract_video_thumbnail("/non/existent/path/vid.mp4", "1", function(res)
+      cb_called = true
+      result = res
+    end)
+    assert.is_true(cb_called)
+    assert.is_nil(result)
+
+    -- Test .part file
+    local tmp_part = vim.fn.tempname() .. ".part"
+    vim.fn.writefile({ "hello" }, tmp_part)
+    cb_called = false
+    result = "unset"
+    image.extract_video_thumbnail(tmp_part, "2", function(res)
+      cb_called = true
+      result = res
+    end)
+    assert.is_true(cb_called)
+    assert.is_nil(result)
+    vim.fn.delete(tmp_part)
+
+    -- Test 0-byte file
+    local tmp_zero = vim.fn.tempname() .. ".mp4"
+    vim.fn.writefile({}, tmp_zero)
+    cb_called = false
+    result = "unset"
+    image.extract_video_thumbnail(tmp_zero, "3", function(res)
+      cb_called = true
+      result = res
+    end)
+    assert.is_true(cb_called)
+    assert.is_nil(result)
+    vim.fn.delete(tmp_zero)
+  end)
+
+  it("clear_snacks_cache_for deletes vthumb_<id>.jpg from cache_dir", function()
+    local config = require("gelbooru.core.config")
+    local vthumb = string.format("%s/vthumb_9988.jpg", config.options.cache_dir)
+    vim.fn.mkdir(config.options.cache_dir, "p")
+    vim.fn.writefile({ "dummy" }, vthumb)
+    assert.are.equal(1, vim.fn.filereadable(vthumb))
+
+    image.clear_snacks_cache_for("9988")
+    assert.are.equal(0, vim.fn.filereadable(vthumb))
+  end)
+
+  it("recognizes and uses existing vthumb_<id>.jpg in cache without running ffmpeg", function()
+    local config = require("gelbooru.core.config")
+    local cache_dir = config.options.cache_dir
+    vim.fn.mkdir(cache_dir, "p")
+    local vthumb = string.format("%s/vthumb_4567.jpg", cache_dir)
+    vim.fn.writefile({ string.rep("x", 600) }, vthumb)
+
+    local cb_called = false
+    local result_path = nil
+    image.extract_video_thumbnail(nil, "4567", function(res)
+      cb_called = true
+      result_path = res
+    end)
+
+    assert.is_true(cb_called)
+    assert.are.equal(vthumb, result_path)
+    vim.fn.delete(vthumb)
+  end)
+
+  it("finds video in config.options.save_dir when vpath is nil or unreadable", function()
+    local config = require("gelbooru.core.config")
+    local orig_save_dir = config.options.save_dir
+    local tmp_save = vim.fn.tempname()
+    vim.fn.mkdir(tmp_save, "p")
+    config.options.save_dir = tmp_save
+
+    local vid_file = tmp_save .. "/8877.mp4"
+    vim.fn.writefile({ "dummy video content" }, vid_file)
+
+    local saved_path = image.get_saved_video_path("8877")
+    assert.are.equal(vid_file, saved_path)
+
+    config.options.save_dir = orig_save_dir
+    vim.fn.delete(tmp_save, "rf")
+  end)
 end)
 
 describe("image.preview_source_name", function()

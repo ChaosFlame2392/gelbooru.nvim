@@ -116,7 +116,7 @@ function M.load_tags(caps)
 
   local all_tags = {}
   for _, t in ipairs(config.META_TAGS) do
-    local copy = { n = t.n, c = t.c, t = t.t }
+    local copy = { n = t.n, c = t.c, t = t.t, local_only = t.local_only }
     M.add_tag_to_index(copy, nil, nil)
     all_tags[#all_tags + 1] = copy
   end

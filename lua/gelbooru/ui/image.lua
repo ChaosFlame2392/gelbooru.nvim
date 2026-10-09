@@ -28,8 +28,21 @@ function M.preview_source_name(p, url)
 end
 
 function M.get_preview_targets(p, url_idx)
+  if not p then
+    return {}, nil
+  end
+
+  local cache_dir = config.options.cache_dir
+  if p.is_local then
+    if M.is_video_post(p) then
+      local thumb_dest = M.get_video_thumbnail_path(p.file_url, p.id)
+      return { thumb_dest }, thumb_dest
+    end
+    return { p.file_url }, p.file_url
+  end
+
   local urls, seen = {}, {}
-  local candidates = { p and p.sample_url, p and p.preview_url, p and p.file_url }
+  local candidates = { p.sample_url, p.preview_url, p.file_url }
   for i = 1, 3 do
     local u = candidates[i]
     if u and u ~= "" and not seen[u] then
@@ -42,10 +55,6 @@ function M.get_preview_targets(p, url_idx)
   end
   local chosen_idx = math.max(1, math.min(url_idx or 1, #urls))
   local ext = M.file_ext_from_url(urls[chosen_idx])
-  local cache_dir = config.options.cache_dir
-  if p and p.is_local then
-    return urls, p.file_url
-  end
   return urls, string.format("%s/prev_%s.%s", cache_dir, p.id, ext:lower())
 end
 
@@ -203,6 +212,171 @@ function M.reset_canvas(placeholder)
   end
 end
 
+function M.get_video_thumbnail_path(video_path, post_id)
+  local cache_dir = config.options.cache_dir
+  local id_key = (post_id and tostring(post_id) ~= "" and tostring(post_id) ~= "nil")
+    and tostring(post_id)
+    or (video_path and video_path:match("([^/]+)%.%w+$") or "temp")
+  return string.format("%s/vthumb_%s.jpg", cache_dir, id_key)
+end
+
+function M.get_saved_video_path(post_id)
+  if not post_id or tostring(post_id) == "" or tostring(post_id) == "nil" then
+    return nil
+  end
+  local save_dir = config.options.save_dir and vim.fn.expand(config.options.save_dir)
+  if not save_dir or save_dir == "" then
+    return nil
+  end
+  local State = state.State
+  local local_index = require("gelbooru.local.index")
+  local num_id = tonumber(post_id)
+  local saved_ext = num_id and State and State.saved_index and State.saved_index[num_id]
+  if not saved_ext and local_index.update_saved_index then
+    local idx = local_index.update_saved_index()
+    saved_ext = num_id and idx and idx[num_id]
+  end
+  if saved_ext and (saved_ext == "mp4" or saved_ext == "webm") then
+    local candidate = string.format("%s/%s.%s", save_dir, tostring(post_id), saved_ext)
+    if vim.fn.filereadable(candidate) == 1 then
+      return candidate
+    end
+  end
+  for _, ext in ipairs({ "mp4", "webm" }) do
+    local candidate = string.format("%s/%s.%s", save_dir, tostring(post_id), ext)
+    if vim.fn.filereadable(candidate) == 1 then
+      return candidate
+    end
+  end
+  return nil
+end
+
+function M.extract_video_thumbnail(video_path, post_id, cb)
+  if post_id then
+    local cached_thumb = M.get_video_thumbnail_path(video_path, post_id)
+    if vim.fn.filereadable(cached_thumb) == 1 and (vim.fn.getfsize(cached_thumb) or 0) > 512 then
+      if cb then cb(cached_thumb) end
+      return
+    end
+  end
+
+  local vpath = video_path
+  if (not vpath or vim.fn.filereadable(vpath) == 0 or vpath:match("%.jpg$") or vpath:match("vthumb_")) and post_id then
+    local State = state.State
+    local found = nil
+    if State and State.posts then
+      for _, post in ipairs(State.posts) do
+        if post.id and tostring(post.id) == tostring(post_id) and post.file_url and vim.fn.filereadable(post.file_url) == 1 then
+          found = post.file_url
+          break
+        end
+      end
+    end
+    if not found then
+      found = M.get_saved_video_path(post_id)
+    end
+    if found then
+      vpath = found
+    elseif vpath and (vpath:match("%.jpg$") or vpath:match("vthumb_")) then
+      vpath = nil
+    end
+  end
+
+  if not vpath or vpath:match("%.part$") or vpath:match("%.jpg$") or vpath:match("vthumb_")
+    or vim.fn.filereadable(vpath) == 0 or (vim.fn.getfsize(vpath) or 0) <= 0 then
+    if cb then cb(nil) end
+    return
+  end
+
+  local thumb_dest = M.get_video_thumbnail_path(vpath, post_id)
+  if vim.fn.filereadable(thumb_dest) == 1 and (vim.fn.getfsize(thumb_dest) or 0) > 512 then
+    if cb then cb(thumb_dest) end
+    return
+  end
+
+  if vim.fn.executable("ffmpeg") ~= 1 then
+    if cb then cb(nil) end
+    return
+  end
+
+  local util = require("gelbooru.core.util")
+  util.ensure(config.options.cache_dir)
+
+  local spawn_ok = pcall(function()
+    return vim.system({
+      "ffmpeg",
+      "-ss",
+      "00:00:01",
+      "-i",
+      vpath,
+      "-frames:v",
+      "1",
+      "-q:v",
+      "2",
+      thumb_dest,
+      "-y",
+    }, {}, function(out)
+      vim.schedule(function()
+        if out.code == 0 and vim.fn.filereadable(thumb_dest) == 1 and (vim.fn.getfsize(thumb_dest) or 0) > 512 then
+          if cb then cb(thumb_dest) end
+        else
+          if cb then cb(nil) end
+        end
+      end)
+    end)
+  end)
+  if not spawn_ok and cb then
+    cb(nil)
+  end
+end
+
+function M.render_video_placeholder(p, message)
+  pcall(M.close_current_placement)
+  if state.State.torn_down then
+    return
+  end
+  local UI = state.UI
+  local util = require("gelbooru.core.util")
+  if not (UI.bufs and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img)) then
+    UI.bufs.img = util.scratch()
+    vim.bo[UI.bufs.img].bufhidden = "hide"
+  end
+
+  local filename = p and (p.file_url and p.file_url:match("([^/]+)$") or tostring(p.id or "video")) or "video"
+  local ext = (filename:match("%.([%w]+)$") or "video"):upper()
+  local status_msg = message or "Preview not playable in terminal"
+
+  local lines = {
+    "",
+    "  ▶ [ VIDEO FILE: " .. ext .. " ]",
+    "",
+    "  File       : " .. filename,
+  }
+  if p and p.width and p.height and p.width > 0 and p.height > 0 then
+    lines[#lines + 1] = string.format("  Dimensions : %dx%d", p.width, p.height)
+  end
+  if p and p.id then
+    lines[#lines + 1] = "  Post ID    : " .. tostring(p.id)
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "  Status     : " .. status_msg
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "  Keymaps:"
+  lines[#lines + 1] = "    • 'O' : Open / play in media viewer"
+  if p and p.id and not p.is_local then
+    lines[#lines + 1] = "    • 'o' : Open post web page"
+  end
+
+  util.set_lines(UI.bufs.img, lines)
+  vim.bo[UI.bufs.img].modifiable = false
+  attach_defensive_keymaps(UI.bufs.img)
+
+  if UI.wins and UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img)
+    and UI.bufs and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img) then
+    pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
+  end
+end
+
 function M.clear_snacks_cache_for(post_id)
   if not post_id or tostring(post_id) == "" or tostring(post_id) == "nil" then
     return
@@ -222,6 +396,22 @@ function M.clear_snacks_cache_for(post_id)
       vim.fn.delete(f)
     end
   end
+  local config_cache = config.options.cache_dir
+  local vthumb = string.format("%s/vthumb_%s.jpg", config_cache, tostring(post_id))
+  if vim.fn.filereadable(vthumb) == 1 then
+    pcall(vim.fn.delete, vthumb)
+  end
+end
+
+local function sanitize_dpi(img)
+  if img and img.info and img.info.dpi then
+    local dpi = img.info.dpi
+    if (dpi.width and (dpi.width > 300 or dpi.width < 50))
+      or (dpi.height and (dpi.height > 300 or dpi.height < 50)) then
+      dpi.width = 96
+      dpi.height = 96
+    end
+  end
 end
 
 -- Nudge the active placement to re-render at the current window dimensions.
@@ -231,6 +421,7 @@ function M.nudge_current_placement()
   local UI = state.UI
   local p = UI.current_placement
   if p and not p.closed and vim.api.nvim_buf_is_valid(p.buf) then
+    sanitize_dpi(p.img)
     p._state = nil
     pcall(p.update, p)
     pcall(vim.api.nvim_buf_clear_namespace, p.buf, vim.api.nvim_create_namespace("snacks.image"), 0, 1)
@@ -260,6 +451,7 @@ function M.render_image(win, path)
     and vim.api.nvim_buf_is_valid(current.buf) then
     -- Ensure the img window is showing the placement buffer (may have been
     -- reset to UI.bufs.img by a stale callback during download).
+    sanitize_dpi(current.img)
     pcall(vim.api.nvim_win_set_buf, win, current.buf)
     current._state = nil
     pcall(current.update, current)
@@ -276,7 +468,13 @@ function M.render_image(win, path)
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].modifiable = false
   attach_defensive_keymaps(buf)
-  local opts = { pos = { 1, 1 }, auto_resize = true }
+  local opts = {
+    pos = { 1, 0 },
+    auto_resize = true,
+    on_update_pre = function(p)
+      sanitize_dpi(p and p.img)
+    end,
+  }
 
   local place_ok, placement = pcall(placement_mod.new, buf, path, opts)
   if not place_ok or not placement then
@@ -288,6 +486,7 @@ function M.render_image(win, path)
   placement.progress = function() end
   local orig_update = placement.update
   placement.update = function(self)
+    sanitize_dpi(self and self.img)
     if orig_update then
       pcall(orig_update, self)
     end

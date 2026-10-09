@@ -995,6 +995,176 @@ describe("local.query: Query Parsing and Post Filtering", function()
     end)
   end)
 
+  describe("Local Sorting Engine (parse_tags sort directives & sort_posts)", function()
+    it("parses sort:score, sort:id, sort:date, sort:random, sort:mtime, and order: directives", function()
+      local f1 = local_query.parse_tags("hatsune_miku sort:score")
+      assert.is_not_nil(f1.sort)
+      assert.are.equal("score", f1.sort.key)
+      assert.are.equal("desc", f1.sort.dir)
+      assert.are.equal(1, #f1.positive_tags)
+      assert.are.equal("hatsune_miku", f1.positive_tags[1])
+
+      local f2 = local_query.parse_tags("sort:id:asc 1girl")
+      assert.is_not_nil(f2.sort)
+      assert.are.equal("id", f2.sort.key)
+      assert.are.equal("asc", f2.sort.dir)
+      assert.are.equal(1, #f2.positive_tags)
+      assert.are.equal("1girl", f2.positive_tags[1])
+
+      local f3 = local_query.parse_tags("sort:date")
+      assert.is_not_nil(f3.sort)
+      assert.are.equal("date", f3.sort.key)
+      assert.are.equal("desc", f3.sort.dir)
+      assert.are.equal(0, #f3.positive_tags)
+
+      local f4 = local_query.parse_tags("sort:date:asc")
+      assert.is_not_nil(f4.sort)
+      assert.are.equal("date", f4.sort.key)
+      assert.are.equal("asc", f4.sort.dir)
+      assert.are.equal(0, #f4.positive_tags)
+
+      local f5 = local_query.parse_tags("sort:random")
+      assert.is_not_nil(f5.sort)
+      assert.are.equal("random", f5.sort.key)
+      assert.are.equal("asc", f5.sort.dir)
+      assert.are.equal(0, #f5.positive_tags)
+
+      local f6 = local_query.parse_tags("random")
+      assert.is_not_nil(f6.sort)
+      assert.are.equal("random", f6.sort.key)
+      assert.are.equal("asc", f6.sort.dir)
+      assert.are.equal(0, #f6.positive_tags)
+
+      local f7 = local_query.parse_tags("order:score")
+      assert.is_not_nil(f7.sort)
+      assert.are.equal("score", f7.sort.key)
+      assert.are.equal("desc", f7.sort.dir)
+      assert.are.equal(0, #f7.positive_tags)
+
+      local f8 = local_query.parse_tags("sort:score order:asc")
+      assert.is_not_nil(f8.sort)
+      assert.are.equal("score", f8.sort.key)
+      assert.are.equal("asc", f8.sort.dir)
+      assert.are.equal(0, #f8.positive_tags)
+    end)
+
+    it("ensures sort: tokens are strictly excluded from positive_tags", function()
+      local f = local_query.parse_tags("solo sort:date -bad sort:score:asc")
+      assert.are.equal(1, #f.positive_tags)
+      assert.are.equal("solo", f.positive_tags[1])
+      assert.are.equal(1, #f.negative_tags)
+      assert.are.equal("bad", f.negative_tags[1])
+      assert.is_not_nil(f.sort)
+    end)
+
+    it("sorts posts by score (desc and asc), falling back to cached JSON metadata when score is nil", function()
+      local util = require("gelbooru.core.util")
+      local cache_dir = vim.fn.tempname()
+      vim.fn.mkdir(cache_dir, "p")
+      local orig_cache_dir = config.options.cache_dir
+      config.options.cache_dir = cache_dir
+
+      -- Write cached metadata for post 202
+      local meta_path = util.meta_cache_path("202")
+      util.write_json(meta_path, { id = "202", score = 500 })
+
+      local p1 = { id = "201", score = 100, file_url = tmp_dir .. "/201.jpg" }
+      local p2 = { id = "202", score = nil, file_url = tmp_dir .. "/202.jpg" }
+      local p3 = { id = "203", score = 300, file_url = tmp_dir .. "/203.jpg" }
+
+      local posts = { p1, p2, p3 }
+      local sorted_desc = local_query.sort_posts(posts, { key = "score", dir = "desc" })
+      assert.are.equal("202", sorted_desc[1].id)
+      assert.are.equal("203", sorted_desc[2].id)
+      assert.are.equal("201", sorted_desc[3].id)
+
+      local sorted_asc = local_query.sort_posts(posts, { key = "score", dir = "asc" })
+      assert.are.equal("201", sorted_asc[1].id)
+      assert.are.equal("203", sorted_asc[2].id)
+      assert.are.equal("202", sorted_asc[3].id)
+
+      config.options.cache_dir = orig_cache_dir
+      vim.fn.delete(cache_dir, "rf")
+    end)
+
+    it("sorts posts by numeric ID (desc and asc)", function()
+      local p1 = { id = "45", file_url = tmp_dir .. "/45.jpg" }
+      local p2 = { id = "1002", file_url = tmp_dir .. "/1002.jpg" }
+      local p3 = { id = "250", file_url = tmp_dir .. "/250.jpg" }
+
+      local sorted_desc = local_query.sort_posts({ p1, p2, p3 }, { key = "id", dir = "desc" })
+      assert.are.equal("1002", sorted_desc[1].id)
+      assert.are.equal("250", sorted_desc[2].id)
+      assert.are.equal("45", sorted_desc[3].id)
+
+      local sorted_asc = local_query.sort_posts({ p1, p2, p3 }, { key = "id", dir = "asc" })
+      assert.are.equal("45", sorted_asc[1].id)
+      assert.are.equal("250", sorted_asc[2].id)
+      assert.are.equal("1002", sorted_asc[3].id)
+    end)
+
+    it("sorts posts by date (mtime) using fs_stat and caches _mtime on posts", function()
+      local f1 = tmp_dir .. "/f1.jpg"
+      local f2 = tmp_dir .. "/f2.jpg"
+      local f3 = tmp_dir .. "/f3.jpg"
+
+      vim.fn.writefile({ "a" }, f1)
+      local uv = vim.uv or vim.loop
+      uv.fs_utime(f1, 1000, 1000)
+
+      vim.fn.writefile({ "b" }, f2)
+      uv.fs_utime(f2, 3000, 3000)
+
+      vim.fn.writefile({ "c" }, f3)
+      uv.fs_utime(f3, 2000, 2000)
+
+      local p1 = { id = "1", file_url = f1 }
+      local p2 = { id = "2", file_url = f2 }
+      local p3 = { id = "3", file_url = f3 }
+
+      local sorted_desc = local_query.sort_posts({ p1, p2, p3 }, { key = "date", dir = "desc" })
+      assert.are.equal("2", sorted_desc[1].id)
+      assert.are.equal("3", sorted_desc[2].id)
+      assert.are.equal("1", sorted_desc[3].id)
+      assert.are.equal(3000, p2._mtime)
+      assert.are.equal(2000, p3._mtime)
+      assert.are.equal(1000, p1._mtime)
+
+      local sorted_asc = local_query.sort_posts({ p1, p2, p3 }, { key = "mtime", dir = "asc" })
+      assert.are.equal("1", sorted_asc[1].id)
+      assert.are.equal("3", sorted_asc[2].id)
+      assert.are.equal("2", sorted_asc[3].id)
+    end)
+
+    it("sorts posts randomly using Fisher-Yates shuffle", function()
+      local posts = {}
+      for i = 1, 30 do
+        posts[i] = { id = tostring(i), file_url = tmp_dir .. "/" .. i .. ".jpg" }
+      end
+      local shuffled = local_query.sort_posts(posts, { key = "random", dir = "asc" })
+      assert.are.equal(30, #shuffled)
+      local seen = {}
+      for _, p in ipairs(shuffled) do
+        seen[p.id] = true
+      end
+      for i = 1, 30 do
+        assert.is_true(seen[tostring(i)])
+      end
+    end)
+
+    it("filter_posts automatically applies sorting when sort directive is present", function()
+      local p1 = { id = "1", score = 50, tags = "vocaloid miku", file_url = tmp_dir .. "/1.jpg" }
+      local p2 = { id = "2", score = 200, tags = "vocaloid luka", file_url = tmp_dir .. "/2.jpg" }
+      local p3 = { id = "3", score = 120, tags = "vocaloid rin", file_url = tmp_dir .. "/3.jpg" }
+
+      local filtered = local_query.filter_posts({ p1, p2, p3 }, "vocaloid sort:score")
+      assert.are.equal(3, #filtered)
+      assert.are.equal("2", filtered[1].id)
+      assert.are.equal("3", filtered[2].id)
+      assert.are.equal("1", filtered[3].id)
+    end)
+  end)
+
   describe("Adversarial Test Suite: Local Queries, Filtering & Boundary Conditions", function()
     local local_query = require("gelbooru.local.query")
 

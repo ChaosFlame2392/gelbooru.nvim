@@ -126,6 +126,7 @@ function M.parse_tags(tag_str)
     artists = {},
     characters = {},
     ids = {},
+    sort = nil,
     raw = tag_str or "",
   }
 
@@ -137,62 +138,97 @@ function M.parse_tags(tag_str)
     -- Strip optional outer quotes around individual tags
     token = token:gsub('^["\']', ""):gsub('["\']$', "")
 
-    -- 1. Score: score:>=50, score:>10, score:<=5, score:<0, score:=20, score:20
-    local score_op, score_val = token:match("^score:([><=]=?)(%-?%d+)$")
-    if not score_op then
-      score_val = token:match("^score:(%-?%d+)$")
-      if score_val then
-        score_op = "=="
+    -- Match sort: and order: directives
+    local sort_key, sort_dir = token:match("^sort:([%w_]+):?([%w_]*)$")
+    local order_val = token:match("^order:([%w_]+)$")
+    if sort_key then
+      if sort_key:lower() == "random" then
+        filter.sort = { key = "random", dir = "asc" }
+      else
+        filter.sort = {
+          key = sort_key:lower(),
+          dir = (sort_dir:lower() == "asc") and "asc" or "desc",
+        }
       end
-    elseif score_op == "=" then
-      score_op = "=="
-    end
-
-    if score_op and score_val then
-      table.insert(filter.scores, { op = score_op, val = tonumber(score_val) })
-    else
-      -- 2. Rating: rating:<r> or -rating:<r>
-      local pos_rating = token:match("^rating:(%a+)$")
-      local neg_rating = token:match("^%-rating:(%a+)$")
-      if pos_rating then
-        local canon = normalize_rating(pos_rating)
-        if canon then
-          table.insert(filter.ratings, { op = "eq", val = canon })
-        end
-      elseif neg_rating then
-        local canon = normalize_rating(neg_rating)
-        if canon then
-          table.insert(filter.ratings, { op = "neq", val = canon })
+    elseif order_val then
+      local oval = order_val:lower()
+      if oval == "asc" or oval == "desc" then
+        if filter.sort then
+          filter.sort.dir = oval
+        else
+          filter.sort = { key = "date", dir = oval }
         end
       else
-        -- 3. Explicit artist modifier: artist:<name> or -artist:<name>
-        local pos_artist = token:match("^artist:(.+)$")
-        local neg_artist = token:match("^%-artist:(.+)$")
-        if pos_artist then
-          table.insert(filter.artists, { op = "eq", val = pos_artist:lower() })
-        elseif neg_artist then
-          table.insert(filter.artists, { op = "neq", val = neg_artist:lower() })
+        local o_key, o_dir = oval:match("^([%w]+)_([%w]+)$")
+        if o_key and (o_dir == "asc" or o_dir == "desc") then
+          filter.sort = { key = o_key, dir = o_dir }
         else
-          -- 4. Explicit character modifier: character:<name> or -character:<name>
-          local pos_char = token:match("^character:(.+)$")
-          local neg_char = token:match("^%-character:(.+)$")
-          if pos_char then
-            table.insert(filter.characters, { op = "eq", val = pos_char:lower() })
-          elseif neg_char then
-            table.insert(filter.characters, { op = "neq", val = neg_char:lower() })
+          filter.sort = {
+            key = oval,
+            dir = (filter.sort and filter.sort.dir) or "desc",
+          }
+        end
+      end
+    elseif token:lower() == "random" then
+      filter.sort = { key = "random", dir = "asc" }
+    else
+      -- 1. Score: score:>=50, score:>10, score:<=5, score:<0, score:=20, score:20
+      local score_op, score_val = token:match("^score:([><=]=?)(%-?%d+)$")
+      if not score_op then
+        score_val = token:match("^score:(%-?%d+)$")
+        if score_val then
+          score_op = "=="
+        end
+      elseif score_op == "=" then
+        score_op = "=="
+      end
+
+      if score_op and score_val then
+        table.insert(filter.scores, { op = score_op, val = tonumber(score_val) })
+      else
+        -- 2. Rating: rating:<r> or -rating:<r>
+        local pos_rating = token:match("^rating:(%a+)$")
+        local neg_rating = token:match("^%-rating:(%a+)$")
+        if pos_rating then
+          local canon = normalize_rating(pos_rating)
+          if canon then
+            table.insert(filter.ratings, { op = "eq", val = canon })
+          end
+        elseif neg_rating then
+          local canon = normalize_rating(neg_rating)
+          if canon then
+            table.insert(filter.ratings, { op = "neq", val = canon })
+          end
+        else
+          -- 3. Explicit artist modifier: artist:<name> or -artist:<name>
+          local pos_artist = token:match("^artist:(.+)$")
+          local neg_artist = token:match("^%-artist:(.+)$")
+          if pos_artist then
+            table.insert(filter.artists, { op = "eq", val = pos_artist:lower() })
+          elseif neg_artist then
+            table.insert(filter.artists, { op = "neq", val = neg_artist:lower() })
           else
-            -- 5. ID: id:<digits>
-            local id_val = token:match("^id:(%d+)$")
-            if id_val then
-              table.insert(filter.ids, id_val)
+            -- 4. Explicit character modifier: character:<name> or -character:<name>
+            local pos_char = token:match("^character:(.+)$")
+            local neg_char = token:match("^%-character:(.+)$")
+            if pos_char then
+              table.insert(filter.characters, { op = "eq", val = pos_char:lower() })
+            elseif neg_char then
+              table.insert(filter.characters, { op = "neq", val = neg_char:lower() })
             else
-              -- 6. Negative tags: -tag
-              local neg_tag = token:match("^%-(.+)$")
-              if neg_tag and neg_tag ~= "" then
-                table.insert(filter.negative_tags, neg_tag:lower())
+              -- 5. ID: id:<digits>
+              local id_val = token:match("^id:(%d+)$")
+              if id_val then
+                table.insert(filter.ids, id_val)
               else
-                -- 7. Plain positive tags
-                table.insert(filter.positive_tags, token:lower())
+                -- 6. Negative tags: -tag
+                local neg_tag = token:match("^%-(.+)$")
+                if neg_tag and neg_tag ~= "" then
+                  table.insert(filter.negative_tags, neg_tag:lower())
+                else
+                  -- 7. Plain positive tags
+                  table.insert(filter.positive_tags, token:lower())
+                end
               end
             end
           end
@@ -488,6 +524,114 @@ function M.matches_post(post, filter)
   return true
 end
 
+local function get_post_score(p)
+  if p.score ~= nil then
+    return tonumber(p.score) or 0
+  end
+  if p.id then
+    local util = require("gelbooru.core.util")
+    local meta_path = util.meta_cache_path(p.id)
+    if meta_path then
+      local cached = util.read_json(meta_path)
+      if cached and cached.score ~= nil then
+        p.score = tonumber(cached.score) or 0
+        return p.score
+      end
+    end
+  end
+  return 0
+end
+
+local function get_post_mtime(p)
+  if p._mtime ~= nil then
+    return p._mtime
+  end
+  local uv = vim.uv or vim.loop
+  if p.file_url then
+    local stat = uv.fs_stat(p.file_url)
+    if stat and stat.mtime and stat.mtime.sec then
+      p._mtime = stat.mtime.sec
+      return p._mtime
+    end
+  end
+  p._mtime = 0
+  return 0
+end
+
+--- Sorts an array of posts by sort options table { key = "...", dir = "asc"|"desc" }.
+--- Mutates and returns the array.
+---@param posts table[]
+---@param sort_opt table
+---@return table[]
+function M.sort_posts(posts, sort_opt)
+  if not posts or #posts <= 1 or not sort_opt or not sort_opt.key then
+    return posts or {}
+  end
+
+  local key = sort_opt.key:lower()
+  local is_asc = (sort_opt.dir == "asc")
+
+  if key == "random" then
+    local uv = vim.uv or vim.loop
+    math.randomseed(os.time() + (uv.hrtime() % 1000000))
+    for i = #posts, 2, -1 do
+      local j = math.random(i)
+      posts[i], posts[j] = posts[j], posts[i]
+    end
+    return posts
+  end
+
+  if key == "score" then
+    table.sort(posts, function(a, b)
+      local sa = get_post_score(a)
+      local sb = get_post_score(b)
+      if sa ~= sb then
+        if is_asc then
+          return sa < sb
+        else
+          return sa > sb
+        end
+      end
+      return (tonumber(a.id) or 0) > (tonumber(b.id) or 0)
+    end)
+    return posts
+  end
+
+  if key == "id" then
+    table.sort(posts, function(a, b)
+      local ida = tonumber(a.id) or 0
+      local idb = tonumber(b.id) or 0
+      if ida ~= idb then
+        if is_asc then
+          return ida < idb
+        else
+          return ida > idb
+        end
+      end
+      return (a.file_url or "") < (b.file_url or "")
+    end)
+    return posts
+  end
+
+  if key == "date" or key == "mtime" then
+    table.sort(posts, function(a, b)
+      local ma = get_post_mtime(a)
+      local mb = get_post_mtime(b)
+      if ma ~= mb then
+        if is_asc then
+          return ma < mb
+        else
+          return ma > mb
+        end
+      end
+      return (tonumber(a.id) or 0) > (tonumber(b.id) or 0)
+    end)
+    return posts
+  end
+
+  return posts
+end
+
 --- Filters an array of posts by tag/query filter, returning a new filtered array.
 ---@param posts table[]
 ---@param filter_or_tag_str table|string|nil
@@ -506,20 +650,23 @@ function M.filter_posts(posts, filter_or_tag_str)
     or (filter.characters and #filter.characters > 0)
     or (filter.ids and #filter.ids > 0)
 
+  local res = {}
   if not has_criteria then
-    local res = {}
     for i = 1, #posts do
       res[i] = posts[i]
     end
-    return res
-  end
-
-  local res = {}
-  for _, p in ipairs(posts) do
-    if M.matches_post(p, filter) then
-      res[#res + 1] = p
+  else
+    for _, p in ipairs(posts) do
+      if M.matches_post(p, filter) then
+        res[#res + 1] = p
+      end
     end
   end
+
+  if filter.sort then
+    res = M.sort_posts(res, filter.sort)
+  end
+
   return res
 end
 

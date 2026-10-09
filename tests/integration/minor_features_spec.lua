@@ -844,5 +844,41 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       assert.is_truthy(status_lines[1]:find("Empty search query%. Press %[/ or i%] to type tags, %[q%] to exit"),
         "Status line must display empty search query hint: " .. tostring(status_lines[1]))
     end)
+
+    it("Issue 0.5: video post with cached vthumb_<id>.jpg renders high-quality thumbnail in online browsing mode", function()
+      local mock_snacks = require("tests.integration.helpers.mock_snacks")
+      ui.open()
+
+      local cache_dir = config.options.cache_dir
+      vim.fn.mkdir(cache_dir, "p")
+      local vthumb = string.format("%s/vthumb_9955.jpg", cache_dir)
+      vim.fn.writefile({ string.rep("x", 600) }, vthumb)
+
+      state.State.posts = {
+        {
+          id = 9955,
+          file_url = "https://example.com/video9955.mp4",
+          preview_url = "https://example.com/thumb_lowres.jpg",
+          sample_url = "https://example.com/sample_lowres.jpg",
+          rating = "general",
+          score = 50,
+          tags = "video solo",
+        },
+      }
+      state.State.cur = 1
+      state.State.cur_id = nil
+
+      ui.render_preview(false)
+
+      vim.wait(300, function()
+        return #mock_snacks.placements_created > 0
+      end, 10)
+
+      assert.is_true(#mock_snacks.placements_created >= 1, "Placement should have been created")
+      local last = mock_snacks.placements_created[#mock_snacks.placements_created]
+      assert.are.equal(vthumb, last.src, "Should render cached vthumb instead of low-res preview URL")
+
+      vim.fn.delete(vthumb)
+    end)
   end)
 end)
