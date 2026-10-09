@@ -115,6 +115,96 @@ function M.float(buf, row, col, w, h, extra)
   return vim.api.nvim_open_win(buf, false, cfg)
 end
 
+function M.meta_cache_path(post_id)
+  if not post_id or tostring(post_id) == "" or tostring(post_id) == "nil" then
+    return nil
+  end
+  return string.format("%s/meta_%s.json", config.options.cache_dir, tostring(post_id))
+end
+
+function M.read_json(path)
+  if not path or vim.fn.filereadable(path) ~= 1 then
+    return nil
+  end
+  local f = io.open(path, "r")
+  if not f then
+    return nil
+  end
+  local raw = f:read("*a")
+  f:close()
+  local ok, data = pcall(vim.fn.json_decode, raw)
+  return (ok and type(data) == "table") and data or nil
+end
+
+function M.write_json(path, data)
+  if not path or not data then
+    return false
+  end
+  local ok, encoded = pcall(vim.fn.json_encode, data)
+  if not ok or not encoded then
+    return false
+  end
+  local dir = vim.fn.fnamemodify(path, ":h")
+  if dir and dir ~= "" then
+    M.ensure(dir)
+  end
+  local tmp = path .. ".tmp"
+  local f = io.open(tmp, "w")
+  if not f then
+    return false
+  end
+  f:write(encoded)
+  f:close()
+  local ren_ok = vim.fn.rename(tmp, path)
+  return ren_ok == 0
+end
+
+function M.open_url(url)
+  if not url or url == "" then
+    return false
+  end
+  if vim.ui and vim.ui.open then
+    pcall(vim.ui.open, url)
+    return true
+  else
+    local cmd = vim.fn.has("mac") == 1 and "open" or (vim.fn.has("win32") == 1 and "start" or "xdg-open")
+    pcall(vim.fn.system, { cmd, url })
+    return true
+  end
+end
+
+function M.open_media(target)
+  if not target or target == "" then
+    return false
+  end
+  -- Prioritize mpv for videos if available, otherwise fallback to system opener
+  local ext = target:match("%.([^%.]+)$")
+  if ext and (ext:lower() == "mp4" or ext:lower() == "webm") and vim.fn.executable("mpv") == 1 then
+    pcall(vim.fn.jobstart, { "mpv", target }, { detach = true })
+    return true
+  end
+  return M.open_url(target)
+end
+
+function M.cache_post_metadata(p)
+  if not p or not p.id or tostring(p.id) == "" or tostring(p.id) == "nil" then
+    return false
+  end
+  local meta_path = M.meta_cache_path(p.id)
+  if not meta_path then
+    return false
+  end
+  return M.write_json(meta_path, {
+    id = p.id,
+    tags = p.tags,
+    rating = p.rating,
+    score = p.score,
+    width = p.width,
+    height = p.height,
+    source = p.source,
+  })
+end
+
 function M.keymap(buf, mode, key, fn)
   vim.keymap.set(mode, key, fn, { buffer = buf, nowait = true, noremap = true, silent = true })
 end

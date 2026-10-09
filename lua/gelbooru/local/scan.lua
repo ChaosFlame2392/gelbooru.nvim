@@ -67,6 +67,8 @@ function M.scan_local_folder(dir)
     png = true,
     webp = true,
     gif = true,
+    mp4 = true,
+    webm = true,
   }
 
   local files = {}
@@ -89,7 +91,7 @@ function M.scan_local_folder(dir)
     local ext = file_path:match("%.([^%.]+)$")
     if ext and valid_exts[ext:lower()] then
       local post_id = M.extract_post_id(file_path)
-      posts[#posts + 1] = {
+      local post = {
         id = post_id,
         file_url = file_path,
         sample_url = file_path,
@@ -97,6 +99,28 @@ function M.scan_local_folder(dir)
         is_local = true,
         tags = "local",
       }
+      if post_id then
+        local meta_path = util.meta_cache_path(post_id)
+        if meta_path then
+          local cached = util.read_json(meta_path)
+          if cached then
+            post.tags = cached.tags or post.tags
+            post.rating = cached.rating or post.rating
+            post.score = tonumber(cached.score) or cached.score or post.score
+            if cached.width then
+              post.width = tonumber(cached.width) or cached.width
+            end
+            if cached.height then
+              post.height = tonumber(cached.height) or cached.height
+            end
+            if cached.source then
+              post.source = cached.source
+            end
+            post._metadata_fetched = true
+          end
+        end
+      end
+      posts[#posts + 1] = post
     end
   end
   return posts, target_dir, target_file

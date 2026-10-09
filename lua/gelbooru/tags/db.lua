@@ -93,6 +93,13 @@ end
 function M.load_tags(caps)
   local State = state.State
   local UI = state.UI
+  if State.tags_loaded or State.tags_loading then
+    return
+  end
+  State.tags_loading = true
+  local epoch = (State.tag_load_epoch or 0) + 1
+  State.tag_load_epoch = epoch
+
   caps = caps or DEFAULT_TAG_CAPS
 
   State.tags_by_name = {}
@@ -159,9 +166,15 @@ function M.load_tags(caps)
     -- Step 2: Load category databases across progressive event-loop turns so
     -- the Neovim main thread never freezes and the UI appears instantaneously.
     vim.schedule(function()
+      if State.torn_down or State.tag_load_epoch ~= epoch then
+        return
+      end
       M.parse_tag_file(series_file, State.series, State.series_by_first, caps.series)
 
       vim.schedule(function()
+        if State.torn_down or State.tag_load_epoch ~= epoch then
+          return
+        end
         M.parse_tag_file(general_file, State.general, State.general_by_first, caps.general)
 
         -- Build initial all_tags recommendation set from series and general
@@ -186,10 +199,19 @@ function M.load_tags(caps)
         end
 
         vim.schedule(function()
+          if State.torn_down or State.tag_load_epoch ~= epoch then
+            return
+          end
           M.parse_tag_file(chars_file, State.characters, State.chars_by_first, caps.characters)
 
           vim.schedule(function()
+            if State.torn_down or State.tag_load_epoch ~= epoch then
+              return
+            end
             M.parse_tag_file(artists_file, State.artists, State.artists_by_first, caps.artists)
+
+            State.tags_loading = false
+            State.tags_loaded = true
 
             log(
               "INFO",
@@ -214,6 +236,8 @@ function M.load_tags(caps)
       end)
     end)
   else
+    State.tags_loading = false
+    State.tags_loaded = true
     State.all_tags = all_tags
   end
 end

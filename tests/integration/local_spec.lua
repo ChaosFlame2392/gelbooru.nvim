@@ -8,13 +8,21 @@ local api = require("gelbooru.net.api")
 local state = require("gelbooru.core.state")
 local history = require("gelbooru.core.history")
 local download = require("gelbooru.net.download")
+local config = require("gelbooru.core.config")
+local util = require("gelbooru.core.util")
 
 describe("Integration: Local Folder Browser Mode", function()
   local tmp_dir
+  local tmp_cache
+  local orig_cache_dir
 
   before_each(function()
     harness.setup_all()
     harness.reset_environment()
+    orig_cache_dir = config.options.cache_dir
+    tmp_cache = vim.fn.tempname()
+    vim.fn.mkdir(tmp_cache, "p")
+    config.options.cache_dir = tmp_cache
     tmp_dir = vim.fn.tempname()
     vim.fn.mkdir(tmp_dir, "p")
     -- Create dummy images (> 1024 bytes)
@@ -31,6 +39,8 @@ describe("Integration: Local Folder Browser Mode", function()
     harness.reset_environment()
     harness.teardown_all()
     vim.fn.delete(tmp_dir, "rf")
+    config.options.cache_dir = orig_cache_dir
+    vim.fn.delete(tmp_cache, "rf")
   end)
 
   it("opens UI with local images, sets query, and renders list", function()
@@ -166,11 +176,11 @@ describe("Integration: Local Folder Browser Mode", function()
       assert.is_truthy(list_lines[1]:find("No images found"))
     end)
 
-    it("handles directory with ONLY non-image files (.txt, .mp4, .json, .part, .md)", function()
+    it("handles directory with ONLY non-image files (.txt, .zip, .json, .part, .md)", function()
       local non_img_dir = vim.fn.tempname()
       vim.fn.mkdir(non_img_dir, "p")
       vim.fn.writefile({ "text notes" }, non_img_dir .. "/notes.txt")
-      vim.fn.writefile({ "video data" }, non_img_dir .. "/movie.mp4")
+      vim.fn.writefile({ "archive data" }, non_img_dir .. "/archive.zip")
       vim.fn.writefile({ "{}" }, non_img_dir .. "/data.json")
       vim.fn.writefile({ "partial" }, non_img_dir .. "/temp.jpg.part")
       vim.fn.writefile({ "# readme" }, non_img_dir .. "/README.md")
@@ -284,31 +294,177 @@ describe("Integration: Local Folder Browser Mode", function()
       download.download_async = orig_download_async
     end)
 
-    it("'O' keymap on post without ID does not open malformed URL like ...&id=nil", function()
+    it("'o' triggers web page lookup and 'O' opens local media viewer", function()
       ui.open_local(tmp_dir)
 
-      -- Select post 3 (artwork_no_id.webp, id is nil)
-      state.State.cur = 3
-      local p = state.State.posts[3]
-      assert.is_nil(p.id)
-
-      -- Spy on vim.ui.open
+      -- Spy on util.open_url and util.open_media (or vim.ui.open)
       local opened_url = nil
       local orig_ui_open = vim.ui.open
       vim.ui.open = function(url)
         opened_url = url
       end
 
-      -- Trigger 'O' keymap action
+      local win_list = state.UI.wins.list
+      vim.api.nvim_set_current_win(win_list)
+
+      -- Post 1 has ID 1001
+      state.State.cur = 1
+      local p1 = state.State.posts[1]
+      assert.are.equal("1001", tostring(p1.id))
+
+      -- 'o' triggers web page lookup for post with ID
+      opened_url = nil
+      vim.cmd("normal o")
+      assert.are.equal("https://gelbooru.com/index.php?page=post&s=view&id=1001", opened_url)
+
+      -- 'O' triggers local media viewer for post 1
+      opened_url = nil
+      vim.cmd("normal O")
+      assert.are.equal(p1.file_url, opened_url)
+
+      -- Select post 3 (artwork_no_id.webp, id is nil)
+      state.State.cur = 3
+      local p3 = state.State.posts[3]
+      assert.is_nil(p3.id)
+
+      -- 'O' keymap action on post without ID still opens local media viewer
+      opened_url = nil
+      vim.cmd("normal O")
+      assert.are.equal(p3.file_url, opened_url)
+
+      -- 'o' keymap on post without ID must NOT open web page or local file, and must show status
+      opened_url = nil
+      vim.cmd("normal o")
+      assert.is_nil(opened_url)
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_truthy(status_lines[1]:find("No post ID available for browser lookup"))
+
+      -- Online post without ID or local file: 'O' shows status and does not open
+      opened_url = nil
+      state.State.posts[4] = { is_local = false, id = nil, file_url = nil }
+      state.State.cur = 4
+      vim.cmd("normal O")
+      assert.is_nil(opened_url)
+      status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_truthy(status_lines[1]:find("No post ID") or status_lines[1]:find("No file URL"))
+
+      vim.ui.open = orig_ui_open
+    end)
+
+    it("force refresh 'R' strictly deletes ONLY the cache json and preserves media file bytes intact", function()
+      local util = require("gelbooru.core.util")
+      local test_file = tmp_dir .. "/1001.jpg"
+      local original_content = "ORIGINAL_LOCAL_IMAGE_PAYLOAD_PROTECTED_" .. string.rep("X", 2000)
+      local f = io.open(test_file, "wb")
+      f:write(original_content)
+      f:close()
+
+      -- Create disk cache for post 1001
+      local meta_path = util.meta_cache_path("1001")
+      util.write_json(meta_path, { id = 1001, tags = "initial_cached_tag" })
+      assert.are.equal(1, vim.fn.filereadable(meta_path))
+
+      ui.open_local(tmp_dir)
+      assert.are.equal(1, state.State.cur)
+      local p = state.State.posts[1]
+      assert.are.equal("1001", p.id)
+
+      -- Trigger 'R' force refresh via list window normal mode mapping
+      local win_list = state.UI.wins.list
+      vim.api.nvim_set_current_win(win_list)
+      vim.cmd("normal R")
+
+      -- The cache JSON MUST be deleted from disk
+      assert.are.equal(0, vim.fn.filereadable(meta_path))
+
+      -- The local media file MUST still exist with identical bytes
+      assert.are.equal(1, vim.fn.filereadable(test_file))
+      local f_read = io.open(test_file, "rb")
+      assert.is_truthy(f_read)
+      local content_after = f_read:read("*a")
+      f_read:close()
+      assert.are.equal(original_content, content_after)
+    end)
+
+    it("force refresh 'R' on post without ID preserves media file and skips cache deletion cleanly", function()
+      local test_file = tmp_dir .. "/artwork_no_id.webp"
+      local original_content = "ORIGINAL_WEBP_NO_ID_" .. string.rep("Z", 1500)
+      local f = io.open(test_file, "wb")
+      f:write(original_content)
+      f:close()
+
+      ui.open_local(tmp_dir)
+      state.State.cur = 3
+      local p = state.State.posts[3]
+      assert.is_nil(p.id)
+
+      local win_list = state.UI.wins.list
+      vim.api.nvim_set_current_win(win_list)
+      vim.cmd("normal R")
+
+      -- Media file must remain intact and no error raised
+      assert.are.equal(1, vim.fn.filereadable(test_file))
+      local f_read = io.open(test_file, "rb")
+      local content_after = f_read:read("*a")
+      f_read:close()
+      assert.are.equal(original_content, content_after)
+    end)
+  end)
+
+  describe("Local Video Pipeline & Playback", function()
+    local vid_dir
+
+    before_each(function()
+      vid_dir = vim.fn.tempname()
+      vim.fn.mkdir(vid_dir, "p")
+      vim.fn.writefile({ string.rep("V", 1200) }, vid_dir .. "/01_sample.mp4")
+      vim.fn.writefile({ string.rep("W", 1200) }, vid_dir .. "/02_sample.webm")
+      vim.fn.writefile({ string.rep("P", 1200) }, vid_dir .. "/03_sample.png")
+    end)
+
+    after_each(function()
+      vim.fn.delete(vid_dir, "rf")
+    end)
+
+    it("scans video files, labels them with [VIDEO] badge in list, and 'O' launches open_media", function()
+      local util = require("gelbooru.core.util")
+      ui.open_local(vid_dir)
+
+      assert.are.equal(3, #state.State.posts)
+      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      assert.are.equal(3, #list_lines)
+
+      -- Video posts have [VIDEO] badge in list line
+      assert.is_truthy(list_lines[1]:find("%[VIDEO%]"))
+      assert.is_truthy(list_lines[2]:find("%[VIDEO%]"))
+      -- Non-video image does NOT have [VIDEO] badge
+      assert.is_falsy(list_lines[3]:find("%[VIDEO%]"))
+
+      -- Spy on util.open_media
+      local opened_media = nil
+      local orig_open_media = util.open_media
+      util.open_media = function(target)
+        opened_media = target
+        return true
+      end
+
+      -- Select post 1 (mp4) and press 'O'
+      state.State.cur = 1
       local win_list = state.UI.wins.list
       vim.api.nvim_set_current_win(win_list)
       vim.cmd("normal O")
 
-      assert.is_nil(opened_url)
-      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
-      assert.is_truthy(status_lines[1]:find("No post ID available"))
+      assert.are.equal(state.State.posts[1].file_url, opened_media)
+      assert.is_truthy(opened_media:find("%.mp4$"))
 
-      vim.ui.open = orig_ui_open
+      -- Select post 2 (webm) and press 'O'
+      opened_media = nil
+      state.State.cur = 2
+      vim.cmd("normal O")
+      assert.are.equal(state.State.posts[2].file_url, opened_media)
+      assert.is_truthy(opened_media:find("%.webm$"))
+
+      util.open_media = orig_open_media
     end)
   end)
 
@@ -528,6 +684,503 @@ describe("Integration: Local Folder Browser Mode", function()
 
       -- Verify no panic, windows are gone
       assert.is_nil(state.UI.wins.frame)
+    end)
+  end)
+
+  describe("Sprint 2: Local Tag Filtering & Search Routing Integration", function()
+    it("execute_search('local: <tags>') routes to open_local and filters default save_dir", function()
+      -- Seed save_dir with images
+      local save_img1 = config.options.save_dir .. "/2001_hatsune_miku.png"
+      local save_img2 = config.options.save_dir .. "/2002_megurine_luka.png"
+      local f1 = io.open(save_img1, "wb")
+      if f1 then f1:write(string.rep("A", 2048)) f1:close() end
+      local f2 = io.open(save_img2, "wb")
+      if f2 then f2:write(string.rep("B", 2048)) f2:close() end
+
+      ui.open()
+      api.execute_search("local: miku")
+
+      assert.are.equal("local: miku", state.State.query)
+      assert.are.equal(1, #state.State.posts)
+      assert.is_truthy(state.State.posts[1].file_url:find("2001_hatsune_miku"))
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_truthy(status_lines[1]:find("miku"))
+    end)
+
+    it("execute_search('local:<dir> <tags>') routes to open_local with custom folder", function()
+      local custom_dir = vim.fn.tempname()
+      vim.fn.mkdir(custom_dir, "p")
+      local f1 = io.open(custom_dir .. "/pic_solo.jpg", "wb")
+      if f1 then f1:write(string.rep("A", 2048)) f1:close() end
+      local f2 = io.open(custom_dir .. "/pic_duet.jpg", "wb")
+      if f2 then f2:write(string.rep("B", 2048)) f2:close() end
+
+      ui.open()
+      api.execute_search("local:" .. custom_dir .. " solo")
+
+      assert.are.equal("local:" .. custom_dir .. " solo", state.State.query)
+      assert.are.equal(1, #state.State.posts)
+      assert.is_truthy(state.State.posts[1].file_url:find("pic_solo"))
+
+      vim.fn.delete(custom_dir, "rf")
+    end)
+
+    it("displays informative status message and 'No images found' when query matches 0 posts", function()
+      ui.open_local(tmp_dir)
+      api.execute_search("local:" .. tmp_dir .. " non_existent_tag_xyz")
+
+      assert.are.equal(0, #state.State.posts)
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_truthy(status_lines[1]:find("No posts matching 'non_existent_tag_xyz'"))
+
+      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_truthy(list_lines[1]:find("No images found"))
+
+      local img_lines = harness.get_buf_lines(state.UI.bufs.img)
+      assert.is_truthy(img_lines[1]:find("No images found"))
+    end)
+
+    it("preserves history stack with exact State.query and filtered post count across [ and ]", function()
+      local query1 = "local:" .. tmp_dir
+      ui.open_local(tmp_dir)
+      assert.are.equal(3, #state.State.posts)
+
+      -- Query 2: filter for 1001
+      api.execute_search("local:" .. tmp_dir .. " 1001")
+      assert.are.equal(1, #state.State.posts)
+      assert.are.equal("local:" .. tmp_dir .. " 1001", state.State.query)
+
+      -- Navigate back with history_prev ([)
+      history.history_prev()
+      assert.are.equal(query1, state.State.query)
+      assert.are.equal(3, #state.State.posts)
+
+      -- Navigate forward with history_next (])
+      history.history_next()
+      assert.are.equal("local:" .. tmp_dir .. " 1001", state.State.query)
+      assert.are.equal(1, #state.State.posts)
+    end)
+  end)
+
+  describe("Sprint 2: Video Pipeline Verification (.mp4, .webm, [VIDEO] badge, keymaps)", function()
+    local vid_dir
+
+    before_each(function()
+      vid_dir = vim.fn.tempname()
+      vim.fn.mkdir(vid_dir, "p")
+      local f1 = io.open(vid_dir .. "/animation.mp4", "wb")
+      if f1 then f1:write(string.rep("V", 2048)) f1:close() end
+      local f2 = io.open(vid_dir .. "/clip.webm", "wb")
+      if f2 then f2:write(string.rep("W", 2048)) f2:close() end
+      local f3 = io.open(vid_dir .. "/still.jpg", "wb")
+      if f3 then f3:write(string.rep("J", 2048)) f3:close() end
+    end)
+
+    after_each(function()
+      if vid_dir and vim.fn.isdirectory(vid_dir) == 1 then
+        vim.fn.delete(vid_dir, "rf")
+      end
+    end)
+
+    it("scans and classifies .mp4 and .webm as video posts", function()
+      local posts = ui.scan_local_folder(vid_dir)
+      assert.are.equal(3, #posts)
+
+      local vids = 0
+      for _, p in ipairs(posts) do
+        if ui.image.is_video_post(p) then
+          vids = vids + 1
+        end
+      end
+      assert.are.equal(2, vids)
+    end)
+
+    it("render_list displays [VIDEO] badge for video media", function()
+      ui.open_local(vid_dir)
+      assert.are.equal(3, #state.State.posts)
+
+      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      local video_badges = 0
+      for _, line in ipairs(list_lines) do
+        if line:find("%[VIDEO%]") then
+          video_badges = video_badges + 1
+        end
+      end
+      assert.are.equal(2, video_badges)
+    end)
+
+    it("keymap O opens video post via util.open_media", function()
+      ui.open_local(vid_dir)
+
+      local opened = nil
+      local orig_open_media = util.open_media
+      util.open_media = function(target)
+        opened = target
+        return true
+      end
+
+      -- Focus first post (animation.mp4)
+      state.State.cur = 1
+      assert.is_truthy(state.State.posts[1].file_url:find("animation.mp4"))
+
+      local list_win = state.UI.wins.list
+      vim.api.nvim_set_current_win(list_win)
+      vim.cmd("normal O")
+
+      assert.is_not_nil(opened)
+      assert.is_truthy(opened:find("animation.mp4"))
+
+      util.open_media = orig_open_media
+    end)
+
+    it("keymap <CR> on local post displays local file notice and does NOT initiate download", function()
+      ui.open_local(vid_dir)
+
+      local download_started = false
+      local orig_download = download.download_async
+      download.download_async = function(...)
+        download_started = true
+        return orig_download(...)
+      end
+
+      state.State.cur = 1
+      api.save_current()
+
+      assert.is_false(download_started)
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_truthy(status_lines[1]:find("Local file:"))
+
+      download.download_async = orig_download
+    end)
+  end)
+
+  describe("Adversarial Integration Suite: Local Query Filtering & Robustness", function()
+    local adv_dir
+
+    before_each(function()
+      adv_dir = vim.fn.tempname()
+      vim.fn.mkdir(adv_dir, "p")
+      -- Seed images with various tag and name patterns
+      -- 1. Caterpillar post
+      local f1 = io.open(adv_dir .. "/101_caterpillar.png", "wb")
+      if f1 then f1:write(string.rep("A", 2048)) f1:close() end
+      util.write_json(util.meta_cache_path("101"), {
+        id = "101",
+        tags = "caterpillar insect nature",
+        rating = "general",
+        score = 15,
+      })
+
+      -- 2. Cat post
+      local f2 = io.open(adv_dir .. "/102_cat.png", "wb")
+      if f2 then f2:write(string.rep("B", 2048)) f2:close() end
+      util.write_json(util.meta_cache_path("102"), {
+        id = "102",
+        tags = "cat feline animal black_cat",
+        rating = "sensitive",
+        score = -12,
+      })
+
+      -- 3. Complex special characters and negative score
+      local f3 = io.open(adv_dir .. "/103_special_c++.png", "wb")
+      if f3 then f3:write(string.rep("C", 2048)) f3:close() end
+      util.write_json(util.meta_cache_path("103"), {
+        id = "103",
+        tags = "tag(1) c++ [brackets] * ?",
+        rating = "explicit",
+        score = -25,
+      })
+
+      -- 4. Untagged image with dots in filename
+      local f4 = io.open(adv_dir .. "/untagged.art.solo.2024.jpg", "wb")
+      if f4 then f4:write(string.rep("D", 2048)) f4:close() end
+
+      -- 5. Video post .mp4
+      local f5 = io.open(adv_dir .. "/105_sample_anim.mp4", "wb")
+      if f5 then f5:write(string.rep("E", 2048)) f5:close() end
+      util.write_json(util.meta_cache_path("105"), {
+        id = "105",
+        tags = "animation 3d video",
+        rating = "questionable",
+        score = 50,
+      })
+    end)
+
+    after_each(function()
+      if adv_dir and vim.fn.isdirectory(adv_dir) == 1 then
+        vim.fn.delete(adv_dir, "rf")
+      end
+    end)
+
+    it("tag word boundary matching: searching 'cat' in local folder should not match 'caterpillar'", function()
+      ui.open_local(adv_dir .. " cat")
+
+      -- Only 102_cat.png should match 'cat'
+      assert.are.equal(1, #state.State.posts)
+      assert.are.equal("102", state.State.posts[1].id)
+    end)
+
+    it("handles negative scores (score:<-10) and boundary filters in execute_search", function()
+      ui.open()
+      api.execute_search("local:" .. adv_dir .. " score:<-10")
+
+      -- Posts with score < -10: 102 (-12) and 103 (-25)
+      assert.are.equal(2, #state.State.posts)
+      for _, p in ipairs(state.State.posts) do
+        assert.is_true(p.score < -10)
+      end
+    end)
+
+    it("handles malformed queries: unclosed quotes and weird whitespace gracefully via execute_search", function()
+      ui.open()
+
+      -- Unclosed quote in directory
+      api.execute_search('local:"' .. adv_dir .. ' cat')
+      assert.is_truthy(state.UI.wins.frame)
+      assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.frame))
+
+      -- Tabs and excess whitespace
+      api.execute_search("local:\t\t" .. adv_dir .. "  \t \t solo \t  ")
+      assert.are.equal(1, #state.State.posts)
+      assert.is_truthy(state.State.posts[1].file_url:find("untagged.art.solo"))
+    end)
+
+    it("handles special regex characters in tags (tag(1), c++, [brackets], *, ?) without crash", function()
+      ui.open()
+      api.execute_search("local:" .. adv_dir .. " c++")
+
+      assert.are.equal(1, #state.State.posts)
+      assert.are.equal("103", state.State.posts[1].id)
+
+      -- Negative matching with special chars
+      api.execute_search("local:" .. adv_dir .. " -c++")
+      for _, p in ipairs(state.State.posts) do
+        assert.are.not_equal("103", p.id)
+      end
+    end)
+
+    it("survives rapid local query switching and history preservation", function()
+      ui.open_local(adv_dir)
+      assert.are.equal(5, #state.State.posts)
+
+      -- Rapidly fire 5 different query searches in succession
+      api.execute_search("local:" .. adv_dir .. " cat")
+      api.execute_search("local:" .. adv_dir .. " c++")
+      api.execute_search("local:" .. adv_dir .. " solo")
+      api.execute_search("local:" .. adv_dir .. " rating:explicit")
+      api.execute_search("local:" .. adv_dir .. " -rating:explicit")
+
+      assert.are.equal("local:" .. adv_dir .. " -rating:explicit", state.State.query)
+      -- 101, 102, untagged, video are non-explicit
+      assert.are.equal(4, #state.State.posts)
+
+      -- History navigation backward works cleanly
+      history.history_prev()
+      assert.are.equal("local:" .. adv_dir .. " rating:explicit", state.State.query)
+      assert.are.equal(1, #state.State.posts)
+      assert.are.equal("103", state.State.posts[1].id)
+    end)
+
+    it("teardown safety during local query search and zero-result keypress flurry", function()
+      ui.open_local(adv_dir .. " non_existent_tag_zero_results")
+      assert.are.equal(0, #state.State.posts)
+
+      -- Stress test keymaps on empty list buffer without crashing
+      local win_list = state.UI.wins.list
+      vim.api.nvim_set_current_win(win_list)
+
+      vim.cmd("normal j")
+      vim.cmd("normal k")
+      vim.cmd("normal O")
+      vim.cmd("normal o")
+      vim.cmd("normal u")
+      vim.cmd("normal \r")
+      vim.cmd("normal R")
+      vim.cmd("normal m")
+      vim.cmd("normal m")
+      vim.cmd("normal \\")
+      vim.cmd("normal \\")
+      vim.cmd("normal <")
+      vim.cmd("normal >")
+
+      assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.frame))
+
+      -- Immediate teardown
+      ui.teardown()
+      assert.is_true(state.State.torn_down)
+      assert.is_nil(state.UI.wins.frame)
+    end)
+
+    it("video pipeline: .mp4 post renders [VIDEO] badge and 'O' invokes util.open_media", function()
+      ui.open_local(adv_dir)
+
+      local opened_path = nil
+      local orig_open_media = util.open_media
+      util.open_media = function(path)
+        opened_path = path
+        return true
+      end
+
+      -- Filter for video post
+      api.execute_search("local:" .. adv_dir .. " animation")
+      assert.are.equal(1, #state.State.posts)
+      assert.is_truthy(state.State.posts[1].file_url:find("105_sample_anim.mp4"))
+
+      -- List buffer has [VIDEO] badge
+      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_truthy(list_lines[1]:find("%[VIDEO%]"))
+
+      -- Press 'O' to open
+      local win_list = state.UI.wins.list
+      vim.api.nvim_set_current_win(win_list)
+      vim.cmd("normal O")
+
+      assert.is_not_nil(opened_path)
+      assert.is_truthy(opened_path:find("sample_anim.mp4"))
+
+      util.open_media = orig_open_media
+    end)
+  end)
+
+  describe("Sprint 3: Dual-Tier Lookahead & Online-Local Hybrid Index Integration", function()
+    local local_index = require("gelbooru.local.index")
+    local indexer = require("gelbooru.local.indexer")
+    local image = require("gelbooru.ui.image")
+
+    before_each(function()
+      local_index.reset()
+      indexer.stop()
+    end)
+
+    after_each(function()
+      indexer.stop()
+      local_index.reset()
+    end)
+
+    it("render_list displays [SAVED] badge for online posts when present in save_dir and updates via mtime cache", function()
+      local saved_file = config.options.save_dir .. "/1001.jpg"
+      local f = io.open(saved_file, "wb")
+      if f then f:write(string.rep("S", 2048)) f:close() end
+
+      ui.open("hatsune_miku")
+      vim.wait(300, function() return #state.State.posts > 0 end, 10)
+
+      assert.are.equal(3, #state.State.posts)
+      assert.are.equal(1001, state.State.posts[1].id)
+      assert.are.equal(1002, state.State.posts[2].id)
+
+      ui.render_list()
+
+      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_truthy(list_lines[1]:find("%[SAVED%]"))
+      assert.is_falsy(list_lines[2]:find("%[SAVED%]"))
+
+      state.State.posts[1].is_local = true
+      ui.render_list()
+      list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_falsy(list_lines[1]:find("%[SAVED%]"))
+    end)
+
+    it("instant canvas upgrade to saved file and [SAVED] list badge on <CR> save completion", function()
+      ui.open("hatsune_miku")
+      vim.wait(300, function() return #state.State.posts > 0 end, 10)
+
+      state.State.cur = 2
+      local p2 = state.State.posts[2]
+      assert.are.equal(1002, p2.id)
+
+      ui.render_list()
+      local list_lines_before = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_falsy(list_lines_before[2]:find("%[SAVED%]"))
+      assert.is_false(local_index.is_saved(1002))
+
+      local rendered_image_path = nil
+      local orig_render_image = image.render_image
+      image.render_image = function(win, path)
+        rendered_image_path = path
+        return orig_render_image(win, path)
+      end
+
+      local save_cb_called = false
+      api.save_current(function(saved, dest)
+        save_cb_called = true
+        assert.is_true(saved)
+        assert.is_truthy(dest:find("1002"))
+      end)
+
+      vim.wait(500, function() return save_cb_called end, 10)
+      assert.is_true(save_cb_called)
+
+      assert.is_true(local_index.is_saved(1002))
+
+      assert.is_not_nil(rendered_image_path)
+      assert.is_truthy(rendered_image_path:find("1002"))
+      assert.are.equal(1, vim.fn.filereadable(rendered_image_path))
+
+      local list_lines_after = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_truthy(list_lines_after[2]:find("%[SAVED%]"))
+
+      image.render_image = orig_render_image
+    end)
+
+    it("render_preview triggers cursor_rush_prefetch for local posts with current cursor and direction", function()
+      ui.open_local(tmp_dir)
+
+      local prefetch_called = false
+      local prefetch_idx = nil
+      local prefetch_dir = nil
+      local orig_rush = indexer.cursor_rush_prefetch
+      indexer.cursor_rush_prefetch = function(idx, dir)
+        prefetch_called = true
+        prefetch_idx = idx
+        prefetch_dir = dir
+        return orig_rush(idx, dir)
+      end
+
+      state.State.cur = 2
+      state.State.scroll_dir = -1
+
+      ui.render_preview(false)
+
+      assert.is_true(prefetch_called)
+      assert.are.equal(2, prefetch_idx)
+      assert.are.equal(-1, prefetch_dir)
+
+      indexer.cursor_rush_prefetch = orig_rush
+    end)
+
+    it("open_local initiates background indexing via start_background_indexing", function()
+      local bg_started = false
+      local bg_posts_count = nil
+      local orig_start_bg = indexer.start_background_indexing
+      indexer.start_background_indexing = function(posts)
+        bg_started = true
+        bg_posts_count = #posts
+        return orig_start_bg(posts)
+      end
+
+      ui.open_local(tmp_dir)
+
+      assert.is_true(bg_started)
+      assert.are.equal(3, bg_posts_count)
+
+      indexer.start_background_indexing = orig_start_bg
+    end)
+
+    it("teardown stops indexer timers cleanly with zero memory leaks", function()
+      ui.open_local(tmp_dir)
+
+      local fresh_posts = {
+        { id = "9901", is_local = true },
+        { id = "9902", is_local = true },
+      }
+      indexer.start_background_indexing(fresh_posts)
+      assert.is_not_nil(state.UI.indexer_timer)
+
+      ui.teardown()
+
+      assert.is_true(state.State.torn_down)
+      assert.is_nil(state.UI.indexer_timer)
     end)
   end)
 end)

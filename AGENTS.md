@@ -689,46 +689,46 @@ User-facing improvements that enhance the browsing experience, prioritized by us
   3. Disabled `blink.cmp` via `vim.b[buf].completion = false` and `vim.b[buf].blink_cmp_enabled = false`.
   4. Disabled AI/ghost text plugins: `vim.b[buf].copilot_disabled = true`, `vim.b[buf].codecompanion_enabled = false`, and `vim.b[buf].supermaven = false`.
   5. Cleared window-local completion options via `vim.wo[win].completeopt = ""`.
-#### 2.8 Unified Hybrid Library Engine: Metadata Caching, Cursor Lookahead, Local Tag Search, Video Pipeline, Explorer Width & Artist Jump (PLANNED)
-**Files:** `lua/gelbooru/local/init.lua`, `lua/gelbooru/local/scan.lua`, `lua/gelbooru/net/api.lua`, `lua/gelbooru/net/download.lua`, `lua/gelbooru/ui/init.lua`, `lua/gelbooru/ui/image.lua`
-**Context:** The browser must operate as a single unified system across online and local media: local browsing is simply searching `local: [tags]` (default `save_dir`) or `local:<dir> [tags]`, while online browsing instantly recognizes downloaded files, upgrades canvas quality, and supports quick artist jumps and adjustable canvas dimensions.
+#### 2.8 Unified Hybrid Library Engine: Metadata Caching, Cursor Lookahead, Local Tag Search, Video Pipeline, Explorer Width & Artist Jump (RESOLVED)
+**Files:** `lua/gelbooru/local/init.lua`, `lua/gelbooru/local/scan.lua`, `lua/gelbooru/local/query.lua`, `lua/gelbooru/local/index.lua`, `lua/gelbooru/local/indexer.lua`, `lua/gelbooru/net/api.lua`, `lua/gelbooru/net/download.lua`, `lua/gelbooru/ui/init.lua`, `lua/gelbooru/ui/image.lua`
+**Context:** The browser operates as a single unified system across online and local media: local browsing is simply searching `local: [tags]` (default `save_dir`) or `local:<dir> [tags]`, while online browsing instantly recognizes downloaded files, upgrades canvas quality, and supports quick artist jumps and adjustable canvas dimensions.
 
-**Actionable Architecture & Technical Requirements:**
-1. **Persistent Metadata Disk Cache & Save Auto-Caching**:
-   - Persist post metadata to `config.options.cache_dir .. "/meta_" .. id .. ".json"`.
-   - On online image save (`<CR>` in `api.save_current`), automatically write the full post metadata JSON to disk alongside the media file.
-   - On local folder scan (`local/scan.lua`), synchronously pre-hydrate posts from cached JSON files in `<5ms`, providing instant score, tags, rating, and dimensions on folder open and full offline support.
+**Implemented Architecture & Resolution:**
+1. **Persistent Metadata Disk Cache & Save Auto-Caching (RESOLVED)**:
+   - Persists post metadata to `config.options.cache_dir .. "/meta_" .. id .. ".json"`.
+   - On online image save (`<CR>` in `api.save_current`), automatically writes the full post metadata JSON to disk alongside the media file.
+   - On local folder scan (`local/scan.lua`), synchronously pre-hydrates posts from cached JSON files in `<5ms`, providing instant score, tags, rating, and dimensions on folder open and full offline support.
    - Safe invalidation on `R`: deletes `<cache_dir>/meta_<id>.json` and refetches from API while strictly preserving local disk media files.
-2. **Dual-Tier Lookahead & Background Indexing Engine**:
-   - **Tier 1 (High Priority - Cursor Rush)**: Immediate prefetching in `scroll_dir` around cursor (`idx ± prefetch_radius`). Rushes ahead of navigation to eliminate metadata display lag on `j`/`k`.
-   - **Tier 2 (Background - Folder Indexer)**: Throttled async queue crawling unindexed posts in the folder, querying Gelbooru API and caching metadata without starving the cursor-rush queue.
-3. **Local Tag Filtering (`local:<dir> <tags>`)**:
-   - Syntax: `local:<dir> <tags>` or `local: <tags>` (default `save_dir`).
+2. **Dual-Tier Lookahead & Background Indexing Engine (RESOLVED)**:
+   - **Tier 1 (High Priority - Cursor Rush)**: Immediate prefetching in `scroll_dir` around cursor (`idx ± prefetch_radius`) implemented in `local/indexer.lua:cursor_rush_prefetch`. Rushes ahead of navigation to eliminate metadata display lag on `j`/`k`.
+   - **Tier 2 (Background - Folder Indexer)**: Throttled async queue (`start_background_indexing`) crawling unindexed posts in the folder, querying Gelbooru API with max 2 concurrent workers and 100ms pacing, aborted cleanly on `teardown()`.
+3. **Local Tag Filtering (`local:<dir> <tags>`) (RESOLVED)**:
+   - Syntax: `local:<dir> <tags>` or `local: <tags>` (default `save_dir`), implemented in `local/query.lua`.
    - Query parser extracts directory path and filters post list against cached metadata tags, artists, characters, rating (`rating:general`), score (`score:>=50`), and negative tags (`-tag`). Fallback matching against normalized filename words for untagged items.
-4. **Local Video Pipeline (`.mp4`, `.webm`)**:
-   - Extend `scan_local_folder` to include `.mp4` and `.webm` files.
+4. **Local Video Pipeline (`.mp4`, `.webm`) (RESOLVED)**:
+   - Extended `scan_local_folder` to include `.mp4` and `.webm` files.
    - List badge: `[VIDEO]`.
-   - Media playback: `O` launches system media player (`mpv`, `vlc`, or system default via `vim.ui.open`). `o` opens online post web page. `<CR>` displays local file notice.
-5. **Unified Online ↔ Local Hybrid Integration & Consistent Keymaps**:
-   - When an online post is saved via `<CR>`, immediately replace the sample preview on canvas with the full-resolution local file from `save_dir` upon download completion.
-   - Detect existing downloads in `save_dir` when browsing online (`saved_index`) and display a `[SAVED]` or `✓` badge in the post list.
+   - Media playback: `O` launches system media player (`mpv`, `vlc`, or system default via `util.open_media`). `o` opens online post web page via `util.open_url`. `<CR>` displays local file notice.
+5. **Unified Online ↔ Local Hybrid Integration & Consistent Keymaps (RESOLVED)**:
+   - Flat integer hash table `saved_index[tonumber(p.id)] = ext` (`local/index.lua`) tracking downloaded posts in `save_dir` with `mtime` cache validation via `uv.fs_stat`.
+   - When an online post is saved via `<CR>`, immediately replaces sample preview on canvas with the full-resolution local file from `save_dir` upon download completion.
+   - Online search post list displays `[SAVED]` badge for posts present in `saved_index`.
    - Keymap dispatch:
      - `<CR>`: in online mode, saves media and metadata to `save_dir` and cache. In local mode or if already saved, displays local file notice.
-     - `o`: opens the full Gelbooru post web page (`https://gelbooru.com/index.php?page=post&s=view&id=...`) in default browser.
-     - `O`: opens the media file in the system default viewer/player (`mpv`, VLC, Preview). If not downloaded yet, automatically downloads to `save_dir` first, then opens locally either way!
-6. **Artist Quick-Search Hotkey (`u`)**:
-   - Single-key lookup mapped in list mode and meta inspector (avoids conflict with `A` which enters search mode). Extracts artist tag from active post (`p.artist`, `tags_by_name`).
+     - `o`: opens the full Gelbooru post web page in default browser via `util.open_url`.
+     - `O`: opens the media file in the system default viewer/player (`mpv`, VLC, Preview) via `util.open_media`. If not downloaded yet, automatically downloads to `save_dir` first, then opens locally either way!
+6. **Artist Quick-Search Hotkey (`u`) (RESOLVED)**:
+   - Single-key lookup mapped in list mode and meta inspector. Extracts artist tag from active post (`p.artist`, `tags_by_name` type 1).
    - Immediately populates the search bar and executes search, enabling instant 1-keystroke author discovery.
-7. **Dynamic Explorer Menu Width & Canvas Expansion (Zen Mode)**:
-   - Allow user to adjust the width of the post list window (`UI.wins.list`) to give more space to the image canvas (`UI.wins.img`).
-   - Hotkeys `<` / `>` to incrementally narrow/widen the list window by 2–5 columns (`State.list_width_ratio` clamped between 0.10 and 0.40, default 0.22).
+7. **Dynamic Explorer Menu Width & Canvas Expansion (Zen Mode) (RESOLVED)**:
+   - Hotkeys `<` / `>` to incrementally narrow/widen the list window (`State.list_width_ratio` in steps of 0.025, clamped 0.10–0.40, default 0.25).
    - Collapsible Zen Mode toggle (`\`): collapses the list window to 0 columns, allocating 100% of the width to `UI.wins.img` for maximum-size image viewing; pressing `\` restores the list.
-   - Invokes `image.nudge_current_placement()` dynamically on list resize so the image instantly scales to fill the expanded canvas.
-8. **Memory & Performance Discipline ($O(1)$ Hash Index & Bounded Working Set)**:
-   - Store downloaded post tracking exclusively in a flat integer hash table: `saved_index[tonumber(p.id)] = ext` (<400KB for 10,000 files).
-   - Check directory `mtime` with `uv.fs_stat` to avoid re-scanning `save_dir`.
-   - Never keep whole-library metadata in memory: only active post and 5 lookahead posts are hydrated in Lua memory; remainder resides on disk in `<cache_dir>/meta_<id>.json`.
-   - Background crawler bounded to at most 1–2 concurrent `curl` requests with 100ms+ pacing, aborted cleanly on `teardown()`.
+   - Invokes `image.nudge_current_placement()` dynamically on list resize and zen toggle so the image instantly scales to fill the expanded canvas.
+8. **Memory & Performance Discipline ($O(1)$ Hash Index & Bounded Working Set) (RESOLVED)**:
+   - Flat integer hash table: `saved_index[tonumber(p.id)] = ext` (<400KB for 10,000 files).
+   - Directory `mtime` check with `uv.fs_stat` avoids re-scanning `save_dir` on every render.
+   - Lookahead metadata hydration bounded to cursor radius; remainder resides on disk in `<cache_dir>/meta_<id>.json`.
+   - Background crawler bounded to at most 2 concurrent `curl` requests with 100ms pacing, aborted cleanly on `teardown()`. Zero timer leaks.
 
 #### 2.9 Tag Database Engine Overhaul: Live Verification, Dead-Tag Pruning & Count Refresh (PLANNED)
 **Files:** `lua/gelbooru/tags/init.lua`, `lua/gelbooru/tags/db.lua`, `lua/gelbooru/tags/fetcher.lua`, `lua/gelbooru/tags/resolve.lua`, `lua/gelbooru/net/api.lua`
@@ -813,6 +813,45 @@ Prevent crashes, leaks, and corruption under async/concurrent conditions.
 **File:** `net/download.lua` L155–179
 **Problem:** Staggered timers (`i * 200ms`) are untracked. If teardown occurs during window, timers spawn transfers post-teardown.
 **Fix:** Track deferred timers. Cancel in `teardown()`.
+
+#### 3.11 Headless Test Suite Zero-I/O & Memory Isolation (CRITICAL)
+**Files:** `tests/integration/helpers/harness.lua`, `tests/minimal_init.lua`
+**Problem:** Headless Neovim test runs balloon to 2.14GB and crash LuaJIT's 2GB heap limit when tests invoke `ui.open()` or `ensure_ui()`, because `tags.load_tags()` parses 32MB (716,000+ objects) of real JSON tags from `~/.local/share/nvim/gelbooru/` across cascading `vim.schedule()` callbacks on every single test run.
+**Invariant:**
+1. Integration test harnesses (`harness.setup_all()`) MUST mock `tags.load_tags = function() end` and `download.resume_pending_saves = function() end`.
+2. Tests must isolate `config.options.tags_dir`, `cache_dir`, and `save_dir` to volatile temporary paths (`/tmp/gelbooru_test_*`).
+3. Headless test runs must never load live production tag databases from disk or touch user home directories.
+4. Total test suite memory must remain <40MB RSS and execution must complete in <5s.
+
+#### 3.12 Tag Loading Idempotency & Epoch Cancellation
+**File:** `tags/db.lua` L160–215
+**Problem:** Calling `load_tags()` repeatedly during rapid UI restarts duplicates tags in memory and leaks uncollected tables across cascading `vim.schedule()` turns.
+**Invariant:**
+1. `load_tags()` must check `State.tags_loaded` and return immediately if already loaded.
+2. Must track `State.tag_load_epoch`: any in-flight scheduled callback must verify its captured epoch matches `State.tag_load_epoch` before mutating state; if not, it must immediately abort and release references.
+3. Teardown and reset routines must increment `tag_load_epoch` and invoke `collectgarbage("collect")` twice to reclaim unreferenced tables.
+
+#### 3.13 Libuv Timer Lifecycle Management & Zombie Process Prevention
+**Files:** `ui/init.lua`, `core/state.lua`, `net/download.lua`
+**Problem:** Unmanaged `vim.defer_fn` and libuv timers left running prevent Neovim's headless event loop from terminating, creating zombie processes that spin at 100% CPU.
+**Invariant:**
+1. Every timer created (e.g. `UI.resume_timer`, `UI.scroll_timer`, `UI.status_timer`, `UI.resize_timer`, `UI.ac_debounce_timer`) MUST have a corresponding handle stored in `state.UI`.
+2. On `ui.teardown()`, every active timer handle must be stopped (`:stop()`), closed (`:close()`), and nil'd.
+3. Timers that execute callbacks must set their handle reference to `nil` once executed.
+
+#### 3.14 Prohibition of Global Monkey-Patching in Production Code
+**Files:** `core/util.lua`, `ui/init.lua`
+**Problem:** Monkey-patching global Neovim C APIs (such as `vim.api.nvim_buf_get_keymap`) in plugin source code pollutes global editor state, breaks other plugins, and leads to fragile architectural assumptions.
+**Invariant:**
+1. Production code in `lua/gelbooru/` must strictly NEVER monkey-patch `vim.*` or `vim.api.*` functions.
+2. Normal mode `<` keymaps are natively registered in Neovim with `lhs = "<lt>"`. Test helpers and inspection utilities must normalize `<lt>` to `<` instead of mutating Neovim's API table.
+
+#### 3.15 Permanent Local File Preservation Invariant
+**Files:** `net/api.lua`, `ui/image.lua`, `local/scan.lua`
+**Invariant:**
+1. Force refresh (`R`), cache clearing, or metadata purging strictly **NEVER** touches, modifies, or deletes permanent media files in `config.options.save_dir` or local user folders.
+2. Only volatile preview caches in `/tmp/gelbooru_cache/prev_<id>.<ext>` and metadata caches in `<cache_dir>/meta_<id>.json` may be invalidated.
+3. Downloads must write atomically via `.part` files with `MIN_VALID_IMAGE_BYTES = 1024` guard to prevent corrupting local libraries.
 
 ---
 

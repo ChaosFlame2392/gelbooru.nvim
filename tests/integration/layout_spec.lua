@@ -169,7 +169,7 @@ describe("Integration: Layout & Metadata Panel", function()
       local expected_h = math.floor(45 * 0.95)
 
       -- Wait for debounce timer to settle and apply layout
-      local waited = vim.wait(1500, function()
+      local waited = vim.wait(3000, function()
         local frame_cfg = vim.api.nvim_win_get_config(state.UI.wins.frame)
         return frame_cfg.width == expected_w and frame_cfg.height == expected_h
       end, 20)

@@ -127,3 +127,228 @@ describe("util.fuzzy", function()
     assert.is_true(util.fuzzy("tag", "tag"))
   end)
 end)
+
+describe("util.meta_cache_path", function()
+  local config = require("gelbooru.core.config")
+
+  it("returns cache file path formatted with post id", function()
+    local path = util.meta_cache_path(12345)
+    assert.are.equal(config.options.cache_dir .. "/meta_12345.json", path)
+  end)
+
+  it("handles string id", function()
+    local path = util.meta_cache_path("9999")
+    assert.are.equal(config.options.cache_dir .. "/meta_9999.json", path)
+  end)
+
+  it("returns nil for nil, empty, or 'nil' id", function()
+    assert.is_nil(util.meta_cache_path(nil))
+    assert.is_nil(util.meta_cache_path(""))
+    assert.is_nil(util.meta_cache_path("nil"))
+  end)
+end)
+
+describe("util.read_json and util.write_json", function()
+  local tmp_dir
+
+  before_each(function()
+    tmp_dir = vim.fn.tempname()
+    vim.fn.mkdir(tmp_dir, "p")
+  end)
+
+  after_each(function()
+    vim.fn.delete(tmp_dir, "rf")
+  end)
+
+  it("writes and reads json table correctly", function()
+    local path = tmp_dir .. "/test.json"
+    local data = { id = 42, tags = "tag1 tag2", count = 100 }
+    local write_ok = util.write_json(path, data)
+    assert.is_true(write_ok)
+    assert.are.equal(1, vim.fn.filereadable(path))
+
+    local read_data = util.read_json(path)
+    assert.is_not_nil(read_data)
+    assert.are.equal(42, read_data.id)
+    assert.are.equal("tag1 tag2", read_data.tags)
+    assert.are.equal(100, read_data.count)
+  end)
+
+  it("read_json returns nil for non-existent file, empty file, or corrupted json", function()
+    assert.is_nil(util.read_json(tmp_dir .. "/nonexistent.json"))
+
+    -- Empty file (0 bytes)
+    local empty_path = tmp_dir .. "/empty.json"
+    vim.fn.writefile({}, empty_path)
+    assert.is_nil(util.read_json(empty_path))
+
+    -- Truncated / partial JSON
+    local partial_path = tmp_dir .. "/partial.json"
+    vim.fn.writefile({ '{"id": 1234, "tags": "partial_tag', '"rating": "gen' }, partial_path)
+    assert.is_nil(util.read_json(partial_path))
+
+    -- JSON scalar / non-table types
+    local scalar_path = tmp_dir .. "/scalar.json"
+    vim.fn.writefile({ '"just a string"' }, scalar_path)
+    assert.is_nil(util.read_json(scalar_path))
+
+    local num_path = tmp_dir .. "/num.json"
+    vim.fn.writefile({ "999" }, num_path)
+    assert.is_nil(util.read_json(num_path))
+
+    -- Raw corrupted garbage bytes
+    local bad_path = tmp_dir .. "/corrupt.json"
+    vim.fn.writefile({ "not a valid json" }, bad_path)
+    assert.is_nil(util.read_json(bad_path))
+  end)
+
+  it("write_json writes atomically via .tmp and renames to target path", function()
+    local path = tmp_dir .. "/atomic_test.json"
+    local orig_rename = vim.fn.rename
+    local rename_src, rename_dest
+
+    vim.fn.rename = function(src, dest)
+      rename_src = src
+      rename_dest = dest
+      return orig_rename(src, dest)
+    end
+
+    local ok = util.write_json(path, { test = "atomic", value = 123 })
+    assert.is_true(ok)
+    assert.are.equal(path .. ".tmp", rename_src)
+    assert.are.equal(path, rename_dest)
+    assert.are.equal(0, vim.fn.filereadable(path .. ".tmp"))
+    assert.are.equal(1, vim.fn.filereadable(path))
+
+    local read = util.read_json(path)
+    assert.is_not_nil(read)
+    assert.are.equal("atomic", read.test)
+
+    vim.fn.rename = orig_rename
+  end)
+
+  it("write_json automatically creates nested parent directory if it does not exist", function()
+    local nested_path = tmp_dir .. "/nested/sub/folder/cache.json"
+    local ok = util.write_json(nested_path, { nested = true })
+    assert.is_true(ok)
+    assert.are.equal(1, vim.fn.filereadable(nested_path))
+    local data = util.read_json(nested_path)
+    assert.is_not_nil(data)
+    assert.is_true(data.nested)
+  end)
+
+  it("write_json returns false if rename fails or data is invalid", function()
+    assert.is_false(util.write_json(nil, { a = 1 }))
+    assert.is_false(util.write_json(tmp_dir .. "/test.json", nil))
+
+    -- Non-serializable data (functions)
+    local invalid_data = { bad = function() end }
+    assert.is_false(util.write_json(tmp_dir .. "/invalid.json", invalid_data))
+
+    -- Simulated rename failure
+    local orig_rename = vim.fn.rename
+    vim.fn.rename = function(_, _)
+      return -1
+    end
+    assert.is_false(util.write_json(tmp_dir .. "/rename_fail.json", { ok = true }))
+    vim.fn.rename = orig_rename
+  end)
+end)
+
+describe("util.open_url and util.open_media", function()
+  it("open_url returns false for nil or empty url", function()
+    assert.is_false(util.open_url(nil))
+    assert.is_false(util.open_url(""))
+  end)
+
+  it("open_url calls vim.ui.open when available", function()
+    local opened = nil
+    local orig_open = vim.ui and vim.ui.open
+    vim.ui.open = function(url)
+      opened = url
+    end
+
+    local ok = util.open_url("https://gelbooru.com/post/1")
+    assert.is_true(ok)
+    assert.are.equal("https://gelbooru.com/post/1", opened)
+
+    vim.ui.open = orig_open
+  end)
+
+  it("open_media returns false for nil or empty target", function()
+    assert.is_false(util.open_media(nil))
+    assert.is_false(util.open_media(""))
+  end)
+
+  it("open_media invokes system opener for images", function()
+    local opened = nil
+    local orig_open = vim.ui and vim.ui.open
+    vim.ui.open = function(target)
+      opened = target
+    end
+
+    local ok = util.open_media("/tmp/image.png")
+    assert.is_true(ok)
+    assert.are.equal("/tmp/image.png", opened)
+
+    vim.ui.open = orig_open
+  end)
+
+  it("open_media launches mpv with detached job for .mp4 and .webm when mpv is executable", function()
+    local orig_exec = vim.fn.executable
+    local orig_jobstart = vim.fn.jobstart
+    local job_cmd, job_opts
+
+    vim.fn.executable = function(cmd)
+      if cmd == "mpv" then
+        return 1
+      end
+      return orig_exec(cmd)
+    end
+
+    vim.fn.jobstart = function(cmd, opts)
+      job_cmd = cmd
+      job_opts = opts
+      return 100
+    end
+
+    -- Test .mp4
+    local ok_mp4 = util.open_media("/storage/video/test_clip.mp4")
+    assert.is_true(ok_mp4)
+    assert.are.same({ "mpv", "/storage/video/test_clip.mp4" }, job_cmd)
+    assert.is_true(job_opts.detach)
+
+    -- Test .webm (uppercase extension handling)
+    local ok_webm = util.open_media("/storage/video/ANIMATION.WEBM")
+    assert.is_true(ok_webm)
+    assert.are.same({ "mpv", "/storage/video/ANIMATION.WEBM" }, job_cmd)
+    assert.is_true(job_opts.detach)
+
+    vim.fn.executable = orig_exec
+    vim.fn.jobstart = orig_jobstart
+  end)
+
+  it("open_media falls back to open_url when mpv is NOT executable", function()
+    local orig_exec = vim.fn.executable
+    local orig_open = vim.ui and vim.ui.open
+    local opened = nil
+
+    vim.fn.executable = function(cmd)
+      if cmd == "mpv" then
+        return 0
+      end
+      return orig_exec(cmd)
+    end
+
+    vim.ui.open = function(target)
+      opened = target
+    end
+
+    local ok = util.open_media("/storage/video/fallback.mp4")
+    assert.is_true(ok)
+    assert.are.equal("/storage/video/fallback.mp4", opened)
+
+    vim.fn.executable = orig_exec
+    vim.ui.open = orig_open
+  end)
+end)

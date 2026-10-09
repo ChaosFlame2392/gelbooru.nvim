@@ -16,13 +16,17 @@ M.autocomplete = autocomplete
 
 local RESIZE_DEBOUNCE_MS = 100
 
--- Layout cache: recomputed only on resize or show_meta toggle, not every render.
+-- Layout cache: recomputed only on resize or show_meta / zen_mode / ratio toggle, not every render.
 local _layout_cache = nil
 local _layout_show_meta = nil
+local _layout_zen_mode = nil
+local _layout_ratio = nil
 
 local function invalidate_layout()
   _layout_cache = nil
   _layout_show_meta = nil
+  _layout_zen_mode = nil
+  _layout_ratio = nil
 end
 
 function M.teardown()
@@ -71,9 +75,22 @@ function M.teardown()
     end)
     UI.resize_timer = nil
   end
+  if UI.resume_timer then
+    pcall(function()
+      UI.resume_timer:stop()
+      if not UI.resume_timer:is_closing() then
+        UI.resume_timer:close()
+      end
+    end)
+    UI.resume_timer = nil
+  end
   if UI.save_discovered_timer or #State.discovered > 0 then
     pcall(tags.save_discovered_now)
   end
+
+  pcall(function()
+    require("gelbooru.local.indexer").stop()
+  end)
 
   download.cancel_prefetch_timers()
   -- Drop pending download callbacks so their closures are freed immediately.
@@ -81,14 +98,6 @@ function M.teardown()
   pcall(download.abort_all)
   download.pending_resumes = {}
   pcall(image.close_current_placement)
-
-  local State = state.State
-  if State.prev_mouse ~= nil then
-    pcall(function()
-      vim.o.mouse = State.prev_mouse
-    end)
-    State.prev_mouse = nil
-  end
 
   local State = state.State
   if State.prev_mouse ~= nil then
@@ -138,7 +147,7 @@ function M.set_status(msg, reset_ms)
     UI.status_timer = nil
   end
   local help =
-    "  j/k: nav  <CR>: save  <Tab>/<S-Tab>: page  r: refresh  m: meta  /: search  [/]: history  q: quit"
+    "  j/k: nav  u: artist  < / >: width  \\: zen  o: web  O: open  <CR>: save  m: meta  /: search  q: quit"
   util.set_lines(UI.bufs.status, { msg and ("  " .. msg) or help })
   if msg and reset_ms and reset_ms > 0 then
     UI.status_timer = vim.loop.new_timer()
@@ -161,8 +170,11 @@ function M.calc_layout(force)
     invalidate_layout()
   end
   local State = state.State
-  -- Return cached layout if terminal dimensions and show_meta haven't changed.
-  if not force and _layout_cache and _layout_show_meta == State.show_meta
+  -- Return cached layout if terminal dimensions and show_meta / zen_mode / ratio haven't changed.
+  if not force and _layout_cache
+    and _layout_show_meta == State.show_meta
+    and _layout_zen_mode == State.zen_mode
+    and _layout_ratio == State.list_width_ratio
     and _layout_cache._TW == vim.o.columns
     and _layout_cache._TH == vim.o.lines then
     return _layout_cache
@@ -184,41 +196,59 @@ function M.calc_layout(force)
 
   local input_h = 1
   local main_h = math.max(1, H - input_h - 4)
-  local list_w = math.max(1, math.floor(W * 0.25))
-  local prev_w = math.max(1, W - list_w - 3)
+  local ratio = math.max(0.10, math.min(0.40, State.list_width_ratio or 0.25))
 
   local meta_h = State.show_meta and math.min(12, math.floor(main_h * 0.35)) or 0
   local img_h = math.max(1, main_h - meta_h - (State.show_meta and 1 or 0))
 
-  _layout_cache = {
+  local l = {
     _TW = TW, _TH = TH, -- cache keys
     frame = { row = R, col = C, width = W, height = H },
     input = { row = R + 1, col = C + 1, width = math.max(1, W - 2), height = 1 },
     div = { row = R + 2, col = C + 1, width = math.max(1, W - 2), height = 1 },
-    list = { row = R + 3, col = C + 1, width = list_w, height = main_h },
-    vdiv = { row = R + 3, col = C + 1 + list_w, width = 1, height = main_h },
-    img = { row = R + 3, col = C + 1 + list_w + 1, width = prev_w, height = img_h },
-    hdiv = State.show_meta and { row = R + 3 + img_h, col = C + 1 + list_w + 1, width = prev_w, height = 1 }
-      or nil,
-    meta = State.show_meta and { row = R + 3 + img_h + 1, col = C + 1 + list_w + 1, width = prev_w, height = meta_h }
-      or nil,
     status = { row = R + H - 2, col = C + 1, width = math.max(1, W - 2), height = 1 },
     ac = { row = R + 2, col = C + 1, width = math.max(1, W - 2), height = math.max(1, math.min(15, H - 4)) },
   }
+
+  if State.zen_mode then
+    local prev_w = math.max(1, W - 2)
+    l.list = { row = R + 3, col = C + 1, width = 1, height = main_h, hide = true }
+    l.vdiv = { row = R + 3, col = C + 1, width = 1, height = main_h, hide = true }
+    l.img = { row = R + 3, col = C + 1, width = prev_w, height = img_h }
+    l.hdiv = State.show_meta and { row = R + 3 + img_h, col = C + 1, width = prev_w, height = 1 } or nil
+    l.meta = State.show_meta and { row = R + 3 + img_h + 1, col = C + 1, width = prev_w, height = meta_h } or nil
+  else
+    local list_w = math.max(1, math.floor(W * ratio))
+    local prev_w = math.max(1, W - list_w - 3)
+    l.list = { row = R + 3, col = C + 1, width = list_w, height = main_h }
+    l.vdiv = { row = R + 3, col = C + 1 + list_w, width = 1, height = main_h }
+    l.img = { row = R + 3, col = C + 1 + list_w + 1, width = prev_w, height = img_h }
+    l.hdiv = State.show_meta and { row = R + 3 + img_h, col = C + 1 + list_w + 1, width = prev_w, height = 1 } or nil
+    l.meta = State.show_meta and { row = R + 3 + img_h + 1, col = C + 1 + list_w + 1, width = prev_w, height = meta_h } or nil
+  end
+
+  _layout_cache = l
   _layout_show_meta = State.show_meta
+  _layout_zen_mode = State.zen_mode
+  _layout_ratio = State.list_width_ratio
   return _layout_cache
 end
 
 local function draw_dividers(layout)
   local UI = state.UI
+  local State = state.State
   local W = layout.frame.width
   util.set_lines(UI.bufs.div, { string.rep("─", math.max(0, W - 2)) })
 
-  local vdiv_lines = {}
-  for _ = 1, layout.list.height do
-    vdiv_lines[#vdiv_lines + 1] = "│"
+  if State.zen_mode then
+    util.set_lines(UI.bufs.vdiv, {})
+  else
+    local vdiv_lines = {}
+    for _ = 1, layout.list.height do
+      vdiv_lines[#vdiv_lines + 1] = "│"
+    end
+    util.set_lines(UI.bufs.vdiv, vdiv_lines)
   end
-  util.set_lines(UI.bufs.vdiv, vdiv_lines)
 
   if layout.hdiv then
     util.set_lines(UI.bufs.hdiv, { string.rep("─", math.max(0, layout.hdiv.width)) })
@@ -247,8 +277,37 @@ function M.apply_layout(l)
   upd(UI.wins.frame, l.frame)
   upd(UI.wins.input, l.input)
   upd(UI.wins.div, l.div)
-  upd(UI.wins.list, l.list)
-  upd(UI.wins.vdiv, l.vdiv)
+
+  if State.zen_mode then
+    if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+      vim.api.nvim_win_set_config(UI.wins.list, { hide = true })
+    end
+    if UI.wins.vdiv and vim.api.nvim_win_is_valid(UI.wins.vdiv) then
+      vim.api.nvim_win_set_config(UI.wins.vdiv, { hide = true })
+    end
+  else
+    if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+      vim.api.nvim_win_set_config(UI.wins.list, {
+        hide = false,
+        relative = "editor",
+        row = l.list.row,
+        col = l.list.col,
+        width = l.list.width,
+        height = l.list.height,
+      })
+    end
+    if UI.wins.vdiv and vim.api.nvim_win_is_valid(UI.wins.vdiv) then
+      vim.api.nvim_win_set_config(UI.wins.vdiv, {
+        hide = false,
+        relative = "editor",
+        row = l.vdiv.row,
+        col = l.vdiv.col,
+        width = l.vdiv.width,
+        height = l.vdiv.height,
+      })
+    end
+  end
+
   upd(UI.wins.img, l.img)
   upd(UI.wins.status, l.status)
   upd(UI.wins.ac, l.ac)
@@ -311,12 +370,17 @@ function M.render_list()
   local lines = {}
   local l = M.calc_layout()
   local LW = l.list.width
+  local local_index = require("gelbooru.local.index")
+  local_index.update_saved_index()
+
   for i, p in ipairs(State.posts) do
     local prefix = (i == State.cur) and "▶ " or "  "
     local r = (p.rating or "?"):sub(1, 1):upper()
     local score = tostring(p.score or 0)
     local is_vid = image.is_video_post(p)
-    local dims = string.format("%dx%d%s", p.width or 0, p.height or 0, is_vid and " [V]" or "")
+    local is_saved = (not p.is_local) and p.id and (local_index.is_saved(p.id) or (State.saved_index and State.saved_index[tonumber(p.id)] ~= nil))
+    local saved_badge = is_saved and " [SAVED]" or ""
+    local dims = string.format("%dx%d%s%s", p.width or 0, p.height or 0, is_vid and " [VIDEO]" or "", saved_badge)
     local tags_s = config.options.show_tags_in_list and (" " .. (p.tags or ""):sub(1, math.max(0, LW - 22))) or ""
     lines[i] = string.format("%s%s ★%-5s %-15s%s", prefix, r, score, dims, tags_s)
   end
@@ -541,6 +605,10 @@ function M.render_preview(force_download)
   -- to enrich p.tags, p.rating, p.score and refresh metadata buffer when focused!
   if p.is_local and p.id and (not p._metadata_fetched or force_download) then
     if force_download then
+      local meta_path = util.meta_cache_path(p.id)
+      if meta_path and vim.fn.filereadable(meta_path) == 1 then
+        pcall(vim.fn.delete, meta_path)
+      end
       p._metadata_fetched = nil
     end
     api.fetch_post_metadata(p, function(updated_p)
@@ -564,6 +632,11 @@ function M.render_preview(force_download)
         end)
       end
     end)
+  end
+
+  if p.is_local then
+    local indexer = require("gelbooru.local.indexer")
+    indexer.cursor_rush_prefetch(State.cur, State.scroll_dir)
   end
 
   local _, dest = image.get_preview_targets(p)
@@ -649,6 +722,43 @@ function M.enter_search()
   handle_resize()
 end
 
+function M.search_active_artist()
+  local State = state.State
+  local UI = state.UI
+  local p = State.posts[State.cur]
+  if not p then
+    M.set_status("No artist tag found on active post", 2000)
+    return
+  end
+
+  local artist_tag = nil
+  if p.artist and p.artist ~= "" then
+    artist_tag = util.decode_html(p.artist)
+  elseif p.tags and p.tags ~= "" then
+    for raw_tag in p.tags:gmatch("%S+") do
+      local tag = util.decode_html(raw_tag)
+      local t = State.tags_by_name and State.tags_by_name[tag:lower()]
+      if t and tonumber(t.t) == 1 then
+        artist_tag = tag
+        break
+      end
+    end
+  end
+
+  if artist_tag and artist_tag ~= "" then
+    if UI.bufs.input and vim.api.nvim_buf_is_valid(UI.bufs.input) then
+      vim.bo[UI.bufs.input].modifiable = true
+      vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { artist_tag })
+    end
+    if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+      pcall(vim.api.nvim_set_current_win, UI.wins.list)
+    end
+    api.execute_search(artist_tag)
+  else
+    M.set_status("No artist tag found on active post", 2000)
+  end
+end
+
 function M.ensure_ui()
   local UI = state.UI
   if UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame) then
@@ -668,8 +778,11 @@ function M.ensure_ui()
   tags.load_tags()
 
   -- Silently resume any orphaned user-save .part files from previous sessions.
-  vim.defer_fn(function()
-    download.resume_pending_saves()
+  UI.resume_timer = vim.defer_fn(function()
+    UI.resume_timer = nil
+    if not state.State.torn_down then
+      download.resume_pending_saves()
+    end
   end, 500)
 
   UI.bufs.frame = util.scratch()
@@ -704,6 +817,10 @@ function M.ensure_ui()
   UI.wins.div = util.float(UI.bufs.div, l.div.row, l.div.col, l.div.width, l.div.height, { zindex = 51, focusable = false })
   UI.wins.list = util.float(UI.bufs.list, l.list.row, l.list.col, l.list.width, l.list.height, { zindex = 51 })
   UI.wins.vdiv = util.float(UI.bufs.vdiv, l.vdiv.row, l.vdiv.col, l.vdiv.width, l.vdiv.height, { zindex = 51, focusable = false })
+  if State.zen_mode then
+    vim.api.nvim_win_set_config(UI.wins.list, { hide = true })
+    vim.api.nvim_win_set_config(UI.wins.vdiv, { hide = true })
+  end
   UI.wins.img = util.float(UI.bufs.img, l.img.row, l.img.col, l.img.width, l.img.height, { zindex = 51, focusable = false })
   if l.hdiv then
     UI.wins.hdiv = util.float(UI.bufs.hdiv, l.hdiv.row, l.hdiv.col, l.hdiv.width, l.hdiv.height, { zindex = 51, focusable = false })
@@ -824,6 +941,14 @@ function M.ensure_ui()
     api.fetch(-1)
   end)
   lm("R", function()
+    local p = State.posts[State.cur]
+    if p and p.is_local and p.id then
+      local meta_path = util.meta_cache_path(p.id)
+      if meta_path and vim.fn.filereadable(meta_path) == 1 then
+        pcall(vim.fn.delete, meta_path)
+      end
+      p._metadata_fetched = nil
+    end
     M.render_preview(true)
   end)
   lm("r", function()
@@ -857,32 +982,81 @@ function M.ensure_ui()
     M.render_list()
     M.render_preview(false)
   end)
-  local function open_url(url)
-    if vim.ui and vim.ui.open then
-      pcall(vim.ui.open, url)
+
+  local function open_web_page()
+    local p = State.posts[State.cur]
+    if not p or not p.id or tostring(p.id) == "" or tostring(p.id) == "nil" then
+      M.set_status("No post ID available for browser lookup", 2000)
+      return
+    end
+    util.open_url(string.format("https://gelbooru.com/index.php?page=post&s=view&id=%s", tostring(p.id)))
+  end
+
+  local function open_media_viewer()
+    local p = State.posts[State.cur]
+    if not p then return end
+    if p.is_local then
+      if not p.file_url or p.file_url == "" then
+        M.set_status("No local file available to open", 2000)
+        return
+      end
+      util.open_media(p.file_url)
+      return
+    end
+    if not p.id or tostring(p.id) == "" or tostring(p.id) == "nil" then
+      M.set_status("No post ID available to open", 2000)
+      return
+    end
+    if not p.file_url or p.file_url == "" then
+      M.set_status("No file URL for this post", 2000)
+      return
+    end
+    local ext = image.file_ext_from_url(p.file_url)
+    local dest = string.format("%s/%s.%s", config.options.save_dir, tostring(p.id), ext)
+    if vim.fn.filereadable(dest) == 1 then
+      util.open_media(dest)
     else
-      local cmd = vim.fn.has("mac") == 1 and "open" or (vim.fn.has("win32") == 1 and "start" or "xdg-open")
-      pcall(vim.fn.system, { cmd, url })
+      M.set_status("Downloading " .. tostring(p.id) .. " before opening…")
+      api.save_current(function(saved, saved_path)
+        if saved and saved_path and vim.fn.filereadable(saved_path) == 1 then
+          util.open_media(saved_path)
+        end
+      end)
     end
   end
 
-  lm("o", function()
-    local p = State.posts[State.cur]
-    if p and p.file_url then
-      open_url(p.file_url)
+  local function toggle_zen()
+    State.zen_mode = not State.zen_mode
+    local l = M.calc_layout(true)
+    M.apply_layout(l)
+    if not State.zen_mode then
+      if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+        pcall(vim.api.nvim_set_current_win, UI.wins.list)
+      end
+      M.render_list()
     end
+    image.nudge_current_placement()
+  end
+  M.toggle_zen = toggle_zen
+
+  lm("u", M.search_active_artist)
+  lm("<", function()
+    State.list_width_ratio = math.max(0.10, math.min(0.40, (State.list_width_ratio or 0.25) - 0.025))
+    local l = M.calc_layout(true)
+    M.apply_layout(l)
+    M.render_list()
+    image.nudge_current_placement()
   end)
-  lm("O", function()
-    local p = State.posts[State.cur]
-    if not p then
-      return
-    end
-    if p.id and tostring(p.id) ~= "" and tostring(p.id) ~= "nil" then
-      open_url(string.format("https://gelbooru.com/index.php?page=post&s=view&id=%s", p.id))
-    else
-      M.set_status("No post ID available for browser lookup", 2000)
-    end
+  lm(">", function()
+    State.list_width_ratio = math.max(0.10, math.min(0.40, (State.list_width_ratio or 0.25) + 0.025))
+    local l = M.calc_layout(true)
+    M.apply_layout(l)
+    M.render_list()
+    image.nudge_current_placement()
   end)
+  lm("\\", toggle_zen)
+  lm("o", open_web_page)
+  lm("O", open_media_viewer)
   lm("m", function()
     State.show_meta = not State.show_meta
     handle_resize()
@@ -949,18 +1123,10 @@ function M.ensure_ui()
     return_to_list()
     handle_resize()
   end)
-  mm("o", function()
-    local p = State.posts[State.cur]
-    if p and p.file_url then
-      open_url(p.file_url)
-    end
-  end)
-  mm("O", function()
-    local p = State.posts[State.cur]
-    if p and p.id then
-      open_url(string.format("https://gelbooru.com/index.php?page=post&s=view&id=%s", p.id))
-    end
-  end)
+  mm("u", M.search_active_artist)
+  mm("\\", toggle_zen)
+  mm("o", open_web_page)
+  mm("O", open_media_viewer)
   mm("<CR>", api.save_current)
 
   -- Defensive keymaps on non-interactive buffers in case mouse/focus lands in them
@@ -971,6 +1137,7 @@ function M.ensure_ui()
       end
       util.keymap(buf, "n", "q", return_to_list)
       util.keymap(buf, "n", "<Esc>", return_to_list)
+      util.keymap(buf, "n", "\\", toggle_zen)
     end
   end
 

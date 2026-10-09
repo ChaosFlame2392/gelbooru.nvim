@@ -28,8 +28,14 @@ M.State = {
   input_focused = false,
   scroll_dir = 1,
   search_epoch = 0,
+  tag_load_epoch = 0,
+  tags_loaded = false,
+  tags_loading = false,
   torn_down = false,
   prev_mouse = nil,
+  list_width_ratio = 0.25,
+  zen_mode = false,
+  saved_index = {},
 }
 
 M.UI = {
@@ -42,6 +48,7 @@ M.UI = {
   ac_debounce_timer = nil,
   save_discovered_timer = nil,
   resize_timer = nil,
+  resume_timer = nil,
   prefetch_timers = {},
   current_placement = nil,
   PREVIEW_COOLDOWN_MS = 150,
@@ -64,6 +71,9 @@ function M.reset_query_state()
   M.State.scroll_dir = 1
   M.State.search_epoch = (M.State.search_epoch or 0) + 1
   M.State.torn_down = false
+  M.State.list_width_ratio = 0.25
+  M.State.zen_mode = false
+  M.State.saved_index = {}
 end
 
 function M.reset_ui()
@@ -76,11 +86,16 @@ function M.reset_ui()
   M.UI.ac_debounce_timer = nil
   M.UI.save_discovered_timer = nil
   M.UI.resize_timer = nil
+  M.UI.resume_timer = nil
   M.UI.prefetch_timers = {}
+  M.UI.indexer_timer = nil
   M.UI.current_placement = nil
 end
 
 function M.reset_tag_state()
+  M.State.tag_load_epoch = (M.State.tag_load_epoch or 0) + 1
+  M.State.tags_loaded = false
+  M.State.tags_loading = false
   M.State.series = {}
   M.State.characters = {}
   M.State.artists = {}

@@ -4,6 +4,7 @@ local util = require("gelbooru.core.util")
 local download = require("gelbooru.net.download")
 local tags = require("gelbooru.tags")
 local history = require("gelbooru.core.history")
+local image = require("gelbooru.ui.image")
 
 local function ensure_array(v)
   if util.ensure_array then return util.ensure_array(v) end
@@ -125,9 +126,8 @@ function M.execute_search(query)
     return
   end
 
-  local local_path = query and query:match("^local:%s*(.*)")
-  if local_path then
-    ui.open_local(local_path)
+  if query and query:match("^local:") then
+    ui.open_local(query)
     return
   end
 
@@ -200,36 +200,92 @@ function M.execute_search(query)
   end
 end
 
-function M.save_current()
+function M.save_current(cb)
   local State = state.State
   local ui = require("gelbooru.ui")
   local p = State.posts[State.cur]
   if not p or not p.file_url then
     ui.set_status("No file URL for this post", 2000)
+    if cb then cb(false, nil) end
     return
   end
   if p.is_local then
     ui.set_status("Local file: " .. p.file_url, 2500)
+    if cb then cb(true, p.file_url) end
     return
   end
   if not p.id or tostring(p.id) == "" or tostring(p.id) == "nil" then
     ui.set_status("No post ID available to save", 2000)
+    if cb then cb(false, nil) end
     return
   end
   local ext = p.file_url:match("%.(%w+)$") or "jpg"
   local dest = string.format("%s/%s.%s", config.options.save_dir, p.id, ext)
   if vim.fn.filereadable(dest) == 1 then
+    local local_index = require("gelbooru.local.index")
+    local_index.mark_saved(p.id, ext)
     ui.set_status("Already saved → " .. dest, 2500)
+    if cb then cb(true, dest) end
     return
   end
   if download.active_downloads[dest] then
     ui.set_status("Already downloading… " .. p.id, 2000)
+    download.download_async(p.file_url, dest, function(saved)
+      if saved then
+        local local_index = require("gelbooru.local.index")
+        local_index.mark_saved(p.id, ext)
+        local meta_path = util.meta_cache_path(p.id)
+        if meta_path then
+          local meta_data = {
+            id = p.id,
+            tags = p.tags,
+            rating = p.rating,
+            score = p.score,
+            width = p.width,
+            height = p.height,
+            source = p.source,
+          }
+          util.write_json(meta_path, meta_data)
+        end
+        local UI = state.UI
+        if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and State.posts[State.cur] == p then
+          image.render_image(UI.wins.img, dest)
+        end
+        ui.render_list()
+      end
+      if cb then cb(saved, dest) end
+    end, { resume = true })
     return
   end
   util.ensure(config.options.save_dir)
   ui.set_status("Saving " .. p.id .. "…")
   download.download_async(p.file_url, dest, function(saved)
+    if saved then
+      local local_index = require("gelbooru.local.index")
+      local_index.mark_saved(p.id, ext)
+      local meta_path = util.meta_cache_path(p.id)
+      if meta_path then
+        local meta_data = {
+          id = p.id,
+          tags = p.tags,
+          rating = p.rating,
+          score = p.score,
+          width = p.width,
+          height = p.height,
+          source = p.source,
+        }
+        util.write_json(meta_path, meta_data)
+      end
+      local UI = state.UI
+      if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and State.posts[State.cur] == p then
+        image.render_image(UI.wins.img, dest)
+      end
+      ui.render_list()
+    end
     ui.set_status(saved and ("✓ Saved → " .. dest) or "✗ Save failed!", 3000)
+    if cb then
+      cb(saved, dest)
+    end
   end, { resume = true })
 end
 
@@ -265,11 +321,45 @@ function M.fetch_post_metadata(p, cb)
   if not p or not p.id or tostring(p.id) == "" or p._metadata_fetched or p._metadata_loading then
     return
   end
+  if state.State.torn_down then
+    return
+  end
+
+  local meta_path = util.meta_cache_path(p.id)
+  if meta_path then
+    local cached = util.read_json(meta_path)
+    if cached then
+      p.tags = cached.tags or p.tags
+      p.rating = cached.rating or p.rating
+      p.score = tonumber(cached.score) or cached.score or p.score
+      if cached.width then
+        p.width = tonumber(cached.width) or cached.width
+      end
+      if cached.height then
+        p.height = tonumber(cached.height) or cached.height
+      end
+      if cached.source then
+        p.source = cached.source
+      end
+      p._metadata_fetched = true
+      if not state.State.torn_down and cb then
+        cb(p)
+      end
+      return
+    end
+  end
+
   p._metadata_loading = true
   M.fetch_post_by_id(p.id, function(d)
     p._metadata_loading = false
     p._metadata_fetched = true
-    if not d or state.State.torn_down then
+    if state.State.torn_down then
+      return
+    end
+    if not d then
+      if cb then
+        cb(nil)
+      end
       return
     end
     p.tags = d.tags or p.tags
@@ -283,6 +373,18 @@ function M.fetch_post_metadata(p, cb)
     end
     if d.source then
       p.source = d.source
+    end
+    if meta_path then
+      local meta_data = {
+        id = p.id,
+        tags = p.tags,
+        rating = p.rating,
+        score = p.score,
+        width = p.width,
+        height = p.height,
+        source = p.source,
+      }
+      util.write_json(meta_path, meta_data)
     end
     if cb then
       cb(p)
