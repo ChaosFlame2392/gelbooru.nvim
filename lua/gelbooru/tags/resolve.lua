@@ -157,7 +157,7 @@ function M.resolve_post_tags(p, on_complete)
       return
     end
     local ok, data = pcall(json_decode, body)
-    if ok and data then
+    if ok and data and type(data) == "table" and not data.error and (data.tag or data["@attributes"]) then
       local tag_list = data.tag and util.ensure_array(data.tag) or {}
       local found_set = {}
       local found_artist = false
@@ -279,6 +279,11 @@ function M.fetch_api_tags(query)
       end)
     end)
   )
+end
+
+function M.reset_cache()
+  M.in_flight_tags = {}
+  M.negative_tag_cache = {}
 end
 
 return M

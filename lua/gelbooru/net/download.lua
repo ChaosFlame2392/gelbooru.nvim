@@ -26,37 +26,50 @@ function M.curl_async(url, cb)
   log("DEBUG", "CURL", "GET %s", url)
   local handle
   local done = false
-  handle = vim.system({
-    "curl",
-    "-s",
-    "--fail",
-    "-L",
-    "--max-time",
-    "25",
-    "--connect-timeout",
-    "10",
-    "--retry",
-    "3",
-    "--retry-delay",
-    "2",
-    "--retry-connrefused",
-    url,
-  }, { text = true }, function(out)
-    done = true
-    if handle then
-      M.active_handles[handle] = nil
-      M.interrupted_dests[handle] = nil
-    end
-    vim.schedule(function()
+  local spawn_ok, res = pcall(function()
+    return vim.system({
+      "curl",
+      "-s",
+      "--fail",
+      "-L",
+      "--max-time",
+      "25",
+      "--connect-timeout",
+      "10",
+      "--retry",
+      "3",
+      "--retry-delay",
+      "2",
+      "--retry-connrefused",
+      url,
+    }, { text = true }, function(out)
+      done = true
       if handle then
         M.active_handles[handle] = nil
         M.interrupted_dests[handle] = nil
       end
-      if cb then
-        cb(out.code == 0 and out.stdout or nil)
-      end
+      vim.schedule(function()
+        if handle then
+          M.active_handles[handle] = nil
+          M.interrupted_dests[handle] = nil
+        end
+        if cb then
+          cb(out.code == 0 and out.stdout or nil)
+        end
+      end)
     end)
   end)
+
+  if not spawn_ok or not res then
+    log("ERROR", "CURL", "Failed to spawn curl: %s", tostring(res))
+    if cb then
+      vim.schedule(function()
+        cb(nil)
+      end)
+    end
+    return nil
+  end
+  handle = res
 
   if handle and not done then
     M.active_handles[handle] = handle
@@ -154,7 +167,7 @@ function M.download_async(url, dest, cb, opts)
       else
         pcall(function()
           local uv = vim.uv or vim.loop
-          local now = uv.now() / 1000
+          local now = os.time()
           uv.fs_utime(dest, now, now)
         end)
         log("INFO", "DOWNLOAD", "Download succeeded: %s", dest)

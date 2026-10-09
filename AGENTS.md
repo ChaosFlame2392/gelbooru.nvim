@@ -595,3 +595,24 @@ This branch introduces unified local library browsing, offline booru metadata en
 - **Problem**: Package managers download developer test suites, makefiles, and documentation artifacts into user runtimes.
 - **Resolution**:
   - Add `.gitattributes` configuring `export-ignore` for `tests/`, `Makefile`, and `AGENTS.md` to ensure lightweight installation for end users.
+
+---
+
+### 9.4 Future Product Directions & Architectural Roadmap (Future Scope)
+
+#### 14. Interactive Tag Picker / Deep-Dive Selection Modal (Achievable / High Usability)
+- **Concept**: A dedicated floating modal for quickly exploring and querying individual or multiple tags belonging to the active post.
+- **Workflow & Interaction**:
+  - Hotkey (e.g. `t` or `T` from Browse Mode or Metadata Inspector Mode) opens a centered floating selection window populated with the current post's tags, categorized and badged (Artist, Character, Series, General, Meta).
+  - Navigate suggestions with `j` / `k` (or `<Down>` / `<Up>`).
+  - Press `<Space>` to select/toggle or immediately activate a tag.
+  - Press `<CR>` to commit the selected tag(s) directly into the query bar and trigger a fresh search.
+- **Benefit**: Provides an instant, tactile deep-dive mechanism for pivoting to related art and tags without manually typing complex tag names in the search bar.
+
+#### 15. Generalized Multi-Booru Provider Engine & Aggregator Mode (Long-Term Architectural Scope)
+- **Concept**: Generalize the API and scraper layers beyond Gelbooru to support arbitrary booru engines (Danbooru, Moebooru, Safebooru, e621, etc.) through a pluggable provider interface.
+- **Architectural Scope**:
+  - **Pluggable Provider Abstraction**: Decouple REST endpoints, authentication query params, and JSON schema parsing behind a uniform booru client contract (`search(tags, page)`, `fetch_metadata(id)`, `autocomplete(query)`).
+  - **Single Provider Switcher**: Allow users to switch active boards globally or per query (e.g. `:Gelbooru --provider danbooru` or `danbooru: <tags>`).
+  - **Federated Booru Aggregator**: An aggregated multi-board mode that queries multiple configured boorus concurrently, merges and normalizes results, deduplicates cross-posted media via MD5 / perceptual image hashes, and presents a consolidated browsing stream.
+- **Feasibility Assessment**: Deliberately slated for future milestones following hybrid local engine stabilization due to significant architectural scope.

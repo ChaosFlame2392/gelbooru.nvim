@@ -19,10 +19,12 @@ function M.update_autocomplete(query)
 
   local query_part = nil
   if UI.wins.input and vim.api.nvim_win_is_valid(UI.wins.input) then
+    local mode = vim.api.nvim_get_mode().mode
+    local is_insert = mode:sub(1, 1) == "i"
     local ok, cursor = pcall(vim.api.nvim_win_get_cursor, UI.wins.input)
     if ok and cursor and type(cursor[2]) == "number" then
       local col = cursor[2]
-      if col > 0 and col < #full then
+      if is_insert and col < #full then
         query_part = full:sub(1, col):match("(%S*)$")
       end
     end

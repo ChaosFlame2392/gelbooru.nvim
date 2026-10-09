@@ -112,6 +112,13 @@ function M.reset_tag_state()
   M.State.all_tags = {}
   M.State.tags_by_name = {}
   M.State.autocomplete_filtered = {}
+  pcall(function()
+    package.loaded["gelbooru.tags.resolve"] = package.loaded["gelbooru.tags.resolve"]
+    local resolve = package.loaded["gelbooru.tags.resolve"]
+    if resolve and resolve.reset_cache then
+      resolve.reset_cache()
+    end
+  end)
 end
 
 return M

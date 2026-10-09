@@ -371,17 +371,32 @@ function M.matches_post(post, filter)
         if t == neg then
           return false
         end
+        for w in t:gmatch("[^_]+") do
+          if w == neg then
+            return false
+          end
+        end
       end
       -- Artists
       for _, a in ipairs(post_artists) do
         if a == neg then
           return false
         end
+        for w in a:gmatch("[^_]+") do
+          if w == neg then
+            return false
+          end
+        end
       end
       -- Characters
       for _, c in ipairs(post_characters) do
         if c == neg then
           return false
+        end
+        for w in c:gmatch("[^_]+") do
+          if w == neg then
+            return false
+          end
         end
       end
       -- Filename tokens

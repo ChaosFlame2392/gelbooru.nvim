@@ -81,13 +81,13 @@ function M.scan_local_folder(dir)
         break
       end
       local full_path = (target_dir == "/" and "" or target_dir) .. "/" .. name
-      if ftype == nil then
+      if ftype == nil or ftype == "link" then
         local stat = uv.fs_stat(full_path)
         if stat and stat.type then
           ftype = stat.type
         end
       end
-      if ftype == "file" or ftype == "link" then
+      if ftype == "file" then
         files[#files + 1] = full_path
       end
     end

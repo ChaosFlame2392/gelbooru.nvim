@@ -44,13 +44,14 @@ function M.cursor_rush_prefetch(cur_idx, scroll_dir)
   local api = require("gelbooru.net.api")
   local radius = math.min(5, math.max(3, config.options.prefetch_radius or 5))
 
+  local epoch = state.State.search_epoch
   for offset = 1, radius do
     local idx = cur_idx + (scroll_dir * offset)
     if idx >= 1 and idx <= #posts then
       local p = posts[idx]
       if p and p.id and not p._metadata_fetched and not p._metadata_loading then
         api.fetch_post_metadata(p, function(updated_p)
-          if state.State.torn_down or not updated_p then
+          if state.State.torn_down or state.State.search_epoch ~= epoch or not updated_p then
             return
           end
           local UI = state.UI
@@ -128,11 +129,12 @@ function M.process_next_batch()
     return
   end
 
+  local epoch = state.State.search_epoch
   active_workers = active_workers + 1
   local api = require("gelbooru.net.api")
   api.fetch_post_metadata(p, function(updated_p)
     active_workers = math.max(0, active_workers - 1)
-    if state.State.torn_down then
+    if state.State.torn_down or state.State.search_epoch ~= epoch then
       return
     end
 
@@ -152,12 +154,12 @@ function M.process_next_batch()
       end
     end
 
-    if #M.queue > 0 and not state.State.torn_down then
+    if (M.queue_head or 1) <= #M.queue and not state.State.torn_down then
       schedule_tick()
     end
   end)
 
-  if active_workers < MAX_CONCURRENT and #M.queue > 0 then
+  if active_workers < MAX_CONCURRENT and (M.queue_head or 1) <= #M.queue then
     schedule_tick()
   end
 end
