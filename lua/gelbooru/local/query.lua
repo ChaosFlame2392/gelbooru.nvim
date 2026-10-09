@@ -43,6 +43,10 @@ function M.parse_query(query_str)
   end
 
   local s = vim.trim(query_str)
+  local is_local_prefix = s:match("^[Ll][Oo][Cc][Aa][Ll]:") ~= nil
+  local has_space_after_colon = s:match("^[Ll][Oo][Cc][Aa][Ll]:%s+") ~= nil
+  local is_direct_local_dir = is_local_prefix and not has_space_after_colon
+
   local remainder = s:match("^[Ll][Oo][Cc][Aa][Ll]:%s*(.*)")
   if not remainder then
     remainder = s:match("^[Ll][Oo][Cc][Aa][Ll]:(.*)")
@@ -67,6 +71,11 @@ function M.parse_query(query_str)
     if not first_token then
       first_token, rest_str = remainder:match("^'([^']*)'%s*(.*)")
     end
+    if not first_token then
+      -- Unclosed quote: capture the trailing unclosed quoted text as a search token
+      first_token = remainder:sub(2)
+      rest_str = ""
+    end
   else
     first_token, rest_str = remainder:match("^(%S+)%s*(.*)")
   end
@@ -78,7 +87,7 @@ function M.parse_query(query_str)
 
   local expanded = vim.fn.expand(first_token)
   local starts_path_char = first_token:match("^[/%~%.]") ~= nil
-  local is_dir = starts_path_char or (vim.fn.isdirectory(expanded) == 1)
+  local is_dir = starts_path_char or (is_direct_local_dir and vim.fn.isdirectory(expanded) == 1)
 
   local target_dir = config.options.save_dir
   local tag_str = ""
@@ -88,7 +97,7 @@ function M.parse_query(query_str)
     tag_str = vim.trim(rest_str or "")
   else
     target_dir = config.options.save_dir
-    tag_str = remainder
+    tag_str = remainder:gsub('^["\']', "")
   end
 
   local parsed_filter = M.parse_tags(tag_str)
@@ -362,32 +371,17 @@ function M.matches_post(post, filter)
         if t == neg then
           return false
         end
-        for w in t:gmatch("[^_]+") do
-          if w == neg then
-            return false
-          end
-        end
       end
       -- Artists
       for _, a in ipairs(post_artists) do
         if a == neg then
           return false
         end
-        for w in a:gmatch("[^_]+") do
-          if w == neg then
-            return false
-          end
-        end
       end
       -- Characters
       for _, c in ipairs(post_characters) do
         if c == neg then
           return false
-        end
-        for w in c:gmatch("[^_]+") do
-          if w == neg then
-            return false
-          end
         end
       end
       -- Filename tokens
@@ -515,5 +509,6 @@ function M.filter_posts(posts, filter_or_tag_str)
 end
 
 M.parse_local_query = M.parse_query
+M.matches_query = M.matches_post
 
 return M

@@ -7,6 +7,11 @@ local db = require("gelbooru.tags.db")
 
 local M = {}
 
+M.in_flight_tags = {}
+M.negative_tag_cache = {}
+
+local json_decode = vim.json and vim.json.decode or vim.fn.json_decode
+
 function M.save_discovered_now()
   local State = state.State
   local UI = state.UI
@@ -32,7 +37,7 @@ function M.save_discovered_now()
   if df then
     local raw = df:read("*a")
     df:close()
-    local ok, disk_list = pcall(vim.fn.json_decode, raw)
+    local ok, disk_list = pcall(json_decode, raw)
     if ok and type(disk_list) == "table" then
       for _, t in ipairs(disk_list) do
         if t.n and type(t.n) == "string" then
@@ -117,7 +122,9 @@ function M.resolve_post_tags(p, on_complete)
     local clean_tag = util.decode_html(raw_tag):lower()
     if clean_tag ~= "" and not seen[clean_tag] then
       seen[clean_tag] = true
-      if not State.tags_by_name[clean_tag] then
+      if not State.tags_by_name[clean_tag]
+        and not M.in_flight_tags[clean_tag]
+        and not M.negative_tag_cache[clean_tag] then
         table.insert(missing, clean_tag)
       end
     end
@@ -129,33 +136,43 @@ function M.resolve_post_tags(p, on_complete)
 
   log("DEBUG", "TAG_RESOLVE", "Resolving %d unknown tags for post %s", #missing, tostring(p.id))
   local chunks = {}
+  local queried_tags = {}
   for i = 1, math.min(#missing, 40) do
-    chunks[#chunks + 1] = util.url_encode(missing[i])
+    local tag = missing[i]
+    chunks[#chunks + 1] = util.url_encode(tag)
+    queried_tags[#queried_tags + 1] = tag
+    M.in_flight_tags[tag] = true
   end
   local url = string.format("%s&names=%s%s", config.options.tags_api, table.concat(chunks, "+"), util.auth_qs())
 
   download.curl_async(url, function(body)
+    for _, tag in ipairs(queried_tags) do
+      M.in_flight_tags[tag] = nil
+    end
+
     if state.State.torn_down then
       return
     end
     if not body then
       return
     end
-    local ok, data = pcall(vim.fn.json_decode, body)
-    if ok and data and data.tag then
-      local tag_list = util.ensure_array(data.tag)
+    local ok, data = pcall(json_decode, body)
+    if ok and data then
+      local tag_list = data.tag and util.ensure_array(data.tag) or {}
+      local found_set = {}
       local found_artist = false
       for _, t in ipairs(tag_list) do
         if t.name and t.type then
           local count = tonumber(t.count) or 0
           local typ = tonumber(t.type) or 0
+          local nl = t.name:lower()
+          found_set[nl] = true
           if db.is_clean_tag(t.name, count, typ) then
             local item = {
               n = t.name,
               t = typ,
               c = count,
             }
-            local nl = item.n:lower()
             if not State.tags_by_name[nl] then
               if item.t == 1 then
                 found_artist = true
@@ -175,6 +192,13 @@ function M.resolve_post_tags(p, on_complete)
           end
         end
       end
+
+      for _, tag in ipairs(queried_tags) do
+        if not found_set[tag] then
+          M.negative_tag_cache[tag] = true
+        end
+      end
+
       if found_artist and on_complete then
         on_complete()
       end
@@ -220,7 +244,7 @@ function M.fetch_api_tags(query)
         if not body then
           return
         end
-        local ok, data = pcall(vim.fn.json_decode, body)
+        local ok, data = pcall(json_decode, body)
         local tag_list = (ok and data and data.tag) and util.ensure_array(data.tag) or {}
         if #tag_list > 0 then
           local added = false

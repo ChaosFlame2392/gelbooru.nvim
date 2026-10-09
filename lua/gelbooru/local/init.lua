@@ -4,6 +4,7 @@ local scan = require("gelbooru.local.scan")
 local state = require("gelbooru.core.state")
 local history = require("gelbooru.core.history")
 local image = require("gelbooru.ui.image")
+local download = require("gelbooru.net.download")
 
 local query = require("gelbooru.local.query")
 local index = require("gelbooru.local.index")
@@ -14,10 +15,13 @@ M.scan_local_folder = scan.scan_local_folder
 M.parse_query = query.parse_query
 M.parse_local_query = query.parse_local_query
 M.filter_posts = query.filter_posts
+M.matches_post = query.matches_post
+M.matches_query = query.matches_query
 M.index = index
 M.indexer = indexer
 
 function M.open_local(query_or_dir)
+  download.cancel_prefetch_timers()
   local ui = require("gelbooru.ui")
   local target_dir, tag_str, parsed_filter = query.parse_query(query_or_dir)
   local posts, resolved_dir, target_file = M.scan_local_folder(target_dir)

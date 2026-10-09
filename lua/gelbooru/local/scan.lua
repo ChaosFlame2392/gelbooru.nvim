@@ -71,16 +71,24 @@ function M.scan_local_folder(dir)
     webm = true,
   }
 
+  local uv = vim.uv or vim.loop
   local files = {}
-  local handle = vim.loop.fs_scandir(target_dir)
+  local handle = uv.fs_scandir(target_dir)
   if handle then
     while true do
-      local name, ftype = vim.loop.fs_scandir_next(handle)
+      local name, ftype = uv.fs_scandir_next(handle)
       if not name then
         break
       end
+      local full_path = (target_dir == "/" and "" or target_dir) .. "/" .. name
+      if ftype == nil then
+        local stat = uv.fs_stat(full_path)
+        if stat and stat.type then
+          ftype = stat.type
+        end
+      end
       if ftype == "file" or ftype == "link" then
-        files[#files + 1] = (target_dir == "/" and "" or target_dir) .. "/" .. name
+        files[#files + 1] = full_path
       end
     end
   end

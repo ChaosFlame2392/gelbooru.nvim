@@ -1,4 +1,5 @@
 local config = require("gelbooru.core.config")
+local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
 local download = require("gelbooru.net.download")
 local db = require("gelbooru.tags.db")
@@ -58,7 +59,7 @@ function M.update_tags()
     end
     local raw = f:read("*a")
     f:close()
-    local ok, data = pcall(vim.fn.json_decode, raw)
+    local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, raw)
     if ok and type(data) == "table" then
       for _, t in ipairs(data) do
         if t.n and type(t.n) == "string" then
@@ -78,7 +79,7 @@ function M.update_tags()
     end
     local raw = df:read("*a")
     df:close()
-    local ok, disc_list = pcall(vim.fn.json_decode, raw)
+    local ok, disc_list = pcall(vim.json and vim.json.decode or vim.fn.json_decode, raw)
     if not ok or type(disc_list) ~= "table" then
       return
     end
@@ -130,6 +131,10 @@ function M.update_tags()
           f:close()
         end
       end
+      -- Synchronize in-memory state so stale tags are not resurrected on teardown
+      if state and state.State then
+        state.State.discovered = remaining
+      end
     end
   end
 
@@ -168,33 +173,51 @@ function M.update_tags()
     active_workers = active_workers + 1
     retries = retries or 0
 
+    local function retry_page(reason)
+      if retries < 3 then
+        local delay = (2 ^ retries) * 1000
+        update_progress(string.format("retry %d/3 for page %d…", retries + 1, pid))
+        vim.defer_fn(function()
+          active_workers = active_workers - 1
+          worker(pid, retries + 1)
+        end, delay)
+      else
+        is_finished = true
+        active_workers = active_workers - 1
+        if active_workers == 0 then
+          save_split_files()
+          close_progress()
+          vim.notify(
+            string.format("GelbooruTags: stopped at page %d (%s) — saved %d tags", pid, reason or "error", total_fetched),
+            vim.log.levels.WARN
+          )
+        end
+      end
+    end
+
     local url = string.format("%s&limit=%d&pid=%d&orderby=count%s", config.options.tags_api, LIMIT, pid, util.auth_qs())
     download.curl_async(url, function(body)
       if not body then
-        if retries < 10 then
-          local delay = math.min(10000, (2 ^ retries) * 1000)
-          update_progress(string.format("retry %d/10 for page %d…", retries + 1, pid))
-          vim.defer_fn(function()
-            active_workers = active_workers - 1
-            worker(pid, retries + 1)
-          end, delay)
-        else
-          is_finished = true
-          active_workers = active_workers - 1
-          if active_workers == 0 then
-            save_split_files()
-            close_progress()
-            vim.notify(
-              string.format("GelbooruTags: stopped at page %d — saved %d tags", pid, total_fetched),
-              vim.log.levels.WARN
-            )
-          end
-        end
+        retry_page("empty network response")
         return
       end
 
-      local ok, data = pcall(vim.fn.json_decode, body)
-      local tag_list = (ok and data and data.tag) and util.ensure_array(data.tag) or nil
+      local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
+      local is_decode_err = (not ok) or (type(data) ~= "table")
+      local body_lower = type(body) == "string" and body:lower() or ""
+      local has_html_or_err = body_lower:find("<html", 1, true) ~= nil or body_lower:find("error", 1, true) ~= nil
+
+      local tag_list = (not is_decode_err and data and data.tag) and util.ensure_array(data.tag) or nil
+
+      -- Check if response is Cloudflare HTML, 429 error, or malformed JSON:
+      -- do NOT treat this as the end of available tags!
+      if is_decode_err or has_html_or_err or (data and data.error) then
+        if not (tag_list and #tag_list > 0) then
+          retry_page("error/rate-limit response")
+          return
+        end
+      end
+
       if tag_list and #tag_list > 0 then
         for _, t in ipairs(tag_list) do
           local name = t.name

@@ -24,6 +24,8 @@ function M.save_current_history()
   end
 end
 
+local MAX_HISTORY = 30
+
 function M.push_history(query)
   local State = state.State
   M.save_current_history()
@@ -39,6 +41,10 @@ function M.push_history(query)
     cur = 1,
   })
   State.history_idx = #State.history
+  if #State.history > MAX_HISTORY then
+    table.remove(State.history, 1)
+    State.history_idx = math.max(1, State.history_idx - 1)
+  end
   log(
     "INFO",
     "HISTORY",
@@ -72,6 +78,11 @@ function M.restore_history(idx)
     return
   end
   M.save_current_history()
+  local download = require("gelbooru.net.download")
+  download.cancel_prefetch_timers()
+  pcall(function()
+    require("gelbooru.local.indexer").stop()
+  end)
   State.search_epoch = (State.search_epoch or 0) + 1
   State.loading = false
   pcall(function()

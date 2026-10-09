@@ -74,6 +74,9 @@ function M.reset_query_state()
   M.State.list_width_ratio = 0.25
   M.State.zen_mode = false
   M.State.saved_index = {}
+  pcall(function()
+    require("gelbooru.local.index").reset()
+  end)
 end
 
 function M.reset_ui()

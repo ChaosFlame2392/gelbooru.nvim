@@ -61,6 +61,124 @@ function M.close_current_placement()
   end
 end
 
+local function attach_defensive_keymaps(buf)
+  local util = require("gelbooru.core.util")
+  local function go_search()
+    local ui = require("gelbooru.ui")
+    if ui and ui.enter_search then
+      ui.enter_search()
+    end
+  end
+  local function go_list()
+    local s = require("gelbooru.core.state")
+    if s.State.input_focused then
+      s.State.input_focused = false
+      vim.cmd("stopinsert")
+      if s.UI.wins.ac and vim.api.nvim_win_is_valid(s.UI.wins.ac) then
+        pcall(vim.api.nvim_win_set_config, s.UI.wins.ac, { hide = true })
+      end
+    end
+    if s.UI.wins.list and vim.api.nvim_win_is_valid(s.UI.wins.list) then
+      pcall(vim.api.nvim_set_current_win, s.UI.wins.list)
+      local ui = require("gelbooru.ui")
+      if ui and ui.set_status then
+        ui.set_status()
+      end
+    end
+  end
+
+  local function handle_q()
+    local s = require("gelbooru.core.state")
+    local ui = require("gelbooru.ui")
+    if s.State.zen_mode then
+      if ui and ui.teardown then
+        ui.teardown()
+      end
+    else
+      go_list()
+    end
+  end
+
+  local function nav(action)
+    local ui = require("gelbooru.ui")
+    if ui and ui.on_cursor_change then
+      ui.on_cursor_change(action)
+    end
+  end
+
+  util.keymap(buf, "n", "j", function() nav(1) end)
+  util.keymap(buf, "n", "k", function() nav(-1) end)
+  util.keymap(buf, "n", "gg", function() nav("gg") end)
+  util.keymap(buf, "n", "G", function() nav("G") end)
+
+  util.keymap(buf, "n", "r", function()
+    local s = require("gelbooru.core.state")
+    s.State.cur_id = nil
+    local ui = require("gelbooru.ui")
+    if ui and ui.render_preview then
+      ui.render_preview(false)
+    end
+  end)
+
+  util.keymap(buf, "n", "R", function()
+    local ui = require("gelbooru.ui")
+    if ui and ui.force_refresh then
+      ui.force_refresh()
+    end
+  end)
+
+  util.keymap(buf, "n", "m", function()
+    local s = require("gelbooru.core.state")
+    s.State.show_meta = not s.State.show_meta
+    local ui = require("gelbooru.ui")
+    if ui and ui.on_resize then
+      ui.on_resize()
+    end
+  end)
+
+  util.keymap(buf, "n", "u", function()
+    local ui = require("gelbooru.ui")
+    if ui and ui.search_active_artist then
+      ui.search_active_artist()
+    end
+  end)
+
+  util.keymap(buf, "n", "o", function()
+    local ui = require("gelbooru.ui")
+    if ui and ui.open_web_page then
+      ui.open_web_page()
+    end
+  end)
+
+  util.keymap(buf, "n", "O", function()
+    local ui = require("gelbooru.ui")
+    if ui and ui.open_media_viewer then
+      ui.open_media_viewer()
+    end
+  end)
+
+  util.keymap(buf, "n", "<CR>", function()
+    local api = require("gelbooru.net.api")
+    if api and api.save_current then
+      api.save_current()
+    end
+  end)
+
+  util.keymap(buf, "n", "\\", function()
+    local ui = require("gelbooru.ui")
+    if ui and ui.toggle_zen then
+      ui.toggle_zen()
+    end
+  end)
+
+  util.keymap(buf, "n", "q", handle_q)
+  util.keymap(buf, "n", "<Esc>", handle_q)
+
+  for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
+    util.keymap(buf, "n", k, go_search)
+  end
+end
+
 function M.reset_canvas(placeholder)
   pcall(M.close_current_placement)
   if state.State.torn_down then
@@ -69,8 +187,16 @@ function M.reset_canvas(placeholder)
   local UI = state.UI
   local util = require("gelbooru.core.util")
   placeholder = placeholder or "  Loading..."
+  if not (UI.bufs and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img)) then
+    UI.bufs.img = util.scratch()
+    vim.bo[UI.bufs.img].bufhidden = "hide"
+  end
   util.set_lines(UI.bufs.img, { placeholder })
-  util.set_lines(UI.bufs.meta, {})
+  if UI.bufs and UI.bufs.meta and vim.api.nvim_buf_is_valid(UI.bufs.meta) then
+    util.set_lines(UI.bufs.meta, {})
+  end
+  vim.bo[UI.bufs.img].modifiable = false
+  attach_defensive_keymaps(UI.bufs.img)
   if UI.wins and UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img)
     and UI.bufs and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img) then
     pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
@@ -81,9 +207,18 @@ function M.clear_snacks_cache_for(post_id)
   if not post_id or tostring(post_id) == "" or tostring(post_id) == "nil" then
     return
   end
-  local snacks_cache = vim.fn.expand("~/.cache/nvim/snacks/image/")
+  local ok, cache_dir = pcall(vim.fn.stdpath, "cache")
+  local snacks_cache = (ok and type(cache_dir) == "string" and cache_dir ~= "") and (cache_dir .. "/snacks/image/")
+    or vim.fn.expand("~/.cache/nvim/snacks/image/")
+  if vim.fn.isdirectory(snacks_cache) == 0 then
+    local fallback = vim.fn.expand("~/.cache/nvim/snacks/image/")
+    if vim.fn.isdirectory(fallback) == 1 then
+      snacks_cache = fallback
+    end
+  end
+  local pattern = "%f[%d]" .. post_id .. "%f[%D]"
   for _, f in ipairs(vim.fn.glob(snacks_cache .. "*", false, true)) do
-    if f:find(tostring(post_id), 1, true) then
+    if f:find(pattern) then
       vim.fn.delete(f)
     end
   end
@@ -98,6 +233,7 @@ function M.nudge_current_placement()
   if p and not p.closed and vim.api.nvim_buf_is_valid(p.buf) then
     p._state = nil
     pcall(p.update, p)
+    pcall(vim.api.nvim_buf_clear_namespace, p.buf, vim.api.nvim_create_namespace("snacks.image"), 0, 1)
     log("DEBUG", "RENDER", "Nudged placement for resize")
     return true
   end
@@ -127,6 +263,7 @@ function M.render_image(win, path)
     pcall(vim.api.nvim_win_set_buf, win, current.buf)
     current._state = nil
     pcall(current.update, current)
+    pcall(vim.api.nvim_buf_clear_namespace, current.buf, vim.api.nvim_create_namespace("snacks.image"), 0, 1)
     log("DEBUG", "RENDER", "In-place resize nudge: %s", path)
     return true
   end
@@ -137,6 +274,8 @@ function M.render_image(win, path)
   -- reads its live dimensions on every update().
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].modifiable = false
+  attach_defensive_keymaps(buf)
   local opts = { pos = { 1, 1 }, auto_resize = true }
 
   local place_ok, placement = pcall(placement_mod.new, buf, path, opts)
@@ -144,6 +283,17 @@ function M.render_image(win, path)
     log("WARN", "RENDER", "Failed to create snacks placement for %s: %s", path, tostring(placement))
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
     return false
+  end
+
+  placement.progress = function() end
+  local orig_update = placement.update
+  placement.update = function(self)
+    if orig_update then
+      pcall(orig_update, self)
+    end
+    if self and self.buf and vim.api.nvim_buf_is_valid(self.buf) then
+      pcall(vim.api.nvim_buf_clear_namespace, self.buf, vim.api.nvim_create_namespace("snacks.image"), 0, 1)
+    end
   end
 
   local old_buf = current and current.buf
@@ -156,6 +306,12 @@ function M.render_image(win, path)
     pcall(vim.api.nvim_buf_delete, old_buf, { force = true })
   end
   pcall(placement.update, placement)
+  pcall(vim.api.nvim_buf_clear_namespace, placement.buf, vim.api.nvim_create_namespace("snacks.image"), 0, 1)
+  pcall(function()
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.bo[buf].modifiable = false
+    end
+  end)
   log("DEBUG", "RENDER", "Image rendered via snacks.image: %s", path)
   return true
 end

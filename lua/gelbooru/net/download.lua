@@ -10,6 +10,7 @@ M.pending_resumes = {} -- guards the async gap between scan and active_downloads
 M.interrupted_dests = {} -- dests killed by teardown; callbacks skip rename and preserve .part
 
 function M.abort_all()
+  M.cancel_pending_resumes()
   for dest, handle in pairs(M.active_handles or {}) do
     if type(dest) == "string" then
       M.interrupted_dests[dest] = true
@@ -115,7 +116,7 @@ function M.download_async(url, dest, cb, opts)
 
   local handle
   local done = false
-  handle = vim.system(curl_cmd, {}, function(out)
+  local spawn_ok, res = pcall(vim.system, curl_cmd, {}, function(out)
     done = true
     if handle then
       M.active_handles[dest] = nil
@@ -151,7 +152,11 @@ function M.download_async(url, dest, cb, opts)
         end
         log("WARN", "DOWNLOAD", "Download failed (code %d): %s", out.code or -1, url)
       else
-        vim.fn.system({ "touch", dest })
+        pcall(function()
+          local uv = vim.uv or vim.loop
+          local now = uv.now() / 1000
+          uv.fs_utime(dest, now, now)
+        end)
         log("INFO", "DOWNLOAD", "Download succeeded: %s", dest)
       end
 
@@ -161,6 +166,18 @@ function M.download_async(url, dest, cb, opts)
     end)
   end)
 
+  if not spawn_ok or not res then
+    log("ERROR", "DOWNLOAD", "Failed to spawn curl: %s", tostring(res))
+    local callbacks = M.active_downloads[dest] or {}
+    M.active_downloads[dest] = nil
+    M.active_handles[dest] = nil
+    for _, fn in ipairs(callbacks) do
+      pcall(fn, false)
+    end
+    return nil
+  end
+
+  handle = res
   if handle and not done then
     M.active_handles[dest] = handle
   end
@@ -191,12 +208,18 @@ function M.resume_pending_saves()
         -- Already completed somehow, clean up the orphan
         vim.fn.delete(part_path)
       elseif not M.active_downloads[dest] and not M.pending_resumes[dest] then
-        M.pending_resumes[dest] = true
         -- Stagger requests by 200ms each so we don't hammer the API on open
-        vim.defer_fn(function()
+        local timer
+        timer = vim.defer_fn(function()
+          M.pending_resumes[dest] = nil
+          if timer then
+            M.pending_resumes[timer] = nil
+          end
+          if state.State.torn_down then
+            return
+          end
           local api_url = string.format("%s&id=%s%s", config.options.api_base, post_id, util.auth_qs())
           M.curl_async(api_url, function(body)
-            M.pending_resumes[dest] = nil
             if not body then
               log("WARN", "DOWNLOAD", "API lookup failed for orphaned post %s", post_id)
               return
@@ -218,12 +241,32 @@ function M.resume_pending_saves()
             end, { resume = true })
           end)
         end, i * 200)
+        M.pending_resumes[dest] = timer or true
+        if timer then
+          M.pending_resumes[timer] = timer
+        end
       end
     end
   end
 end
 
+function M.cancel_pending_resumes()
+  for k, v in pairs(M.pending_resumes or {}) do
+    local timer = (type(k) == "table" or type(k) == "userdata") and k or v
+    if (type(timer) == "table" or type(timer) == "userdata") and timer.stop then
+      if not (timer.is_closing and timer:is_closing()) then
+        pcall(function()
+          timer:stop()
+          timer:close()
+        end)
+      end
+    end
+  end
+  M.pending_resumes = {}
+end
+
 function M.cancel_prefetch_timers()
+  M.cancel_pending_resumes()
   local UI = state.UI
   for _, timer in pairs(UI.prefetch_timers or {}) do
     if timer and not timer:is_closing() then
@@ -286,6 +329,9 @@ function M.prefetch_around(idx)
             end
             -- Remove from list so it doesn't grow unboundedly across navigation.
             UI.prefetch_timers[timer_idx] = nil
+            if state.State.torn_down or not (state.UI.wins and state.UI.wins.frame and vim.api.nvim_win_is_valid(state.UI.wins.frame)) then
+              return
+            end
             if vim.fn.filereadable(cap_dest) == 0 and not M.active_downloads[cap_dest] then
               log("DEBUG", "PREFETCH", "Prefetching post %s (dir=%d)", tostring(cap_pid), dir)
               M.download_async(cap_url, cap_dest)

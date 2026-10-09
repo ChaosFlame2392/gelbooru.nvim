@@ -530,12 +530,12 @@ describe("Regression Tests for UI & Search bugs", function()
   end)
 
   describe("Adversarial: Mouse Isolation and Window Focusability (Priority 2.5)", function()
-    it("disables mouse on open and restores previous user mouse setting on teardown", function()
+    it("enables mouse ('a') on open so clicking can focus windows and restores previous user mouse setting on teardown", function()
       local orig_mouse = "nvi"
       vim.o.mouse = orig_mouse
 
       ui.open()
-      assert.are.equal("", vim.o.mouse, "mouse was not disabled on UI open")
+      assert.are.equal("a", vim.o.mouse, "mouse was not set to 'a' on UI open")
 
       ui.teardown()
       assert.are.equal(orig_mouse, vim.o.mouse, "original mouse setting was not restored on teardown")
@@ -668,6 +668,8 @@ describe("Regression Tests for UI & Search bugs", function()
       assert.is_not_nil(map_by_lhs["A"], "A keymap missing on input buffer in normal mode")
       assert.is_not_nil(map_by_lhs["s"], "s keymap missing on input buffer in normal mode")
       assert.is_not_nil(map_by_lhs["S"], "S keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["/"], "/ keymap missing on input buffer in normal mode")
+      assert.is_not_nil(map_by_lhs["<BS>"], "<BS> keymap missing on input buffer in normal mode")
 
       -- Test each of q, j, k, <Esc> exits search mode and restores list focus
       for _, key in ipairs({ "q", "j", "k", "<Esc>" }) do

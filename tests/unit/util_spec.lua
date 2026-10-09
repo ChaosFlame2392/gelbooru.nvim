@@ -2,6 +2,7 @@
 -- Unit tests for gelbooru.core.util (pure functions only — no vim API needed).
 
 local util = require("gelbooru.core.util")
+local config = require("gelbooru.core.config")
 
 describe("util.url_encode", function()
   it("encodes spaces as +", function()
@@ -294,52 +295,33 @@ describe("util.open_url and util.open_media", function()
     vim.ui.open = orig_open
   end)
 
-  it("open_media launches mpv with detached job for .mp4 and .webm when mpv is executable", function()
-    local orig_exec = vim.fn.executable
+  it("open_media launches media_player when configured", function()
+    local orig_player = config.options.media_player
     local orig_jobstart = vim.fn.jobstart
     local job_cmd, job_opts
 
-    vim.fn.executable = function(cmd)
-      if cmd == "mpv" then
-        return 1
-      end
-      return orig_exec(cmd)
-    end
-
+    config.options.media_player = "iina"
     vim.fn.jobstart = function(cmd, opts)
       job_cmd = cmd
       job_opts = opts
       return 100
     end
 
-    -- Test .mp4
     local ok_mp4 = util.open_media("/storage/video/test_clip.mp4")
     assert.is_true(ok_mp4)
-    assert.are.same({ "mpv", "/storage/video/test_clip.mp4" }, job_cmd)
+    assert.are.same({ "iina", "/storage/video/test_clip.mp4" }, job_cmd)
     assert.is_true(job_opts.detach)
 
-    -- Test .webm (uppercase extension handling)
-    local ok_webm = util.open_media("/storage/video/ANIMATION.WEBM")
-    assert.is_true(ok_webm)
-    assert.are.same({ "mpv", "/storage/video/ANIMATION.WEBM" }, job_cmd)
-    assert.is_true(job_opts.detach)
-
-    vim.fn.executable = orig_exec
+    config.options.media_player = orig_player
     vim.fn.jobstart = orig_jobstart
   end)
 
-  it("open_media falls back to open_url when mpv is NOT executable", function()
-    local orig_exec = vim.fn.executable
+  it("open_media defaults to open_url when media_player is not configured", function()
+    local orig_player = config.options.media_player
     local orig_open = vim.ui and vim.ui.open
     local opened = nil
 
-    vim.fn.executable = function(cmd)
-      if cmd == "mpv" then
-        return 0
-      end
-      return orig_exec(cmd)
-    end
-
+    config.options.media_player = nil
     vim.ui.open = function(target)
       opened = target
     end
@@ -348,7 +330,7 @@ describe("util.open_url and util.open_media", function()
     assert.is_true(ok)
     assert.are.equal("/storage/video/fallback.mp4", opened)
 
-    vim.fn.executable = orig_exec
+    config.options.media_player = orig_player
     vim.ui.open = orig_open
   end)
 end)

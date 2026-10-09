@@ -12,6 +12,7 @@ M.options = {
   per_page = 42,
   show_tags_in_list = false,
   prefetch_radius = 5,
+  media_player = nil,
 }
 
 function M.get_discovered_tags_file()
@@ -78,6 +79,7 @@ function M.setup(opts)
   M.options.per_page = clamp(get_opt("per_page", "PER_PAGE", M.options.per_page), 1, 100)
   M.options.show_tags_in_list = get_opt("show_tags_in_list", "SHOW_TAGS_IN_LIST", M.options.show_tags_in_list)
   M.options.prefetch_radius = clamp(get_opt("prefetch_radius", "PREFETCH_RADIUS", M.options.prefetch_radius), 0, 20)
+  M.options.media_player = get_opt("media_player", "MEDIA_PLAYER", M.options.media_player)
 end
 
 return M

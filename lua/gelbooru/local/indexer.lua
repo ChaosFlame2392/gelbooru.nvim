@@ -7,7 +7,8 @@ local M = {}
 local MAX_CONCURRENT = 2
 local PACING_MS = 100
 
-local queue = {}
+M.queue = {}
+M.queue_head = 1
 local active_workers = 0
 local timer = nil
 local timer_running = false
@@ -73,7 +74,7 @@ local function schedule_tick()
     M.stop()
     return
   end
-  if #queue == 0 then
+  if #M.queue == 0 or (M.queue_head and M.queue_head > #M.queue) then
     return
   end
 
@@ -92,25 +93,37 @@ local function schedule_tick()
       0,
       vim.schedule_wrap(function()
         timer_running = false
-        M._tick()
+        M.process_next_batch()
       end)
     )
   end
 end
 
-function M._tick()
+function M.process_next_batch()
   if state.State.torn_down then
     M.stop()
     return
   end
-  if active_workers >= MAX_CONCURRENT or #queue == 0 then
+  if active_workers >= MAX_CONCURRENT or #M.queue == 0 or (M.queue_head and M.queue_head > #M.queue) then
     return
   end
 
-  local p = table.remove(queue, 1)
-  while p and (p._metadata_fetched or p._metadata_loading or not p.id) do
-    p = table.remove(queue, 1)
+  M.queue_head = (M.queue_head or 1)
+  local p = nil
+  while M.queue_head <= #M.queue do
+    local item = M.queue[M.queue_head]
+    M.queue_head = M.queue_head + 1
+    if item and not item._metadata_fetched and not item._metadata_loading and item.id then
+      p = item
+      break
+    end
   end
+
+  if M.queue_head > #M.queue then
+    M.queue = {}
+    M.queue_head = 1
+  end
+
   if not p then
     return
   end
@@ -139,15 +152,17 @@ function M._tick()
       end
     end
 
-    if #queue > 0 and not state.State.torn_down then
+    if #M.queue > 0 and not state.State.torn_down then
       schedule_tick()
     end
   end)
 
-  if active_workers < MAX_CONCURRENT and #queue > 0 then
+  if active_workers < MAX_CONCURRENT and #M.queue > 0 then
     schedule_tick()
   end
 end
+
+M._tick = M.process_next_batch
 
 function M.start_background_indexing(posts)
   if state.State.torn_down then
@@ -156,14 +171,15 @@ function M.start_background_indexing(posts)
   M.stop()
 
   local target_posts = posts or state.State.posts or {}
-  queue = {}
+  M.queue = {}
+  M.queue_head = 1
   for _, p in ipairs(target_posts) do
     if p.is_local and p.id and not p._metadata_fetched and not p._metadata_loading then
-      table.insert(queue, p)
+      table.insert(M.queue, p)
     end
   end
 
-  if #queue > 0 then
+  if #M.queue > 0 then
     schedule_tick()
   end
 end
@@ -179,7 +195,8 @@ function M.stop()
     timer = nil
   end
   timer_running = false
-  queue = {}
+  M.queue = {}
+  M.queue_head = 1
   active_workers = 0
   if state.UI then
     state.UI.indexer_timer = nil

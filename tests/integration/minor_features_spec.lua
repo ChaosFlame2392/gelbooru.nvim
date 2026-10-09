@@ -698,4 +698,151 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       assert.is_truthy(help_line:find("O: open"), "Help text must document 'O: open'")
     end)
   end)
+
+  describe("Section 2.9: Usability & Polish Regressions (Issues 0.1 - 0.4)", function()
+    it("Issue 0.2: render_image overrides placement.progress to no-op and clears snacks.image namespace on update", function()
+      ui.open()
+
+      local mock_progress_called = false
+      local cleared_ns = nil
+      local orig_clear = vim.api.nvim_buf_clear_namespace
+      vim.api.nvim_buf_clear_namespace = function(buf, ns, s, e)
+        cleared_ns = { buf = buf, ns = ns, s = s, e = e }
+        return orig_clear(buf, ns, s, e)
+      end
+
+      -- Create post and render image
+      local local_img = vim.fn.tempname() .. ".jpg"
+      local f = io.open(local_img, "w")
+      if f then f:write("fake image data"); f:close() end
+
+      image.render_image(state.UI.wins.img, local_img)
+
+      local placement = state.UI.current_placement
+      assert.is_not_nil(placement)
+      -- placement.progress must be a callable no-op
+      assert.is_function(placement.progress)
+      placement.progress() -- should not throw or set extmark
+
+      -- Verify update cleared row 0 (s=0, e=1)
+      assert.is_not_nil(cleared_ns)
+      assert.are.equal(0, cleared_ns.s)
+      assert.are.equal(1, cleared_ns.e)
+
+      vim.api.nvim_buf_clear_namespace = orig_clear
+    end)
+
+    it("Issue 0.3: toggle_zen disables cursorline and focuses UI.wins.img; exiting restores cursorline and focuses UI.wins.list", function()
+      ui.open()
+      assert.is_true(vim.wo[state.UI.wins.list].cursorline)
+
+      -- Enter Zen mode
+      ui.toggle_zen()
+      assert.is_true(state.State.zen_mode)
+      assert.is_false(vim.wo[state.UI.wins.list].cursorline, "cursorline must be disabled on list window in Zen mode")
+      assert.are.equal(state.UI.wins.img, vim.api.nvim_get_current_win(), "img window must be focused in Zen mode")
+
+      -- Exit Zen mode
+      ui.toggle_zen()
+      assert.is_false(state.State.zen_mode)
+      assert.is_true(vim.wo[state.UI.wins.list].cursorline, "cursorline must be re-enabled on list window when exiting Zen mode")
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "list window must be re-focused when exiting Zen mode")
+    end)
+
+    it("Issue 0.3: image buffer attaches full browsing keymaps (j, k, gg, G, r, R, m, u, o, O, <CR>, \\, q, <Esc>, /, i)", function()
+      ui.open()
+
+      local local_img = vim.fn.tempname() .. ".jpg"
+      local f = io.open(local_img, "w")
+      if f then f:write("fake image data"); f:close() end
+
+      image.render_image(state.UI.wins.img, local_img)
+      local img_buf = state.UI.current_placement.buf
+      assert.is_not_nil(img_buf)
+
+      state.State.posts = {
+        { id = 1, file_url = local_img, rating = "g", score = 10 },
+        { id = 2, file_url = local_img, rating = "g", score = 20 },
+        { id = 3, file_url = local_img, rating = "g", score = 30 },
+      }
+      state.State.cur = 1
+
+      local maps = vim.api.nvim_buf_get_keymap(img_buf, "n")
+      local map_by_lhs = {}
+      for _, km in ipairs(maps) do
+        map_by_lhs[km.lhs] = km.callback
+      end
+
+      local required_keys = { "j", "k", "gg", "G", "r", "R", "m", "u", "o", "O", "<CR>", "\\", "q", "<Esc>", "/", "i", "I", "a", "A", "s", "S" }
+      for _, k in ipairs(required_keys) do
+        assert.is_not_nil(map_by_lhs[k], string.format("key %s must be mapped on image buffer", k))
+      end
+
+      -- Test j navigates cursor forward
+      map_by_lhs["j"]()
+      assert.are.equal(2, state.State.cur)
+
+      -- Test k navigates cursor backward
+      map_by_lhs["k"]()
+      assert.are.equal(1, state.State.cur)
+
+      -- Test G navigates to bottom
+      map_by_lhs["G"]()
+      assert.are.equal(3, state.State.cur)
+
+      -- Test gg navigates to top
+      map_by_lhs["gg"]()
+      assert.are.equal(1, state.State.cur)
+    end)
+
+    it("Issue 0.4: search input normal mode maps / and <BS> without trapping user", function()
+      ui.open()
+      local input_buf = state.UI.bufs.input
+
+      local maps = vim.api.nvim_buf_get_keymap(input_buf, "n")
+      local map_by_lhs = {}
+      for _, km in ipairs(maps) do
+        map_by_lhs[km.lhs] = km.callback
+      end
+
+      assert.is_not_nil(map_by_lhs["/"], "'/' must be mapped in input normal mode")
+      assert.is_not_nil(map_by_lhs["<BS>"], "'<BS>' must be mapped in input normal mode")
+
+      -- Test '/' enters search mode
+      state.State.input_focused = false
+      map_by_lhs["/"]()
+      assert.is_true(state.State.input_focused, "'/' should enter search mode")
+
+      -- Test '<BS>' clears last char and enters insert mode
+      vim.api.nvim_buf_set_lines(input_buf, 0, 1, false, { "tag1 tag2" })
+      vim.api.nvim_win_set_cursor(state.UI.wins.input, { 1, 9 })
+      map_by_lhs["<BS>"]()
+      local new_text = vim.api.nvim_buf_get_lines(input_buf, 0, 1, false)[1]
+      assert.are.equal("tag1 tag", new_text)
+      assert.is_true(state.State.input_focused)
+    end)
+
+    it("Issue 0.4: exit_input displays friendly status hint when State.posts is empty", function()
+      ui.open()
+      state.State.posts = {}
+
+      ui.enter_search()
+      assert.is_true(state.State.input_focused)
+
+      local input_maps = vim.api.nvim_buf_get_keymap(state.UI.bufs.input, "n")
+      local esc_cb = nil
+      for _, km in ipairs(input_maps) do
+        if km.lhs == "<Esc>" then esc_cb = km.callback end
+      end
+      assert.is_not_nil(esc_cb)
+
+      esc_cb()
+      assert.is_false(state.State.input_focused)
+
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_true(#status_lines >= 1)
+      assert.is_truthy(status_lines[1]:find("Empty search query%. Press %[/ or i%] to type tags, %[q%] to exit"),
+        "Status line must display empty search query hint: " .. tostring(status_lines[1]))
+    end)
+  end)
 end)

@@ -5,17 +5,35 @@ local tags = require("gelbooru.tags")
 
 local M = {}
 
-function M.update_autocomplete()
+function M.update_autocomplete(query)
   local State = state.State
   local UI = state.UI
 
   State.autocomplete_filtered = {}
-  local full = (UI.bufs.input and vim.api.nvim_buf_is_valid(UI.bufs.input))
-      and (vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or "")
-    or ""
-  local query_part = full:match("(%S*)$") or ""
+  local full = query
+  if not full then
+    full = (UI.bufs.input and vim.api.nvim_buf_is_valid(UI.bufs.input))
+        and (vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or "")
+      or ""
+  end
+
+  local query_part = nil
+  if UI.wins.input and vim.api.nvim_win_is_valid(UI.wins.input) then
+    local ok, cursor = pcall(vim.api.nvim_win_get_cursor, UI.wins.input)
+    if ok and cursor and type(cursor[2]) == "number" then
+      local col = cursor[2]
+      if col > 0 and col < #full then
+        query_part = full:sub(1, col):match("(%S*)$")
+      end
+    end
+  end
+  if not query_part then
+    query_part = full:match("(%S*)$") or ""
+  end
+
   local search_target = query_part:gsub("^[-~]", ""):lower()
   local target_norm = util.normalize_str(search_target)
+  local has_norm = target_norm ~= "" and #target_norm > 0
 
   if search_target == "" then
     for i = 1, math.min(300, #State.all_tags) do
@@ -42,13 +60,13 @@ function M.update_autocomplete()
             local base = 0
             if nl == search_target then
               base = 35.0
-            elseif t.norm == target_norm then
+            elseif has_norm and t.norm == target_norm then
               base = 30.0
             elseif vim.startswith(nl, search_target) then
               base = 20.0
-            elseif vim.startswith(t.norm, target_norm) then
+            elseif has_norm and vim.startswith(t.norm, target_norm) then
               base = 15.0
-            elseif not prefix_only and (nl:find(search_target, 1, true) or t.norm:find(target_norm, 1, true)) then
+            elseif not prefix_only and (nl:find(search_target, 1, true) or (has_norm and t.norm:find(target_norm, 1, true))) then
               base = 5.0
             end
 
@@ -100,7 +118,7 @@ function M.update_autocomplete()
           local typ = tonumber(t.t) or 0
           if (typ == 5 or count >= 1) and not seen_names[t.n_lower] then
             local nl = t.n_lower
-            if nl:find(search_target, 1, true) or t.norm:find(target_norm, 1, true) then
+            if nl:find(search_target, 1, true) or (has_norm and t.norm:find(target_norm, 1, true)) then
               seen_names[nl] = true
               local pop = (typ == 5) and 0 or (math.log10(count + 1) * 10.0)
               local score = (typ == 5) and 1000.0 or (5.0 + pop + (cat_nudge or 0))
@@ -147,11 +165,18 @@ function M.update_autocomplete()
     end
   end
 
+  M.render_candidates()
+end
+
+function M.render_candidates()
+  local State = state.State
+  local UI = state.UI
+
   if not State.input_focused then
     return
   end
 
-  if #State.autocomplete_filtered == 0 then
+  if not State.autocomplete_filtered or #State.autocomplete_filtered == 0 then
     util.set_lines(UI.bufs.ac, { "  (no matches - searching live tags…)" })
     return
   end
@@ -166,10 +191,26 @@ function M.update_autocomplete()
   end
   util.set_lines(UI.bufs.ac, lines)
 
-  State.autocomplete_cur = math.max(0, math.min(State.autocomplete_cur, #State.autocomplete_filtered))
-  if vim.api.nvim_win_is_valid(UI.wins.ac) then
+  State.autocomplete_cur = math.max(0, math.min(State.autocomplete_cur or 0, #State.autocomplete_filtered))
+  if UI.wins.ac and vim.api.nvim_win_is_valid(UI.wins.ac) then
     pcall(vim.api.nvim_win_set_cursor, UI.wins.ac, { math.max(1, State.autocomplete_cur), 0 })
   end
 end
+
+M.render = M.render_candidates
+
+function M.navigate(dir)
+  local State = state.State
+  if not State.autocomplete_filtered then
+    State.autocomplete_filtered = {}
+  end
+
+  State.autocomplete_navigated = true
+  State.autocomplete_cur = math.max(0, math.min(#State.autocomplete_filtered, (State.autocomplete_cur or 0) + dir))
+
+  M.render_candidates()
+end
+
+M.update_suggestions = M.update_autocomplete
 
 return M

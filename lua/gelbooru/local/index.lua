@@ -5,7 +5,10 @@ local util = require("gelbooru.core.util")
 
 local M = {}
 
-local _last_mtime = nil
+M._last_mtime = 0
+M._scanned_dir = nil
+
+local _last_mtime = 0
 local _last_dir = nil
 local _has_scanned = false
 
@@ -82,6 +85,8 @@ function M.update_saved_index(dir_override)
   _last_mtime = mtime
   _last_dir = target_dir
   _has_scanned = true
+  M._last_mtime = mtime
+  M._scanned_dir = target_dir
 
   return State.saved_index
 end
@@ -113,6 +118,8 @@ function M.mark_saved(id, ext)
       _last_mtime = stat.mtime.sec or stat.mtime
       _last_dir = target_dir
       _has_scanned = true
+      M._last_mtime = _last_mtime
+      M._scanned_dir = _last_dir
     end
   end
 end
@@ -130,9 +137,11 @@ function M.is_saved(id)
 end
 
 function M.reset()
-  _last_mtime = nil
+  _last_mtime = 0
   _last_dir = nil
   _has_scanned = false
+  M._last_mtime = 0
+  M._scanned_dir = nil
   if state.State then
     state.State.saved_index = {}
   end

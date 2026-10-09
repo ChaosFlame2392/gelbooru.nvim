@@ -78,7 +78,7 @@ function M.fetch(direction)
       util.set_lines(UI.bufs.meta, {})
       return
     end
-    local ok, data = pcall(vim.fn.json_decode, body)
+    local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
     if not ok or not data or not data.post then
       ui.set_status("No results" .. (State.query ~= "" and (" for: " .. State.query) or ""))
       ui.render_list()
@@ -147,6 +147,11 @@ function M.execute_search(query)
     return
   end
 
+  download.cancel_prefetch_timers()
+  pcall(function()
+    require("gelbooru.local.indexer").stop()
+  end)
+
   clear_preview_loading()
 
   State.search_epoch = (State.search_epoch or 0) + 1
@@ -166,10 +171,13 @@ function M.execute_search(query)
     if clean_word ~= "" and not clean_word:find(":") and not State.tags_by_name[clean_word] then
       local url = string.format("%s&names=%s%s", config.options.tags_api, util.url_encode(clean_word), util.auth_qs())
       download.curl_async(url, function(body)
+        if state.State.torn_down then
+          return
+        end
         if not body then
           return
         end
-        local ok, data = pcall(vim.fn.json_decode, body)
+        local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
         if ok and data and data.tag then
           local tag_list = ensure_array(data.tag)
           for _, t in ipairs(tag_list) do
@@ -303,7 +311,7 @@ function M.fetch_post_by_id(id, cb)
       if cb then cb(nil) end
       return
     end
-    local ok, data = pcall(vim.fn.json_decode, body)
+    local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
     if not ok or not data or not data.post then
       if cb then cb(nil) end
       return

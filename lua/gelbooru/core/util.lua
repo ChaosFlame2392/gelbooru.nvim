@@ -15,7 +15,7 @@ function M.load_auth()
   end
   local raw = f:read("*a")
   f:close()
-  local ok, t = pcall(vim.fn.json_decode, raw)
+  local ok, t = pcall(vim.json and vim.json.decode or vim.fn.json_decode, raw)
   _auth_cache = (ok and type(t) == "table") and t or {}
   return _auth_cache
 end
@@ -132,7 +132,7 @@ function M.read_json(path)
   end
   local raw = f:read("*a")
   f:close()
-  local ok, data = pcall(vim.fn.json_decode, raw)
+  local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, raw)
   return (ok and type(data) == "table") and data or nil
 end
 
@@ -164,11 +164,19 @@ function M.open_url(url)
     return false
   end
   if vim.ui and vim.ui.open then
-    pcall(vim.ui.open, url)
+    local ok = pcall(vim.ui.open, url)
+    if ok then
+      return true
+    end
+  end
+  if vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1 then
+    pcall(vim.fn.jobstart, { "cmd.exe", "/c", "start", '""', url }, { detach = true })
+    return true
+  elseif vim.fn.has("mac") == 1 then
+    pcall(vim.fn.jobstart, { "open", url }, { detach = true })
     return true
   else
-    local cmd = vim.fn.has("mac") == 1 and "open" or (vim.fn.has("win32") == 1 and "start" or "xdg-open")
-    pcall(vim.fn.system, { cmd, url })
+    pcall(vim.fn.jobstart, { "xdg-open", url }, { detach = true })
     return true
   end
 end
@@ -177,10 +185,8 @@ function M.open_media(target)
   if not target or target == "" then
     return false
   end
-  -- Prioritize mpv for videos if available, otherwise fallback to system opener
-  local ext = target:match("%.([^%.]+)$")
-  if ext and (ext:lower() == "mp4" or ext:lower() == "webm") and vim.fn.executable("mpv") == 1 then
-    pcall(vim.fn.jobstart, { "mpv", target }, { detach = true })
+  if config.options.media_player and config.options.media_player ~= "" then
+    pcall(vim.fn.jobstart, { config.options.media_player, target }, { detach = true })
     return true
   end
   return M.open_url(target)

@@ -15,6 +15,7 @@ M.image = image
 M.autocomplete = autocomplete
 
 local RESIZE_DEBOUNCE_MS = 100
+local _syncing_cursor = false
 
 -- Layout cache: recomputed only on resize or show_meta / zen_mode / ratio toggle, not every render.
 local _layout_cache = nil
@@ -117,7 +118,7 @@ function M.teardown()
       pcall(vim.api.nvim_win_close, w, true)
     end
   end
-  for _, k in ipairs({ "hdiv", "meta", "ac" }) do
+  for _, k in ipairs({ "img", "hdiv", "meta", "ac" }) do
     local b = UI.bufs[k]
     if b and vim.api.nvim_buf_is_valid(b) then
       pcall(vim.api.nvim_buf_delete, b, { force = true })
@@ -198,8 +199,12 @@ function M.calc_layout(force)
   local main_h = math.max(1, H - input_h - 4)
   local ratio = math.max(0.10, math.min(0.40, State.list_width_ratio or 0.25))
 
-  local meta_h = State.show_meta and math.min(12, math.floor(main_h * 0.35)) or 0
-  local img_h = math.max(1, main_h - meta_h - (State.show_meta and 1 or 0))
+  local meta_h = State.show_meta and math.max(0, math.min(12, math.floor(main_h * 0.35))) or 0
+  local has_meta = State.show_meta and meta_h > 0
+  if not has_meta then
+    meta_h = 0
+  end
+  local img_h = has_meta and math.max(1, main_h - meta_h - 1) or math.max(1, main_h)
 
   local l = {
     _TW = TW, _TH = TH, -- cache keys
@@ -215,16 +220,16 @@ function M.calc_layout(force)
     l.list = { row = R + 3, col = C + 1, width = 1, height = main_h, hide = true }
     l.vdiv = { row = R + 3, col = C + 1, width = 1, height = main_h, hide = true }
     l.img = { row = R + 3, col = C + 1, width = prev_w, height = img_h }
-    l.hdiv = State.show_meta and { row = R + 3 + img_h, col = C + 1, width = prev_w, height = 1 } or nil
-    l.meta = State.show_meta and { row = R + 3 + img_h + 1, col = C + 1, width = prev_w, height = meta_h } or nil
+    l.hdiv = has_meta and { row = R + 3 + img_h, col = C + 1, width = prev_w, height = 1 } or nil
+    l.meta = has_meta and { row = R + 3 + img_h + 1, col = C + 1, width = prev_w, height = meta_h } or nil
   else
     local list_w = math.max(1, math.floor(W * ratio))
     local prev_w = math.max(1, W - list_w - 3)
     l.list = { row = R + 3, col = C + 1, width = list_w, height = main_h }
     l.vdiv = { row = R + 3, col = C + 1 + list_w, width = 1, height = main_h }
     l.img = { row = R + 3, col = C + 1 + list_w + 1, width = prev_w, height = img_h }
-    l.hdiv = State.show_meta and { row = R + 3 + img_h, col = C + 1 + list_w + 1, width = prev_w, height = 1 } or nil
-    l.meta = State.show_meta and { row = R + 3 + img_h + 1, col = C + 1 + list_w + 1, width = prev_w, height = meta_h } or nil
+    l.hdiv = has_meta and { row = R + 3 + img_h, col = C + 1 + list_w + 1, width = prev_w, height = 1 } or nil
+    l.meta = has_meta and { row = R + 3 + img_h + 1, col = C + 1 + list_w + 1, width = prev_w, height = meta_h } or nil
   end
 
   _layout_cache = l
@@ -391,10 +396,12 @@ function M.render_list()
     end
     lines = { State.loading and "  Fetching…" or no_res_msg }
   end
+  _syncing_cursor = true
   util.set_lines(UI.bufs.list, lines)
   if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
     pcall(vim.api.nvim_win_set_cursor, UI.wins.list, { math.max(1, State.cur), 0 })
   end
+  _syncing_cursor = false
 end
 
 local function is_same_post(p1, p2)
@@ -769,7 +776,7 @@ function M.ensure_ui()
   if State.prev_mouse == nil then
     State.prev_mouse = vim.o.mouse
   end
-  vim.o.mouse = ""
+  vim.o.mouse = "a"
   local api = require("gelbooru.net.api")
 
   util.ensure(config.options.cache_dir)
@@ -793,6 +800,7 @@ function M.ensure_ui()
   UI.bufs.list = util.scratch()
   UI.bufs.vdiv = util.scratch()
   UI.bufs.img = util.scratch()
+  vim.bo[UI.bufs.img].bufhidden = "hide"
   UI.bufs.hdiv = util.scratch()
   vim.bo[UI.bufs.hdiv].bufhidden = "hide"
   UI.bufs.meta = util.scratch()
@@ -870,6 +878,9 @@ function M.ensure_ui()
       pcall(vim.api.nvim_set_current_win, UI.wins.list)
     end
     handle_resize()
+    if #State.posts == 0 then
+      M.set_status("Empty search query. Press [/ or i] to type tags, [q] to exit")
+    end
   end
 
   vim.api.nvim_create_autocmd("InsertLeave", {
@@ -927,6 +938,41 @@ function M.ensure_ui()
     callback = M.teardown,
   })
 
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = UI.aug,
+    buffer = UI.bufs.list,
+    callback = function()
+      if _syncing_cursor or State.torn_down then
+        return
+      end
+      if not UI.wins.list or not vim.api.nvim_win_is_valid(UI.wins.list) then
+        return
+      end
+      if vim.api.nvim_get_current_win() ~= UI.wins.list then
+        return
+      end
+      local ok, cursor = pcall(vim.api.nvim_win_get_cursor, UI.wins.list)
+      if not ok or not cursor then
+        return
+      end
+      local line = cursor[1]
+      if #State.posts > 0 and line ~= State.cur and line <= #State.posts and line >= 1 then
+        State.scroll_dir = (line > State.cur) and 1 or -1
+        State.cur = line
+        if State.history[State.history_idx] then
+          State.history[State.history_idx].cur = State.cur
+        end
+        _syncing_cursor = true
+        M.render_list()
+        _syncing_cursor = false
+        M.render_preview(false)
+        if State.cur >= #State.posts - 5 then
+          api.fetch(1)
+        end
+      end
+    end,
+  })
+
   -- Keymaps for List
   local function lm(key, fn)
     util.keymap(UI.bufs.list, "n", key, fn)
@@ -940,7 +986,7 @@ function M.ensure_ui()
   lm("<S-Tab>", function()
     api.fetch(-1)
   end)
-  lm("R", function()
+  local function force_refresh()
     local p = State.posts[State.cur]
     if p and p.is_local and p.id then
       local meta_path = util.meta_cache_path(p.id)
@@ -950,17 +996,28 @@ function M.ensure_ui()
       p._metadata_fetched = nil
     end
     M.render_preview(true)
-  end)
-  lm("r", function()
-    State.cur_id = nil
-    M.render_preview(false)
-  end)
-  lm("j", function()
+  end
+  M.force_refresh = force_refresh
+
+  local function on_cursor_change(action)
     if #State.posts == 0 then
       return
     end
-    State.cur = math.min(State.cur + 1, #State.posts)
-    State.scroll_dir = 1
+    if action == 1 or action == "j" then
+      State.cur = math.min(State.cur + 1, #State.posts)
+      State.scroll_dir = 1
+    elseif action == -1 or action == "k" then
+      State.cur = math.max(State.cur - 1, 1)
+      State.scroll_dir = -1
+    elseif action == "gg" then
+      State.cur = 1
+      State.scroll_dir = -1
+    elseif action == "G" then
+      State.cur = #State.posts
+      State.scroll_dir = 1
+    elseif type(action) == "number" then
+      State.cur = math.max(1, math.min(#State.posts, action))
+    end
     if State.history[State.history_idx] then
       State.history[State.history_idx].cur = State.cur
     end
@@ -969,18 +1026,25 @@ function M.ensure_ui()
     if State.cur >= #State.posts - 5 then
       api.fetch(1)
     end
+  end
+  M.on_cursor_change = on_cursor_change
+
+  lm("R", force_refresh)
+  lm("r", function()
+    State.cur_id = nil
+    M.render_preview(false)
+  end)
+  lm("j", function()
+    on_cursor_change(1)
   end)
   lm("k", function()
-    if #State.posts == 0 then
-      return
-    end
-    State.cur = math.max(State.cur - 1, 1)
-    State.scroll_dir = -1
-    if State.history[State.history_idx] then
-      State.history[State.history_idx].cur = State.cur
-    end
-    M.render_list()
-    M.render_preview(false)
+    on_cursor_change(-1)
+  end)
+  lm("gg", function()
+    on_cursor_change("gg")
+  end)
+  lm("G", function()
+    on_cursor_change("G")
   end)
 
   local function open_web_page()
@@ -991,6 +1055,7 @@ function M.ensure_ui()
     end
     util.open_url(string.format("https://gelbooru.com/index.php?page=post&s=view&id=%s", tostring(p.id)))
   end
+  M.open_web_page = open_web_page
 
   local function open_media_viewer()
     local p = State.posts[State.cur]
@@ -1024,13 +1089,22 @@ function M.ensure_ui()
       end)
     end
   end
+  M.open_media_viewer = open_media_viewer
 
   local function toggle_zen()
     State.zen_mode = not State.zen_mode
     local l = M.calc_layout(true)
     M.apply_layout(l)
-    if not State.zen_mode then
+    if State.zen_mode then
       if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+        vim.wo[UI.wins.list].cursorline = false
+      end
+      if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) then
+        pcall(vim.api.nvim_set_current_win, UI.wins.img)
+      end
+    else
+      if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+        vim.wo[UI.wins.list].cursorline = true
         pcall(vim.api.nvim_set_current_win, UI.wins.list)
       end
       M.render_list()
@@ -1151,6 +1225,18 @@ function M.ensure_ui()
 
   local function submit_input()
     local full = vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or ""
+    if State.autocomplete_navigated and State.autocomplete_cur > 0 then
+      local t = State.autocomplete_filtered[State.autocomplete_cur]
+      if t then
+        local last_word = full:match("(%S*)$") or ""
+        local prefix = full:sub(1, #full - #last_word)
+        local sign = last_word:match("^([-~])") or ""
+        full = prefix .. sign .. t.n
+        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { full })
+        State.autocomplete_cur = 0
+        State.autocomplete_navigated = false
+      end
+    end
     full = full:match("^%s*(.-)%s*$")
     exit_input()
     api.execute_search(full)
@@ -1164,7 +1250,7 @@ function M.ensure_ui()
   im_n("<CR>", submit_input)
   im_i("<CR>", submit_input)
 
-  for _, k in ipairs({ "i", "I", "a", "A", "s", "S" }) do
+  for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
     im_n(k, function()
       vim.cmd("startinsert!")
       State.input_focused = true
@@ -1173,15 +1259,38 @@ function M.ensure_ui()
     end)
   end
 
-  local function nav_down()
-    State.autocomplete_navigated = true
-    State.autocomplete_cur = math.min(State.autocomplete_cur + 1, #State.autocomplete_filtered)
+  local function handle_input_bs()
+    local line = vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or ""
+    local cursor = vim.api.nvim_win_get_cursor(UI.wins.input)
+    local col = cursor[2]
+    if #line > 0 then
+      if col >= #line - 1 then
+        local new_line = line:sub(1, -2)
+        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_line })
+        pcall(vim.api.nvim_win_set_cursor, UI.wins.input, { 1, #new_line })
+      elseif col > 0 then
+        local new_line = line:sub(1, col - 1) .. line:sub(col + 1)
+        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_line })
+        pcall(vim.api.nvim_win_set_cursor, UI.wins.input, { 1, math.max(0, col - 1) })
+      else
+        local new_line = line:sub(2)
+        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_line })
+        pcall(vim.api.nvim_win_set_cursor, UI.wins.input, { 1, 0 })
+      end
+    end
+    vim.cmd("startinsert!")
+    State.input_focused = true
     autocomplete.update_autocomplete()
+    handle_resize()
+  end
+  im_n("<BS>", handle_input_bs)
+  im_n("<C-h>", handle_input_bs)
+
+  local function nav_down()
+    autocomplete.navigate(1)
   end
   local function nav_up()
-    State.autocomplete_navigated = true
-    State.autocomplete_cur = math.max(State.autocomplete_cur - 1, 0)
-    autocomplete.update_autocomplete()
+    autocomplete.navigate(-1)
   end
   im_i("<Down>", nav_down)
   im_i("<C-n>", nav_down)
