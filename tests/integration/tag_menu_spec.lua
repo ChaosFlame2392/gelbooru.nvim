@@ -302,7 +302,7 @@ describe("Integration: Interactive Tag Picker Modal ('t' / 'T')", function()
     ui.open()
     state.State.posts = vim.deepcopy(mock_net.sample_posts)
     state.State.cur = 1
-    ui.render_list()
+    vim.api.nvim_set_current_win(state.UI.wins.list)
     ui.open_tag_modal()
 
     local search_invoked = false
@@ -318,6 +318,7 @@ describe("Integration: Interactive Tag Picker Modal ('t' / 'T')", function()
 
     assert.is_nil(state.UI.wins.tag_modal)
     assert.is_false(search_invoked)
+    assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "focus must return to list after modal dismiss")
 
     -- Test <Esc>
     ui.open_tag_modal()
@@ -328,8 +329,72 @@ describe("Integration: Interactive Tag Picker Modal ('t' / 'T')", function()
 
     assert.is_nil(state.UI.wins.tag_modal)
     assert.is_false(search_invoked)
+    assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "focus must return to list after modal dismiss")
 
     api.execute_search = orig_search
+  end)
+
+  it("restores focus to meta window when opened from meta and dismissed", function()
+    ui.open()
+    state.State.posts = vim.deepcopy(mock_net.sample_posts)
+    state.State.cur = 1
+    ui.render_list()
+    ui.render_metadata(state.State.posts[1])
+    vim.api.nvim_set_current_win(state.UI.wins.meta)
+
+    ui.open_tag_modal()
+    assert.is_not_nil(state.UI.wins.tag_modal)
+    local q_cb = get_keymap_cb(state.UI.bufs.tag_modal, "n", "q")
+    q_cb()
+
+    assert.is_nil(state.UI.wins.tag_modal)
+    assert.are.equal(state.UI.wins.meta, vim.api.nvim_get_current_win(), "focus must return to meta window")
+  end)
+
+  it("toggles tag exclusion with '-' or 'x' and commits with '-' prefix on <CR>", function()
+    ui.open()
+    state.State.posts = vim.deepcopy(mock_net.sample_posts)
+    state.State.cur = 1
+    ui.render_list()
+    ui.open_tag_modal()
+
+    local modal_buf = state.UI.bufs.tag_modal
+    local minus_cb = get_keymap_cb(modal_buf, "n", "-")
+    assert.is_not_nil(minus_cb, "'-' keymap must be registered for tag exclusion")
+
+    minus_cb()
+    local lines = harness.get_buf_lines(modal_buf)
+    assert.is_truthy(lines[1]:find("^%[%-%]"), "first tag should have [-] exclusion badge")
+
+    local executed_query = nil
+    local orig_search = api.execute_search
+    api.execute_search = function(q)
+      executed_query = q
+    end
+
+    local cr_cb = get_keymap_cb(modal_buf, "n", "<CR>")
+    cr_cb()
+
+    assert.is_not_nil(executed_query)
+    assert.is_truthy(executed_query:find("^%-"), "query should start with '-' exclusion prefix")
+
+    api.execute_search = orig_search
+  end)
+
+  it("open_tag_modal does not crash or produce negative width on narrow terminal", function()
+    local orig_cols = vim.o.columns
+    vim.o.columns = 25
+    ui.open()
+    state.State.posts = { { id = "1", tags = "hatsune_miku 1girl", rating = "g", score = 0 } }
+    state.State.cur = 1
+    local ok = pcall(ui.open_tag_modal)
+    assert.is_true(ok, "open_tag_modal must not throw on narrow terminal")
+    if state.UI.wins.tag_modal then
+      local cfg = vim.api.nvim_win_get_config(state.UI.wins.tag_modal)
+      assert.is_true(cfg.width >= 1, "modal width must be >= 1")
+      ui.close_tag_modal()
+    end
+    vim.o.columns = orig_cols
   end)
 
   it("cleans up tag modal handles on ui.teardown()", function()

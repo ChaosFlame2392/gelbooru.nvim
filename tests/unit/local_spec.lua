@@ -2676,6 +2676,31 @@ describe("Multi-Stage Piped Sorting Pipeline (parse_pipeline & execute_pipeline)
       assert.are.equal("1", sliced3[1].id)
       assert.are.equal("20", sliced3[20].id)
     end)
+
+    it("handles inverted range bounds (50..10) gracefully without throwing error", function()
+      local p = local_query.parse_pipeline("sort:id:asc:50..10")
+      assert.is_not_nil(p)
+    end)
+
+    it("handles non-numeric range bounds (abc..def) gracefully without throwing error", function()
+      local ok, res = pcall(local_query.parse_pipeline, "sort:id:asc:abc..def")
+      assert.is_true(ok)
+      assert.is_not_nil(res)
+    end)
+
+    it("handles empty pipeline stage (| |) without throwing error", function()
+      local ok, p = pcall(local_query.parse_pipeline, "tag1 | | sort:score")
+      assert.is_true(ok)
+      assert.is_not_nil(p)
+    end)
+
+    it("is_saved returns false when ID is in State.pending_deletions", function()
+      local local_index = require("gelbooru.local.index")
+      state.State.saved_index = { [1001] = "jpg" }
+      state.State.pending_deletions = { ["1001"] = { path = "/tmp/1001.jpg", id = "1001" } }
+      assert.is_false(local_index.is_saved(1001))
+      state.State.pending_deletions = {}
+    end)
   end)
 end)
 

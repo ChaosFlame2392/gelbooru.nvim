@@ -189,6 +189,42 @@ describe("Integration: Autocomplete Engine", function()
       assert.are.equal(17, cur[2]) -- #"" + #"-" + #"rating:explicit" + 1 = 17
     end)
 
+    it("replaces token under cursor with | pipe prefix preserved", function()
+      ui.open()
+      local text = "|rating:expli tag1"
+      vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { text })
+      vim.api.nvim_win_set_cursor(state.UI.wins.input, { 1, 13 })
+
+      state.State.autocomplete_filtered = { { n = "rating:explicit" } }
+      state.State.autocomplete_cur = 1
+      state.State.autocomplete_navigated = true
+
+      local space_cb = get_keymap_cb(state.UI.bufs.input, "i", "<Space>")
+      assert.is_not_nil(space_cb)
+      space_cb()
+
+      local lines = vim.api.nvim_buf_get_lines(state.UI.bufs.input, 0, 1, false)
+      assert.are.equal("|rating:explicit  tag1", lines[1])
+    end)
+
+    it("replaces token under cursor with ~ tilde prefix preserved", function()
+      ui.open()
+      local text = "~rating:expli tag1"
+      vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { text })
+      vim.api.nvim_win_set_cursor(state.UI.wins.input, { 1, 13 })
+
+      state.State.autocomplete_filtered = { { n = "rating:explicit" } }
+      state.State.autocomplete_cur = 1
+      state.State.autocomplete_navigated = true
+
+      local space_cb = get_keymap_cb(state.UI.bufs.input, "i", "<Space>")
+      assert.is_not_nil(space_cb)
+      space_cb()
+
+      local lines = vim.api.nvim_buf_get_lines(state.UI.bufs.input, 0, 1, false)
+      assert.are.equal("~rating:explicit  tag1", lines[1])
+    end)
+
     it("completes token under cursor with <CR> (submit_input) without extra space and executes search", function()
       ui.open()
       local executed_query = nil

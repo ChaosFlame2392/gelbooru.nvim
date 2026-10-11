@@ -79,6 +79,7 @@ function M.reset_query_state()
   M.State.list_width_ratio = 0.25
   M.State.zen_mode = false
   M.State.saved_index = {}
+  M.State.pending_deletions = {}
   M.State.session_cache = {}
   M.State.local_folder_posts = nil
   M.State.local_filter = nil

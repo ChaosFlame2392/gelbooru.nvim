@@ -1445,5 +1445,102 @@ describe("Integration: Local Folder Browser Mode", function()
 
       vim.ui.select = orig_select
     end)
+
+    it("shows 'already scheduled' status if d is pressed twice on same post", function()
+      local target_file = tmp_dir .. "/1001.jpg"
+      ui.open_local(tmp_dir)
+
+      local orig_select = vim.ui.select
+      vim.ui.select = function(items, opts, on_choice)
+        on_choice("Yes, delete file")
+      end
+
+      local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
+      d_cb()
+
+      -- Second press on same post
+      d_cb()
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_truthy(status_lines[1]:find("already scheduled") or status_lines[1]:find("Already scheduled"))
+
+      vim.ui.select = orig_select
+      ui.teardown()
+    end)
+
+    it("floating confirmation modal allows navigation with j/k and confirm with <CR>", function()
+      local target_file = tmp_dir .. "/1001.jpg"
+      ui.open_local(tmp_dir)
+
+      local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
+      d_cb()
+
+      assert.is_not_nil(state.UI.wins.confirm_modal)
+      assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.confirm_modal))
+
+      local modal_buf = state.UI.bufs.confirm_modal
+      local j_cb = get_keymap_cb(modal_buf, "n", "j")
+      local k_cb = get_keymap_cb(modal_buf, "n", "k")
+      local cr_cb = get_keymap_cb(modal_buf, "n", "<CR>")
+
+      -- Navigate down to Cancel then up to Yes
+      j_cb()
+      local lines_cancel = harness.get_buf_lines(modal_buf)
+      assert.is_truthy(lines_cancel[5]:find("▶ Cancel"))
+
+      k_cb()
+      local lines_yes = harness.get_buf_lines(modal_buf)
+      assert.is_truthy(lines_yes[4]:find("▶ Yes"))
+
+      -- Press <CR> on Yes
+      cr_cb()
+      assert.is_nil(state.UI.wins.confirm_modal)
+      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+
+      ui.teardown()
+      assert.are.equal(0, vim.fn.filereadable(target_file))
+    end)
+
+    it("pending deletion survives history navigation without being cleared", function()
+      local target_file = tmp_dir .. "/1001.jpg"
+      ui.open_local(tmp_dir)
+
+      local orig_select = vim.ui.select
+      vim.ui.select = function(items, opts, on_choice)
+        on_choice("Yes, delete file")
+      end
+
+      local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
+      d_cb()
+      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+
+      -- Navigate history
+      local history = require("gelbooru.core.history")
+      history.push_history("test_query")
+      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+
+      history.history_prev()
+      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+
+      vim.ui.select = orig_select
+      ui.teardown()
+      assert.are.equal(0, vim.fn.filereadable(target_file))
+    end)
+
+    it("clears State.pending_deletions table on ui.teardown()", function()
+      local target_file = tmp_dir .. "/1001.jpg"
+      ui.open_local(tmp_dir)
+
+      local orig_select = vim.ui.select
+      vim.ui.select = function(items, opts, on_choice)
+        on_choice("Yes, delete file")
+      end
+
+      local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
+      d_cb()
+
+      ui.teardown()
+      assert.are.equal(0, vim.tbl_count(state.State.pending_deletions or {}))
+      vim.ui.select = orig_select
+    end)
   end)
 end)

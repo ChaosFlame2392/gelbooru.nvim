@@ -1014,31 +1014,35 @@ describe("Integration: Search & List flow", function()
       assert.are.equal("-hatsune_miku ", committed_line)
     end)
 
-    it("Issue 6: ~sort:/~order: are stripped; ~rating:/~score:/~id: are preserved as valid OR syntax", function()
-      -- ~rating:, ~score:, ~id: are valid Gelbooru OR-syntax — must be sent as-is
-      assert.are.equal("~rating:general", api.normalize_remote_tags("~rating:general"))
-      assert.are.equal("~rating:explicit", api.normalize_remote_tags("~rating:explicit"))
-      assert.are.equal("~score:100", api.normalize_remote_tags("~score:100"))
-      assert.are.equal("~score:>=50", api.normalize_remote_tags("~score:>=50"))
-      assert.are.equal("~id:12345", api.normalize_remote_tags("~id:12345"))
-      -- Multiple ~rating: is valid OR syntax (e.g. explicit OR questionable)
+    it("Issue 6: ~sort:/~order: are stripped; ratings translate to native Gelbooru syntax, and tags are normalized", function()
+      -- Ratings: single rating translates directly to rating:<name>
+      assert.are.equal("rating:general", api.normalize_remote_tags("~rating:general"))
+      assert.are.equal("rating:explicit", api.normalize_remote_tags("~rating:explicit"))
+      assert.are.equal("rating:questionable", api.normalize_remote_tags("~rating:questionable"))
+
+      -- Rating OR (e.g. explicit OR questionable): translates to native exclusions of unselected ratings
       assert.are.equal(
-        "~rating:explicit ~rating:questionable",
-        api.normalize_remote_tags("~rating:explicit ~rating:questionable")
+        "zenless_zone_zero -rating:general -rating:sensitive",
+        api.normalize_remote_tags("zenless_zone_zero ~rating:explicit ~rating:questionable")
       )
-      -- Plain tag tildes (booru OR for regular tags) always preserved
-      assert.are.equal("~hatsune_miku ~megurine_luka", api.normalize_remote_tags("~hatsune_miku ~megurine_luka"))
-      -- Mixed: all OR-syntax preserved as-is
-      assert.are.equal(
-        "~hatsune_miku ~rating:general ~score:>=100 ~id:555",
-        api.normalize_remote_tags("~hatsune_miku ~rating:general ~score:>=100 ~id:555")
-      )
+
+      -- Single tag with ~: "1 out of 1 is just 1", stripped so Gelbooru finds it
+      assert.are.equal("foot_focus", api.normalize_remote_tags("~foot_focus"))
+      assert.are.equal("score:100", api.normalize_remote_tags("~score:100"))
+      assert.are.equal("id:12345", api.normalize_remote_tags("~id:12345"))
+
+      -- Multi-tag OR returns executable branches:
+      local branches = api.normalize_remote_query("~foot_focus ~soles")
+      assert.are.equal(2, #branches)
+      assert.are.equal("foot_focus", branches[1])
+      assert.are.equal("soles", branches[2])
+
       -- Only ~sort: and ~order: (sorting directives, not filterable tags) get ~ stripped
       assert.are.equal("sort:score", api.normalize_remote_tags("~sort:score"))
       assert.are.equal("sort:id:desc", api.normalize_remote_tags("~sort:id:desc"))
       assert.are.equal("order:id:desc", api.normalize_remote_tags("~order:id:desc"))
 
-      -- Integration: verify remote curl query sends ~rating: and ~score: as-is
+      -- Integration: verify remote curl query sends native -rating:general -rating:sensitive for rating OR
       ui.open()
       local download = require("gelbooru.net.download")
       local orig_curl_async = download.curl_async
@@ -1058,7 +1062,7 @@ describe("Integration: Search & List flow", function()
         end
       end
 
-      -- zenless_zone_zero ~rating:explicit ~rating:questionable — all three tags sent as-is
+      -- zenless_zone_zero ~rating:explicit ~rating:questionable sends native query without ~
       api.execute_search("zenless_zone_zero ~rating:explicit ~rating:questionable")
       vim.wait(200, function()
         return not state.State.loading and #state.State.posts > 0
@@ -1066,10 +1070,10 @@ describe("Integration: Search & List flow", function()
 
       assert.is_true(#captured_urls > 0)
       local req_url = captured_urls[1]
-      -- ~rating: must be preserved in the outgoing URL (URL-encoded as %7Erating%3A or ~rating%3A)
+      -- Gelbooru requires -rating:general and -rating:sensitive to match explicit or questionable
       assert.is_truthy(
-        req_url:find("%%7Erating") or req_url:find("~rating") or req_url:find("%%7erating"),
-        "~rating: must be preserved in outgoing API URL, got: " .. req_url
+        req_url:find("%%2Drating%%3Ageneral") or req_url:find("%-rating:general") or req_url:find("rating%%3Ageneral"),
+        "outgoing URL must exclude general rating, got: " .. req_url
       )
 
       -- ~sort: IS stripped — verify

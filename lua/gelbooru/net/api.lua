@@ -47,18 +47,133 @@ end
 --- Normalizes query modifiers for Gelbooru API compatibility.
 --- Gelbooru DAPI accepts ~ strictly on tags (~hatsune_miku ~megurine_luka),
 --- but rejects ~rating:..., ~score:..., or ~id:..., returning 0 results.
+--- Normalizes raw query tokens for remote Gelbooru API querying.
+--- Gelbooru's dapi does not support native `~` syntax on tags or ratings.
+--- This parses query tokens and returns a list of executable remote query branch strings:
+--- 1. ~sort: and ~order: have `~` stripped.
+--- 2. Ratings:
+---    - Single rating (e.g. `~rating:questionable` or `rating:q`): returns `rating:questionable`
+---    - Multiple OR ratings (e.g. `~rating:explicit ~rating:questionable`, `rating:q,e`, `rating:q|e`):
+---      Gelbooru does not have positive rating OR, but supports `-rating:tag`.
+---      Translates to negative exclusions of the unselected ratings (e.g. `-rating:general -rating:sensitive`),
+---      which Gelbooru executes natively in a single API call!
+--- 3. Modifiers: ~score: and ~id: have `~` stripped.
+--- 4. Tags with `~`:
+---    - Single `~tag`: "1 out of 1 is just 1", strips `~` so Gelbooru finds the tag.
+---    - Multiple `~tag`: returns branches (one for each OR tag) to be queried concurrently and merged.
+---@param tags_str string|nil
+---@return string[] branches
+function M.normalize_remote_query(tags_str)
+  if not tags_str or tags_str == "" then
+    return { "" }
+  end
+
+  local tokens = {}
+  for tok in tags_str:gmatch("%S+") do
+    table.insert(tokens, tok)
+  end
+
+  local sort_order_tokens = {}
+  local positive_ratings = {}
+  local negative_ratings = {}
+  local or_tags = {}
+  local base_tokens = {}
+
+  local all_canonical_ratings = { "general", "sensitive", "questionable", "explicit" }
+  local rating_map = {
+    g = "general", general = "general",
+    s = "sensitive", sensitive = "sensitive",
+    q = "questionable", questionable = "questionable",
+    e = "explicit", explicit = "explicit",
+  }
+
+  for _, tok in ipairs(tokens) do
+    if tok:match("^~?[Ss][Oo][Rr][Tt]:") then
+      table.insert(sort_order_tokens, (tok:gsub("^~", "")))
+    elseif tok:match("^~?[Oo][Rr][Dd][Ee][Rr]:") then
+      table.insert(sort_order_tokens, (tok:gsub("^~", "")))
+    elseif tok:match("^%-[Rr][Aa][Tt][Ii][Nn][Gg]:(.+)$") then
+      local val = tok:match("^%-[Rr][Aa][Tt][Ii][Nn][Gg]:(.+)$")
+      for r in val:gmatch("[^,|]+") do
+        local canon = rating_map[r:lower()]
+        if canon then table.insert(negative_ratings, canon) end
+      end
+    elseif tok:match("^~?[Rr][Aa][Tt][Ii][Nn][Gg]:(.+)$") then
+      local val = tok:match("^~?[Rr][Aa][Tt][Ii][Nn][Gg]:(.+)$")
+      for r in val:gmatch("[^,|]+") do
+        local canon = rating_map[r:lower()]
+        if canon then table.insert(positive_ratings, canon) end
+      end
+    elseif tok:match("^~score:") then
+      table.insert(base_tokens, (tok:gsub("^~", "")))
+    elseif tok:match("^~id:") then
+      table.insert(base_tokens, (tok:gsub("^~", "")))
+    elseif tok:sub(1, 1) == "~" and #tok > 1 then
+      table.insert(or_tags, tok:sub(2))
+    else
+      table.insert(base_tokens, tok)
+    end
+  end
+
+  -- Deduplicate ratings
+  local function dedup(list)
+    local s = {}
+    local res = {}
+    for _, v in ipairs(list) do
+      if not s[v] then
+        s[v] = true
+        table.insert(res, v)
+      end
+    end
+    return res
+  end
+  positive_ratings = dedup(positive_ratings)
+  negative_ratings = dedup(negative_ratings)
+
+  local rating_clause = {}
+  if #positive_ratings > 0 then
+    if #positive_ratings == 1 then
+      table.insert(rating_clause, "rating:" .. positive_ratings[1])
+    elseif #positive_ratings < 4 then
+      local sel = {}
+      for _, r in ipairs(positive_ratings) do sel[r] = true end
+      for _, r in ipairs(all_canonical_ratings) do
+        if not sel[r] then
+          table.insert(rating_clause, "-rating:" .. r)
+        end
+      end
+    end
+  end
+  for _, r in ipairs(negative_ratings) do
+    table.insert(rating_clause, "-rating:" .. r)
+  end
+
+  local common_parts = {}
+  for _, t in ipairs(base_tokens) do table.insert(common_parts, t) end
+  for _, r in ipairs(rating_clause) do table.insert(common_parts, r) end
+  for _, s in ipairs(sort_order_tokens) do table.insert(common_parts, s) end
+  local common_str = table.concat(common_parts, " ")
+
+  if #or_tags == 0 then
+    return { common_str }
+  elseif #or_tags == 1 then
+    local res = common_str == "" and or_tags[1] or (common_str .. " " .. or_tags[1])
+    return { res }
+  else
+    local branches = {}
+    for _, ot in ipairs(or_tags) do
+      local b = common_str == "" and ot or (common_str .. " " .. ot)
+      table.insert(branches, b)
+    end
+    return branches
+  end
+end
+
 ---@param tags_str string|nil
 ---@return string
 function M.normalize_remote_tags(tags_str)
-  if not tags_str or tags_str == "" then
-    return ""
-  end
-  local s = tags_str
-  -- ~rating:X, ~score:X, ~id:X are valid Gelbooru OR-syntax and must be sent as-is.
-  -- Only ~sort: and ~order: are sorting directives (not filterable tags) and need ~ stripped.
-  s = s:gsub("~sort:(%S+)", "sort:%1")
-  s = s:gsub("~order:(%S+)", "order:%1")
-  return s
+  local branches = M.normalize_remote_query(tags_str)
+  return branches[1] or ""
 end
 
 function M.fetch(direction, is_explicit)
@@ -116,9 +231,10 @@ function M.fetch(direction, is_explicit)
       nonce_param = "&_nonce=" .. nonce
     end
   end
-  local remote_tags = M.normalize_remote_tags(State.query or "")
+  local branches = M.normalize_remote_query(State.query or "")
+  local remote_tags = branches[1] or ""
   local cache_key = (nonce_param == "")
-      and string.format("page:%s:pid=%d:limit=%d", remote_tags, State.page, config.options.per_page)
+      and string.format("page:%s:pid=%d:limit=%d", table.concat(branches, "||"), State.page, config.options.per_page)
     or nil
   if cache_key then
     local cached_posts = get_session_cache(cache_key)
@@ -138,65 +254,151 @@ function M.fetch(direction, is_explicit)
     end
   end
 
-  local url = string.format(
-    "%s&tags=%s&limit=%d&pid=%d%s%s",
-    config.options.api_base,
-    util.url_encode(remote_tags),
-    config.options.per_page,
-    State.page,
-    util.auth_qs(),
-    nonce_param
-  )
   local epoch = State.search_epoch
-  download.curl_async(url, function(body)
-    if State.search_epoch ~= epoch then
-      -- Response is stale from an older search query, discard it
-      return
-    end
-    -- Also guard if UI has been torn down:
-    if State.torn_down or not (UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame)) then
-      return
-    end
-    State.loading = false
-    if not body then
-      ui.set_status("Error: API request failed")
-      ui.render_list()
-      util.set_lines(UI.bufs.img, { "  Error: API request failed" })
-      util.set_lines(UI.bufs.meta, {})
-      return
-    end
-    local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
-    if not ok or not data or not data.post then
-      ui.set_status("No results" .. (State.query ~= "" and (" for: " .. State.query) or ""))
-      ui.render_list()
+
+  if #branches <= 1 then
+    local url = string.format(
+      "%s&tags=%s&limit=%d&pid=%d%s%s",
+      config.options.api_base,
+      util.url_encode(remote_tags),
+      config.options.per_page,
+      State.page,
+      util.auth_qs(),
+      nonce_param
+    )
+    download.curl_async(url, function(body)
+      if State.search_epoch ~= epoch then
+        -- Response is stale from an older search query, discard it
+        return
+      end
+      -- Also guard if UI has been torn down:
+      if State.torn_down or not (UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame)) then
+        return
+      end
+      State.loading = false
+      if not body then
+        ui.set_status("Error: API request failed")
+        ui.render_list()
+        util.set_lines(UI.bufs.img, { "  Error: API request failed" })
+        util.set_lines(UI.bufs.meta, {})
+        return
+      end
+      local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
+      if not ok or not data or not data.post then
+        ui.set_status("No results" .. (State.query ~= "" and (" for: " .. State.query) or ""))
+        ui.render_list()
+        history.save_current_history()
+        util.set_lines(UI.bufs.img, { "  No posts found" })
+        util.set_lines(UI.bufs.meta, {})
+        return
+      end
+      local posts = ensure_array(data.post)
+      if #posts == 0 then
+        ui.set_status("No results" .. (State.query ~= "" and (" for: " .. State.query) or ""))
+        ui.render_list()
+        history.save_current_history()
+        util.set_lines(UI.bufs.img, { "  No posts found" })
+        util.set_lines(UI.bufs.meta, {})
+        return
+      end
+      if cache_key and #posts > 0 then
+        set_session_cache(cache_key, posts)
+      end
+      for _, p in ipairs(posts) do
+        table.insert(State.posts, p)
+      end
+      State.page = State.page + 1
       history.save_current_history()
-      util.set_lines(UI.bufs.img, { "  No posts found" })
-      util.set_lines(UI.bufs.meta, {})
-      return
-    end
-    local posts = ensure_array(data.post)
-    if #posts == 0 then
-      ui.set_status("No results" .. (State.query ~= "" and (" for: " .. State.query) or ""))
+      ui.set_status()
       ui.render_list()
-      history.save_current_history()
-      util.set_lines(UI.bufs.img, { "  No posts found" })
-      util.set_lines(UI.bufs.meta, {})
-      return
+      if State.cur == 1 then
+        ui.render_preview(false)
+      end
+    end)
+  else
+    -- Multi-branch parallel querying for OR tags (e.g. ~foot_focus ~soles)
+    local all_posts = {}
+    local completed = 0
+    local any_network_success = false
+
+    for _, branch_tag in ipairs(branches) do
+      local branch_url = string.format(
+        "%s&tags=%s&limit=%d&pid=%d%s%s",
+        config.options.api_base,
+        util.url_encode(branch_tag),
+        config.options.per_page,
+        State.page,
+        util.auth_qs(),
+        nonce_param
+      )
+      download.curl_async(branch_url, function(body)
+        if State.search_epoch ~= epoch or State.torn_down then
+          return
+        end
+        completed = completed + 1
+        if body then
+          any_network_success = true
+          local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
+          if ok and data and data.post then
+            local p_list = ensure_array(data.post)
+            for _, p in ipairs(p_list) do
+              table.insert(all_posts, p)
+            end
+          end
+        end
+
+        if completed == #branches then
+          State.loading = false
+          if not any_network_success then
+            ui.set_status("Error: API request failed")
+            ui.render_list()
+            util.set_lines(UI.bufs.img, { "  Error: API request failed" })
+            util.set_lines(UI.bufs.meta, {})
+            return
+          end
+
+          if #all_posts == 0 then
+            ui.set_status("No results" .. (State.query ~= "" and (" for: " .. State.query) or ""))
+            ui.render_list()
+            history.save_current_history()
+            util.set_lines(UI.bufs.img, { "  No posts found" })
+            util.set_lines(UI.bufs.meta, {})
+            return
+          end
+
+          local seen_ids = {}
+          local deduped = {}
+          for _, p in ipairs(all_posts) do
+            local pid = tostring(p.id or p.file_url or "")
+            if pid ~= "" and not seen_ids[pid] then
+              seen_ids[pid] = true
+              table.insert(deduped, p)
+            end
+          end
+
+          table.sort(deduped, function(a, b)
+            local ida = tonumber(a.id) or 0
+            local idb = tonumber(b.id) or 0
+            return ida > idb
+          end)
+
+          if cache_key and #deduped > 0 then
+            set_session_cache(cache_key, deduped)
+          end
+          for _, p in ipairs(deduped) do
+            table.insert(State.posts, p)
+          end
+          State.page = State.page + 1
+          history.save_current_history()
+          ui.set_status()
+          ui.render_list()
+          if State.cur == 1 then
+            ui.render_preview(false)
+          end
+        end
+      end)
     end
-    if cache_key and #posts > 0 then
-      set_session_cache(cache_key, posts)
-    end
-    for _, p in ipairs(posts) do
-      table.insert(State.posts, p)
-    end
-    State.page = State.page + 1
-    history.save_current_history()
-    ui.set_status()
-    ui.render_list()
-    if State.cur == 1 then
-      ui.render_preview(false)
-    end
-  end)
+  end
 end
 
 local function clear_preview_loading()

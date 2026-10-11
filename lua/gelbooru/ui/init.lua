@@ -14,6 +14,7 @@ local M = {}
 M.image = image
 M.autocomplete = autocomplete
 
+local _orig_vim_ui_select = vim.ui and vim.ui.select
 local RESIZE_DEBOUNCE_MS = 100
 local _syncing_cursor = false
 
@@ -107,7 +108,7 @@ function M.teardown()
       pcall(vim.api.nvim_win_close, w, true)
     end
   end
-  for _, k in ipairs({ "img", "hdiv", "meta", "ac", "tag_modal" }) do
+  for _, k in ipairs({ "img", "hdiv", "meta", "ac", "tag_modal", "confirm_modal" }) do
     local b = UI.bufs[k]
     if b and vim.api.nvim_buf_is_valid(b) then
       pcall(vim.api.nvim_buf_delete, b, { force = true })
@@ -953,7 +954,13 @@ function M.open_tag_modal()
     end
     local lines = {}
     for _, item in ipairs(items) do
-      table.insert(lines, string.format("[%s] [%s] %s", item.selected and "x" or " ", item.badge, item.name))
+      local mark = " "
+      if item.mode == "exclude" then
+        mark = "-"
+      elseif item.selected or item.mode == "include" then
+        mark = "x"
+      end
+      table.insert(lines, string.format("[%s] [%s] %s", mark, item.badge, item.name))
     end
     vim.bo[UI.bufs.tag_modal].modifiable = true
     vim.api.nvim_buf_set_lines(UI.bufs.tag_modal, 0, -1, false, lines)
@@ -1003,13 +1010,48 @@ function M.open_tag_modal()
     if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
     local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
     if items[cur] then
-      items[cur].selected = not items[cur].selected
+      if items[cur].mode == "none" or (not items[cur].selected and items[cur].mode ~= "exclude") then
+        items[cur].mode = "include"
+        items[cur].selected = true
+      else
+        items[cur].mode = "none"
+        items[cur].selected = false
+      end
       render_modal_lines()
       pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { cur, 0 })
     end
   end
   tmap("<Space>", toggle_cur)
   tmap(" ", toggle_cur)
+
+  local function toggle_exclude()
+    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
+    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
+    if items[cur] then
+      if items[cur].mode == "exclude" then
+        items[cur].mode = "none"
+        items[cur].selected = false
+      else
+        items[cur].mode = "exclude"
+        items[cur].selected = false
+      end
+      render_modal_lines()
+      pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { cur, 0 })
+    end
+  end
+  tmap("-", toggle_exclude)
+  tmap("x", toggle_exclude)
+
+  tmap("+", function()
+    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
+    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
+    if items[cur] then
+      items[cur].mode = "include"
+      items[cur].selected = true
+      render_modal_lines()
+      pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { cur, 0 })
+    end
+  end)
 
   tmap("a", function()
     if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
@@ -1023,6 +1065,7 @@ function M.open_tag_modal()
     local new_val = not all_selected
     for _, it in ipairs(items) do
       it.selected = new_val
+      it.mode = new_val and "include" or "none"
     end
     local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
     render_modal_lines()
@@ -1044,7 +1087,9 @@ function M.open_tag_modal()
   tmap("<CR>", function()
     local chosen = {}
     for _, it in ipairs(items) do
-      if it.selected then
+      if it.mode == "exclude" then
+        table.insert(chosen, "-" .. it.name)
+      elseif it.selected or it.mode == "include" then
         table.insert(chosen, it.name)
       end
     end
@@ -1096,8 +1141,154 @@ local function find_local_file_for_post(p)
   return nil
 end
 
+function M.close_confirm_modal()
+  local UI = state.UI
+  if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
+    pcall(vim.api.nvim_win_close, UI.wins.confirm_modal, true)
+    UI.wins.confirm_modal = nil
+  end
+  if UI.bufs.confirm_modal and vim.api.nvim_buf_is_valid(UI.bufs.confirm_modal) then
+    pcall(vim.api.nvim_buf_delete, UI.bufs.confirm_modal, { force = true })
+    UI.bufs.confirm_modal = nil
+  end
+  if UI.confirm_prev_win and vim.api.nvim_win_is_valid(UI.confirm_prev_win) then
+    pcall(vim.api.nvim_set_current_win, UI.confirm_prev_win)
+  elseif UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+    pcall(vim.api.nvim_set_current_win, UI.wins.list)
+  end
+end
+
+function M.open_confirm_modal(filename, on_confirm)
+  local UI = state.UI
+  UI.confirm_prev_win = vim.api.nvim_get_current_win()
+
+  if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
+    pcall(vim.api.nvim_win_close, UI.wins.confirm_modal, true)
+    UI.wins.confirm_modal = nil
+  end
+  if UI.bufs.confirm_modal and vim.api.nvim_buf_is_valid(UI.bufs.confirm_modal) then
+    pcall(vim.api.nvim_buf_delete, UI.bufs.confirm_modal, { force = true })
+    UI.bufs.confirm_modal = nil
+  end
+
+  local disp_fn = vim.fn.fnamemodify(filename, ":t")
+  local modal_w = math.max(46, math.min(math.max(10, vim.o.columns - 4), #disp_fn + 22))
+  local modal_h = 5
+  local modal_row = math.max(1, math.floor((vim.o.lines - modal_h) / 2))
+  local modal_col = math.max(1, math.floor((vim.o.columns - modal_w) / 2))
+
+  UI.bufs.confirm_modal = vim.api.nvim_create_buf(false, true)
+  vim.bo[UI.bufs.confirm_modal].buftype = "nofile"
+  vim.bo[UI.bufs.confirm_modal].bufhidden = "wipe"
+  vim.bo[UI.bufs.confirm_modal].modifiable = true
+
+  local choice = 1 -- 1 = Yes, 2 = Cancel
+
+  local function render_confirm_lines()
+    if not UI.bufs.confirm_modal or not vim.api.nvim_buf_is_valid(UI.bufs.confirm_modal) then
+      return
+    end
+    local lines = {
+      "  Delete local file?",
+      "  " .. disp_fn:sub(1, modal_w - 6),
+      "  ",
+      (choice == 1 and "▶ Yes, delete (deferred until exit)" or "  Yes, delete (deferred until exit)"),
+      (choice == 2 and "▶ Cancel" or "  Cancel"),
+    }
+    vim.bo[UI.bufs.confirm_modal].modifiable = true
+    vim.api.nvim_buf_set_lines(UI.bufs.confirm_modal, 0, -1, false, lines)
+    vim.bo[UI.bufs.confirm_modal].modifiable = false
+  end
+
+  render_confirm_lines()
+
+  UI.wins.confirm_modal = util.float(UI.bufs.confirm_modal, modal_row, modal_col, modal_w, modal_h, {
+    border = "rounded",
+    title = " Confirm Delete ",
+    title_pos = "center",
+    zindex = 80,
+    focusable = true,
+  })
+  vim.wo[UI.wins.confirm_modal].cursorline = false
+  vim.wo[UI.wins.confirm_modal].winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder"
+  pcall(vim.api.nvim_set_current_win, UI.wins.confirm_modal)
+  pcall(vim.api.nvim_win_set_cursor, UI.wins.confirm_modal, { 4, 0 })
+
+  local function cmap(key, fn)
+    util.keymap(UI.bufs.confirm_modal, "n", key, fn)
+  end
+
+  local function sel_yes()
+    choice = 1
+    render_confirm_lines()
+    if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
+      pcall(vim.api.nvim_win_set_cursor, UI.wins.confirm_modal, { 4, 0 })
+    end
+  end
+
+  local function sel_cancel()
+    choice = 2
+    render_confirm_lines()
+    if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
+      pcall(vim.api.nvim_win_set_cursor, UI.wins.confirm_modal, { 5, 0 })
+    end
+  end
+
+  cmap("j", sel_cancel)
+  cmap("<Down>", sel_cancel)
+  cmap("k", sel_yes)
+  cmap("<Up>", sel_yes)
+  cmap("<Tab>", function()
+    if choice == 1 then sel_cancel() else sel_yes() end
+  end)
+  cmap("<S-Tab>", function()
+    if choice == 1 then sel_cancel() else sel_yes() end
+  end)
+
+  local function commit_choice()
+    local chosen = choice
+    M.close_confirm_modal()
+    if chosen == 1 then
+      on_confirm()
+    else
+      M.set_status("Cancelled", 1500)
+    end
+  end
+
+  cmap("<CR>", commit_choice)
+  cmap("q", function()
+    M.close_confirm_modal()
+    M.set_status("Cancelled", 1500)
+  end)
+  cmap("<Esc>", function()
+    M.close_confirm_modal()
+    M.set_status("Cancelled", 1500)
+  end)
+  cmap("c", function()
+    M.close_confirm_modal()
+    M.set_status("Cancelled", 1500)
+  end)
+  cmap("y", function()
+    M.close_confirm_modal()
+    on_confirm()
+  end)
+  cmap("Y", function()
+    M.close_confirm_modal()
+    on_confirm()
+  end)
+  cmap("n", function()
+    M.close_confirm_modal()
+    M.set_status("Cancelled", 1500)
+  end)
+  cmap("N", function()
+    M.close_confirm_modal()
+    M.set_status("Cancelled", 1500)
+  end)
+end
+
 function M.delete_current()
   local State = state.State
+  local UI = state.UI
   local p = State.posts[State.cur]
   if not p then return end
 
@@ -1135,13 +1326,14 @@ function M.delete_current()
       end
     end
 
+    State.cur_id = nil -- Reset cur_id so render_preview won't early return and blank image!
     M.render_list()
     M.render_preview(false)
     M.render_metadata(p)
     M.set_status(string.format("Deleted local file: %s (deferred until exit; press <CR> to restore)", filename), 3000)
   end
 
-  if vim.ui and vim.ui.select then
+  if vim.ui and vim.ui.select and vim.ui.select ~= _orig_vim_ui_select then
     vim.ui.select({ "Yes, delete file", "Cancel" }, {
       prompt = prompt_msg,
     }, function(choice)
@@ -1149,12 +1341,12 @@ function M.delete_current()
         do_delete()
       end
     end)
-  elseif vim.fn.confirm then
+  elseif vim.fn.confirm and (not UI.wins.frame or not vim.api.nvim_win_is_valid(UI.wins.frame)) then
     if vim.fn.confirm(prompt_msg, "&Yes\n&No", 2) == 1 then
       do_delete()
     end
   else
-    do_delete()
+    M.open_confirm_modal(filename, do_delete)
   end
 end
 
