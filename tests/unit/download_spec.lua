@@ -1,18 +1,27 @@
 -- tests/unit/download_spec.lua
--- Unit tests for gelbooru.net.download resume logic, interrupted-teardown guard,
--- spam deduplication, and pending_resumes race protection.
+-- Unit tests for gelbooru.net.download: retry logic, referer injection,
+-- atomic rename, callback deduplication, file size verification,
+-- error recovery, process lifecycle, and lookahead prefetch pipeline.
 
 local download = require("gelbooru.net.download")
 local config = require("gelbooru.core.config")
+local state = require("gelbooru.core.state")
 
 local tmp = vim.fn.tempname
 
-describe("download: deduplication", function()
+describe("download: deduplication & caching", function()
+  local orig_system
+
   before_each(function()
     download.active_downloads = {}
     download.active_handles = {}
     download.interrupted_dests = {}
     download.pending_resumes = {}
+    orig_system = vim.system
+  end)
+
+  after_each(function()
+    vim.system = orig_system
   end)
 
   it("returns immediately with cb(true) when dest already exists on disk", function()
@@ -31,162 +40,47 @@ describe("download: deduplication", function()
     vim.fn.delete(dest)
   end)
 
-  it("hooks a second cb into an in-flight download instead of launching a duplicate", function()
-    local dest = tmp()
-    -- Seed active_downloads to simulate an in-flight download
-    download.active_downloads[dest] = { function() end }
-
-    local second_cb_called = false
-    download.download_async("http://example.com/fake.jpg", dest, function()
-      second_cb_called = true
-    end)
-
-    -- The second cb should have been appended, not a new download started
-    assert.are.equal(2, #download.active_downloads[dest])
-    assert.is_false(second_cb_called)
-
-    -- Clean up
-    download.active_downloads[dest] = nil
-  end)
-end)
-
-describe("download: interrupted_dests teardown guard", function()
-  before_each(function()
-    download.active_downloads = {}
-    download.active_handles = {}
-    download.interrupted_dests = {}
-    download.pending_resumes = {}
-  end)
-
-  it("does not rename .part when dest is flagged as interrupted", function()
+  it("deduplicates concurrent calls to same destination URL and notifies all callbacks", function()
     local dest = tmp()
     local part = dest .. ".part"
+    local spawn_count = 0
+    local exit_fn = nil
 
-    -- Write a fake .part file large enough to pass the size guard
+    vim.system = function(cmd, opts, on_exit)
+      spawn_count = spawn_count + 1
+      exit_fn = on_exit
+      return { kill = function() end }
+    end
+
+    local cb1_result, cb2_result, cb3_result = nil, nil, nil
+    download.download_async("https://gelbooru.com/img/1.jpg", dest, function(ok) cb1_result = ok end)
+    download.download_async("https://gelbooru.com/img/1.jpg", dest, function(ok) cb2_result = ok end)
+    download.download_async("https://gelbooru.com/img/1.jpg", dest, function(ok) cb3_result = ok end)
+
+    -- Exactly one curl process spawned, 3 callbacks queued
+    assert.are.equal(1, spawn_count)
+    assert.are.equal(3, #download.active_downloads[dest])
+
+    -- Write valid part file and simulate successful download exit
     local f = io.open(part, "wb")
     f:write(string.rep("x", 2048))
     f:close()
 
-    -- Flag as interrupted (what teardown does before kill)
-    download.interrupted_dests[dest] = true
+    exit_fn({ code = 0 })
+    vim.wait(200, function() return cb1_result ~= nil and cb2_result ~= nil and cb3_result ~= nil end)
 
-    -- Simulate the vim.schedule callback firing after kill
-    local callbacks_called = {}
-    download.active_downloads[dest] = { function(ok) table.insert(callbacks_called, ok) end }
+    assert.is_true(cb1_result)
+    assert.is_true(cb2_result)
+    assert.is_true(cb3_result)
+    assert.is_nil(download.active_downloads[dest])
+    assert.is_nil(download.active_handles[dest])
+    assert.are.equal(1, vim.fn.filereadable(dest))
 
-    -- Manually invoke what the callback body does
-    local callbacks = download.active_downloads[dest] or {}
-    download.active_downloads[dest] = nil
-    download.active_handles[dest] = nil
-
-    if download.interrupted_dests[dest] then
-      download.interrupted_dests[dest] = nil
-      for _, fn in ipairs(callbacks) do pcall(fn, false) end
-    end
-
-    -- .part must still exist (not renamed), final dest must not exist
-    assert.are.equal(1, vim.fn.filereadable(part))
-    assert.are.equal(0, vim.fn.filereadable(dest))
-    -- callback was called with false
-    assert.are.equal(1, #callbacks_called)
-    assert.is_false(callbacks_called[1])
-
-    vim.fn.delete(part)
-  end)
-
-  it("clears interrupted_dests flag after the callback consumes it", function()
-    local dest = tmp()
-    download.interrupted_dests[dest] = true
-    download.active_downloads[dest] = {}
-
-    local callbacks = download.active_downloads[dest] or {}
-    download.active_downloads[dest] = nil
-    if download.interrupted_dests[dest] then
-      download.interrupted_dests[dest] = nil
-      for _, fn in ipairs(callbacks) do pcall(fn, false) end
-    end
-
-    assert.is_nil(download.interrupted_dests[dest])
+    vim.fn.delete(dest)
   end)
 end)
 
-describe("download: pending_resumes race guard", function()
-  before_each(function()
-    download.active_downloads = {}
-    download.active_handles = {}
-    download.interrupted_dests = {}
-    download.pending_resumes = {}
-  end)
-
-  it("skips a dest already in pending_resumes", function()
-    local dest = "/fake/save_dir/99999.mp4"
-    download.pending_resumes[dest] = true
-
-    -- A second call to resume_pending_saves would check this before launching
-    local would_resume = not download.active_downloads[dest] and not download.pending_resumes[dest]
-    assert.is_false(would_resume)
-  end)
-
-  it("allows resume when neither active_downloads nor pending_resumes is set", function()
-    local dest = "/fake/save_dir/88888.mp4"
-    local would_resume = not download.active_downloads[dest] and not download.pending_resumes[dest]
-    assert.is_true(would_resume)
-  end)
-end)
-
-describe("download: resume flag behaviour", function()
-  before_each(function()
-    download.active_downloads = {}
-    download.active_handles = {}
-    download.interrupted_dests = {}
-    download.pending_resumes = {}
-  end)
-
-  it("preserves .part on failure when resume=true", function()
-    local dest = tmp()
-    local part = dest .. ".part"
-
-    local f = io.open(part, "wb")
-    f:write(string.rep("x", 2048))
-    f:close()
-
-    -- Simulate failed download (out.code != 0) with resume=true
-    local resume = true
-    local ok = false -- simulated failure
-
-    if not ok then
-      if not resume and vim.fn.filereadable(part) == 1 then
-        vim.fn.delete(part)
-      end
-    end
-
-    -- .part should still be there
-    assert.are.equal(1, vim.fn.filereadable(part))
-    vim.fn.delete(part)
-  end)
-
-  it("deletes .part on failure when resume=false", function()
-    local dest = tmp()
-    local part = dest .. ".part"
-
-    local f = io.open(part, "wb")
-    f:write(string.rep("x", 2048))
-    f:close()
-
-    local resume = false
-    local ok = false
-
-    if not ok then
-      if not resume and vim.fn.filereadable(part) == 1 then
-        vim.fn.delete(part)
-      end
-    end
-
-    assert.are.equal(0, vim.fn.filereadable(part))
-  end)
-end)
-
-describe("download: curl arguments and --fail flag", function()
+describe("download: curl arguments, retry options & referer injection", function()
   local orig_system
 
   before_each(function()
@@ -201,7 +95,7 @@ describe("download: curl arguments and --fail flag", function()
     vim.system = orig_system
   end)
 
-  it("includes --fail in download_async curl command", function()
+  it("injects Referer header for Gelbooru CDN domains in download_async", function()
     local dest = tmp()
     local captured_cmd = nil
 
@@ -210,13 +104,24 @@ describe("download: curl arguments and --fail flag", function()
       return { kill = function() end }
     end
 
-    download.download_async("http://example.com/image.jpg", dest, function() end)
+    download.download_async("https://gelbooru.com/images/sample.jpg", dest, function() end)
 
     assert.is_not_nil(captured_cmd)
-    assert.is_true(vim.tbl_contains(captured_cmd, "--fail"))
+    local has_referer_flag = false
+    local has_referer_value = false
+    for i, arg in ipairs(captured_cmd) do
+      if arg == "-H" and captured_cmd[i + 1] == "Referer: https://gelbooru.com/" then
+        has_referer_flag = true
+        has_referer_value = true
+        break
+      end
+    end
+    assert.is_true(has_referer_flag)
+    assert.is_true(has_referer_value)
   end)
 
-  it("includes --fail in curl_async curl command", function()
+  it("includes retry logic flags (--retry 3, --retry-delay 2, --retry-connrefused) in download_async", function()
+    local dest = tmp()
     local captured_cmd = nil
 
     vim.system = function(cmd, opts, on_exit)
@@ -224,71 +129,199 @@ describe("download: curl arguments and --fail flag", function()
       return { kill = function() end }
     end
 
-    download.curl_async("http://example.com/api", function() end)
+    download.download_async("https://gelbooru.com/img.jpg", dest, function() end)
 
     assert.is_not_nil(captured_cmd)
+    assert.is_true(vim.tbl_contains(captured_cmd, "--retry"))
+    assert.is_true(vim.tbl_contains(captured_cmd, "3"))
+    assert.is_true(vim.tbl_contains(captured_cmd, "--retry-delay"))
+    assert.is_true(vim.tbl_contains(captured_cmd, "2"))
+    assert.is_true(vim.tbl_contains(captured_cmd, "--retry-connrefused"))
     assert.is_true(vim.tbl_contains(captured_cmd, "--fail"))
   end)
 
-  it("deletes .part when download_async curl exits non-zero (HTTP error)", function()
+  it("includes retry logic flags in curl_async", function()
+    local captured_cmd = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      captured_cmd = cmd
+      return { kill = function() end }
+    end
+
+    download.curl_async("https://gelbooru.com/index.php?page=dapi", function() end)
+
+    assert.is_not_nil(captured_cmd)
+    assert.is_true(vim.tbl_contains(captured_cmd, "--retry"))
+    assert.is_true(vim.tbl_contains(captured_cmd, "3"))
+    assert.is_true(vim.tbl_contains(captured_cmd, "--retry-delay"))
+    assert.is_true(vim.tbl_contains(captured_cmd, "2"))
+    assert.is_true(vim.tbl_contains(captured_cmd, "--retry-connrefused"))
+    assert.is_true(vim.tbl_contains(captured_cmd, "--fail"))
+  end)
+
+  it("adds -C - resume argument when .part file > 1024 bytes and resume=true", function()
     local dest = tmp()
     local part = dest .. ".part"
-    local callback_res = nil
+    local f = io.open(part, "wb")
+    f:write(string.rep("x", 2048))
+    f:close()
+
+    local captured_cmd = nil
+    vim.system = function(cmd, opts, on_exit)
+      captured_cmd = cmd
+      return { kill = function() end }
+    end
+
+    download.download_async("https://example.com/big.mp4", dest, function() end, { resume = true })
+
+    assert.is_not_nil(captured_cmd)
+    local has_c = false
+    for i, arg in ipairs(captured_cmd) do
+      if arg == "-C" and captured_cmd[i + 1] == "-" then
+        has_c = true
+        break
+      end
+    end
+    assert.is_true(has_c)
+
+    vim.fn.delete(part)
+  end)
+end)
+
+describe("download: atomic file rename & size verification", function()
+  local orig_system
+
+  before_each(function()
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.interrupted_dests = {}
+    download.pending_resumes = {}
+    orig_system = vim.system
+  end)
+
+  after_each(function()
+    vim.system = orig_system
+  end)
+
+  it("atomically renames .part to destination file on successful download (> 1024 bytes)", function()
+    local dest = tmp()
+    local part = dest .. ".part"
     local exit_fn = nil
 
     vim.system = function(cmd, opts, on_exit)
       exit_fn = on_exit
-      -- Write a fake partial file as if curl wrote something before 404
+      -- Simulate curl writing valid payload > 1024 bytes
       local f = io.open(part, "wb")
-      f:write("404 Not Found")
+      f:write(string.rep("data", 512))
       f:close()
       return { kill = function() end }
     end
 
-    download.download_async("http://example.com/404.jpg", dest, function(ok)
-      callback_res = ok
+    local result = nil
+    download.download_async("https://example.com/valid.jpg", dest, function(ok)
+      result = ok
     end)
 
     assert.is_not_nil(exit_fn)
-    -- Simulate curl exiting with code 22 (HTTP error)
-    exit_fn({ code = 22 })
-    vim.wait(200, function() return callback_res ~= nil end)
+    exit_fn({ code = 0 })
+    vim.wait(200, function() return result ~= nil end)
 
-    assert.is_false(callback_res)
+    assert.is_true(result)
+    assert.are.equal(1, vim.fn.filereadable(dest))
     assert.are.equal(0, vim.fn.filereadable(part))
+    assert.is_true(vim.fn.getfsize(dest) > 1024)
+
+    vim.fn.delete(dest)
   end)
 
-  it("preserves .part when download_async curl exits non-zero and resume=true", function()
+  it("safely replaces destination if created during download before rename", function()
     local dest = tmp()
     local part = dest .. ".part"
-    local callback_res = nil
     local exit_fn = nil
-
-    -- Seed an existing .part > 1024 bytes so resume activates
-    local f = io.open(part, "wb")
-    f:write(string.rep("x", 2048))
-    f:close()
 
     vim.system = function(cmd, opts, on_exit)
       exit_fn = on_exit
+      -- Pre-create dest during in-flight download before curl finishes
+      local f_old = io.open(dest, "wb")
+      f_old:write("concurrently created file")
+      f_old:close()
+
+      local f = io.open(part, "wb")
+      f:write(string.rep("new_data", 512))
+      f:close()
       return { kill = function() end }
     end
 
-    download.download_async("http://example.com/interrupted.jpg", dest, function(ok)
-      callback_res = ok
-    end, { resume = true })
+    local result = nil
+    download.download_async("https://example.com/overwrite.jpg", dest, function(ok)
+      result = ok
+    end)
 
     assert.is_not_nil(exit_fn)
-    exit_fn({ code = 22 })
-    vim.wait(200, function() return callback_res ~= nil end)
+    exit_fn({ code = 0 })
+    vim.wait(200, function() return result ~= nil end)
 
-    assert.is_false(callback_res)
-    assert.are.equal(1, vim.fn.filereadable(part))
-    vim.fn.delete(part)
+    assert.is_true(result)
+    assert.are.equal(1, vim.fn.filereadable(dest))
+    assert.are.equal(0, vim.fn.filereadable(part))
+
+    vim.fn.delete(dest)
+  end)
+
+  it("rejects download and deletes .part when file size is <= 1024 bytes (truncated/empty)", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      -- Write truncated payload (<= 1024 bytes)
+      local f = io.open(part, "wb")
+      f:write("tiny error payload")
+      f:close()
+      return { kill = function() end }
+    end
+
+    local result = nil
+    download.download_async("https://example.com/tiny.jpg", dest, function(ok)
+      result = ok
+    end)
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 0 })
+    vim.wait(200, function() return result ~= nil end)
+
+    assert.is_false(result)
+    assert.are.equal(0, vim.fn.filereadable(dest))
+    assert.are.equal(0, vim.fn.filereadable(part))
+  end)
+
+  it("handles missing .part file when curl exits code 0", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      -- Do not create part file at all
+      return { kill = function() end }
+    end
+
+    local result = nil
+    download.download_async("https://example.com/ghost.jpg", dest, function(ok)
+      result = ok
+    end)
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 0 })
+    vim.wait(200, function() return result ~= nil end)
+
+    assert.is_false(result)
+    assert.are.equal(0, vim.fn.filereadable(dest))
   end)
 end)
 
-describe("download: process tracking and abort_all", function()
+describe("download: failure recovery & resume flag behaviour", function()
   local orig_system
 
   before_each(function()
@@ -303,99 +336,457 @@ describe("download: process tracking and abort_all", function()
     vim.system = orig_system
   end)
 
-  it("tracks child process handle in download_async and removes it when finished", function()
+  it("deletes .part when curl exits with error and resume=false", function()
     local dest = tmp()
+    local part = dest .. ".part"
     local exit_fn = nil
-    local mock_handle = { kill = function() end }
 
     vim.system = function(cmd, opts, on_exit)
       exit_fn = on_exit
-      return mock_handle
+      local f = io.open(part, "wb")
+      f:write("partial data")
+      f:close()
+      return { kill = function() end }
     end
 
-    local handle = download.download_async("http://example.com/test.jpg", dest, function() end)
+    local result = nil
+    download.download_async("https://example.com/fail.jpg", dest, function(ok)
+      result = ok
+    end, { resume = false })
 
-    assert.are.equal(mock_handle, handle)
-    assert.are.equal(mock_handle, download.active_handles[dest])
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 22 }) -- HTTP error (e.g. 404)
+    vim.wait(200, function() return result ~= nil end)
 
-    -- Simulate process exit
-    exit_fn({ code = 1 })
-    local done = false
-    vim.schedule(function() done = true end)
-    vim.wait(200, function() return done end)
+    assert.is_false(result)
+    assert.are.equal(0, vim.fn.filereadable(part))
+    assert.are.equal(0, vim.fn.filereadable(dest))
+  end)
 
+  it("preserves .part when curl exits with error and resume=true", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local exit_fn = nil
+
+    -- Seed an existing .part > 1024 bytes
+    local f = io.open(part, "wb")
+    f:write(string.rep("x", 2048))
+    f:close()
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      return { kill = function() end }
+    end
+
+    local result = nil
+    download.download_async("https://example.com/resume_fail.mp4", dest, function(ok)
+      result = ok
+    end, { resume = true })
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 28 }) -- Timeout error
+    vim.wait(200, function() return result ~= nil end)
+
+    assert.is_false(result)
+    assert.are.equal(1, vim.fn.filereadable(part))
+    assert.are.equal(0, vim.fn.filereadable(dest))
+
+    vim.fn.delete(part)
+  end)
+end)
+
+describe("download: curl_async execution & response handling", function()
+  local orig_system
+
+  before_each(function()
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.interrupted_dests = {}
+    download.pending_resumes = {}
+    orig_system = vim.system
+  end)
+
+  after_each(function()
+    vim.system = orig_system
+  end)
+
+  it("invokes cb with stdout body when curl exits code 0", function()
+    local exit_fn = nil
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      return { kill = function() end }
+    end
+
+    local res_body = nil
+    download.curl_async("https://gelbooru.com/api/posts", function(body)
+      res_body = body
+    end)
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 0, stdout = '{"post": [{"id": 1}]}' })
+    vim.wait(200, function() return res_body ~= nil end)
+
+    assert.are.equal('{"post": [{"id": 1}]}', res_body)
+  end)
+
+  it("invokes cb with nil when curl exits non-zero (HTTP error or network failure)", function()
+    local exit_fn = nil
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      return { kill = function() end }
+    end
+
+    local called = false
+    local res_body = "initial"
+    download.curl_async("https://gelbooru.com/api/fail", function(body)
+      called = true
+      res_body = body
+    end)
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 7, stdout = nil }) -- Failed to connect
+    vim.wait(200, function() return called end)
+
+    assert.is_true(called)
+    assert.is_nil(res_body)
+  end)
+end)
+
+describe("download: interrupted teardown guard & abort_all", function()
+  local orig_system
+
+  before_each(function()
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.interrupted_dests = {}
+    download.pending_resumes = {}
+    orig_system = vim.system
+  end)
+
+  after_each(function()
+    vim.system = orig_system
+  end)
+
+  it("does not rename .part when download is aborted by abort_all before process completes", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local killed = false
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      local f = io.open(part, "wb")
+      f:write(string.rep("x", 2048))
+      f:close()
+      return {
+        kill = function(self, sig)
+          killed = true
+          assert.are.equal(9, sig)
+        end,
+      }
+    end
+
+    local cb_called = false
+    local cb_result = nil
+    download.download_async("https://example.com/abort.jpg", dest, function(ok)
+      cb_called = true
+      cb_result = ok
+    end)
+
+    assert.is_not_nil(download.active_handles[dest])
+
+    -- Abort all in-flight downloads (simulating teardown)
+    download.abort_all()
+    assert.is_true(killed)
+    assert.is_true(download.interrupted_dests[dest])
+
+    -- Now simulate curl exiting after kill signal
+    exit_fn({ code = 0 })
+    vim.wait(200, function() return cb_called end)
+
+    assert.is_true(cb_called)
+    assert.is_false(cb_result)
+    assert.are.equal(1, vim.fn.filereadable(part))
+    assert.are.equal(0, vim.fn.filereadable(dest))
+    assert.is_nil(download.interrupted_dests[dest])
+    assert.is_nil(download.active_downloads[dest])
+
+    vim.fn.delete(part)
+  end)
+end)
+
+describe("download: safe queue pruning and error handling", function()
+  local orig_system
+
+  before_each(function()
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.interrupted_dests = {}
+    download.pending_resumes = {}
+    orig_system = vim.system
+  end)
+
+  after_each(function()
+    vim.system = orig_system
+  end)
+
+  it("safely handles vim.system spawn errors in download_async and notifies queued callbacks", function()
+    local dest = tmp()
+    vim.system = function()
+      error("Spawn failed: executable not found")
+    end
+
+    local result = nil
+    download.download_async("https://example.com/spawn_fail.jpg", dest, function(ok)
+      result = ok
+    end)
+
+    assert.is_false(result)
+    assert.is_nil(download.active_downloads[dest])
     assert.is_nil(download.active_handles[dest])
   end)
 
-  it("tracks child process handle in curl_async and removes it when finished", function()
+  it("safely handles vim.system spawn errors in curl_async and invokes cb(nil)", function()
+    vim.system = function()
+      error("Spawn failed: executable not found")
+    end
+
+    local result = "unset"
+    download.curl_async("https://example.com/api", function(body)
+      result = body
+    end)
+
+    vim.wait(200, function() return result ~= "unset" end)
+    assert.is_nil(result)
+  end)
+
+  it("continues executing subsequent callbacks if one callback throws an error", function()
+    local dest = tmp()
+    local part = dest .. ".part"
     local exit_fn = nil
-    local mock_handle = { kill = function() end }
 
     vim.system = function(cmd, opts, on_exit)
       exit_fn = on_exit
+      local f = io.open(part, "wb")
+      f:write(string.rep("x", 2048))
+      f:close()
+      return { kill = function() end }
+    end
+
+    local cb2_called = false
+    download.download_async("https://example.com/test.jpg", dest, function()
+      error("Unexpected consumer error in cb1")
+    end)
+    download.download_async("https://example.com/test.jpg", dest, function(ok)
+      cb2_called = ok
+    end)
+
+    exit_fn({ code = 0 })
+    vim.wait(200, function() return cb2_called ~= false end)
+
+    assert.is_true(cb2_called)
+    assert.is_nil(download.active_downloads[dest])
+
+    vim.fn.delete(dest)
+  end)
+end)
+
+describe("download: resume_pending_saves & timer management", function()
+  local save_dir
+  local orig_save_dir
+
+  before_each(function()
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.interrupted_dests = {}
+    download.pending_resumes = {}
+
+    orig_save_dir = config.options.save_dir
+    save_dir = tmp()
+    vim.fn.mkdir(save_dir, "p")
+    config.options.save_dir = save_dir
+  end)
+
+  after_each(function()
+    download.cancel_pending_resumes()
+    config.options.save_dir = orig_save_dir
+    vim.fn.delete(save_dir, "rf")
+  end)
+
+  it("discovers orphaned .part files and adds them to pending_resumes", function()
+    local orphan = save_dir .. "/99999.jpg.part"
+    local f = io.open(orphan, "wb")
+    f:write(string.rep("x", 2048))
+    f:close()
+
+    local dest = save_dir .. "/99999.jpg"
+    download.resume_pending_saves()
+
+    assert.is_not_nil(download.pending_resumes[dest])
+
+    download.cancel_pending_resumes()
+    assert.are.equal(0, vim.tbl_count(download.pending_resumes))
+  end)
+
+  it("deletes orphaned .part file if final destination already exists", function()
+    local orphan = save_dir .. "/88888.jpg.part"
+    local dest = save_dir .. "/88888.jpg"
+
+    local f_orphan = io.open(orphan, "wb")
+    f_orphan:write("orphan data")
+    f_orphan:close()
+
+    local f_dest = io.open(dest, "wb")
+    f_dest:write("completed file")
+    f_dest:close()
+
+    download.resume_pending_saves()
+
+    assert.are.equal(0, vim.fn.filereadable(orphan))
+    assert.are.equal(1, vim.fn.filereadable(dest))
+    assert.is_nil(download.pending_resumes[dest])
+  end)
+
+  it("skips files already present in pending_resumes", function()
+    local orphan = save_dir .. "/77777.jpg.part"
+    local dest = save_dir .. "/77777.jpg"
+    local f = io.open(orphan, "wb")
+    f:write(string.rep("x", 2048))
+    f:close()
+
+    -- Simulate destination already marked in pending_resumes
+    download.pending_resumes[dest] = true
+
+    download.resume_pending_saves()
+
+    -- pending_resumes[dest] remains true (not replaced with a new timer)
+    assert.are.equal(true, download.pending_resumes[dest])
+  end)
+end)
+
+describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
+  local orig_system
+  local orig_posts
+  local orig_cur
+  local orig_scroll_dir
+  local orig_torn_down
+
+  before_each(function()
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.active_prefetch_handles = {}
+    download.queued_prefetch_dests = {}
+    download.last_prefetch_dir = nil
+    download.cancel_prefetch_timers()
+
+    orig_system = vim.system
+    orig_posts = state.State.posts
+    orig_cur = state.State.cur
+    orig_scroll_dir = state.State.scroll_dir
+    orig_torn_down = state.State.torn_down
+
+    state.State.torn_down = false
+    state.State.posts = {
+      { id = 101, file_url = "http://example.com/101.jpg", sample_url = "http://example.com/101_s.jpg" },
+      { id = 102, file_url = "http://example.com/102.jpg", sample_url = "http://example.com/102_s.jpg" },
+      { id = 103, file_url = "http://example.com/103.jpg", sample_url = "http://example.com/103_s.jpg" },
+      { id = 104, file_url = "http://example.com/104.jpg", sample_url = "http://example.com/104_s.jpg" },
+    }
+    state.State.cur = 1
+    state.State.scroll_dir = 1
+  end)
+
+  after_each(function()
+    download.cancel_prefetch_timers()
+    vim.system = orig_system
+    state.State.posts = orig_posts
+    state.State.cur = orig_cur
+    state.State.scroll_dir = orig_scroll_dir
+    state.State.torn_down = orig_torn_down
+  end)
+
+  it("eliminates artificial 50ms delay and triggers immediate next post (cur + dir) synchronously", function()
+    local spawned_urls = {}
+    local mock_handle = { kill = function() end }
+
+    vim.system = function(cmd, opts, on_exit)
+      table.insert(spawned_urls, cmd[#cmd])
       return mock_handle
     end
 
-    local handle = download.curl_async("http://example.com/test", function() end)
+    -- Trigger prefetch at index 1 with direction 1 -> immediate next is post 102
+    download.prefetch_around(1, 1)
 
-    assert.are.equal(mock_handle, handle)
-    assert.are.equal(mock_handle, download.active_handles[mock_handle])
-
-    -- Simulate process exit
-    exit_fn({ code = 0, stdout = "ok" })
-    local done = false
-    vim.schedule(function() done = true end)
-    vim.wait(200, function() return done end)
-
-    assert.is_nil(download.active_handles[mock_handle])
+    -- Post 102 (immediate next) must have triggered download_async immediately without waiting for timers!
+    assert.is_true(#spawned_urls >= 1)
+    assert.are.equal("http://example.com/102_s.jpg", spawned_urls[1])
   end)
 
-  it("abort_all kills all active handles, flags interrupted_dests, and empties table", function()
+  it("does not cancel in-flight prefetch downloads if moving in the same direction", function()
     local killed = {}
-    local handle1 = {
-      kill = function(self, sig)
-        table.insert(killed, { id = 1, sig = sig })
-      end,
-    }
-    local handle2 = {
-      kill = function(self, sig)
-        table.insert(killed, { id = 2, sig = sig })
-      end,
-    }
-
-    local dest1 = "/fake/path/test.jpg"
-    download.active_handles[dest1] = handle1
-    download.active_handles[handle2] = handle2
-
-    download.abort_all()
-
-    assert.are.equal(2, #killed)
-    assert.are.equal(9, killed[1].sig)
-    assert.are.equal(9, killed[2].sig)
-    assert.is_true(download.interrupted_dests[dest1])
-    assert.are.equal(0, vim.tbl_count(download.active_handles))
-  end)
-
-  it("allows teardown to iterate active_handles and call pcall(handle.kill, handle, 9)", function()
-    local killed = {}
-    local handle = {
+    local mock_handle = {
       kill = function(self, sig)
         table.insert(killed, sig)
       end,
     }
 
-    local dest = "/fake/path/image.jpg"
-    download.active_handles[dest] = handle
-
-    for d, h in pairs(download.active_handles or {}) do
-      download.interrupted_dests[d] = true
-      pcall(h.kill, h, 9)
+    vim.system = function(cmd, opts, on_exit)
+      return mock_handle
     end
-    download.active_handles = {}
 
-    assert.are.equal(1, #killed)
+    -- First prefetch call moving forward (dir = 1)
+    download.prefetch_around(1, 1)
+    assert.are.equal(1, download.last_prefetch_dir)
+
+    local active_count_before = vim.tbl_count(download.active_prefetch_handles)
+    assert.is_true(active_count_before >= 1)
+
+    -- Second prefetch call still moving forward (dir = 1)
+    download.prefetch_around(2, 1)
+
+    -- In-flight handles should NOT have been killed
+    assert.are.equal(0, #killed)
+    assert.are.equal(1, download.last_prefetch_dir)
+  end)
+
+  it("cancels and aborts in-flight prefetch downloads when moving in reversed direction", function()
+    local killed = {}
+    local mock_handle = {
+      kill = function(self, sig)
+        table.insert(killed, sig)
+      end,
+    }
+
+    vim.system = function(cmd, opts, on_exit)
+      return mock_handle
+    end
+
+    -- Start prefetch moving forward (dir = 1)
+    download.prefetch_around(1, 1)
+    assert.are.equal(1, download.last_prefetch_dir)
+    assert.is_true(vim.tbl_count(download.active_prefetch_handles) >= 1)
+
+    -- Reverse scroll direction to backward (dir = -1)
+    download.prefetch_around(2, -1)
+
+    -- Opposite in-flight prefetch handles must have been killed with SIGKILL (9)
+    assert.is_true(#killed >= 1)
     assert.are.equal(9, killed[1])
-    assert.is_true(download.interrupted_dests[dest])
-    assert.are.equal(0, vim.tbl_count(download.active_handles))
+    assert.are.equal(-1, download.last_prefetch_dir)
+  end)
+
+  it("respects State.torn_down and performs no prefetch actions", function()
+    state.State.torn_down = true
+    local called = false
+
+    vim.system = function(cmd, opts, on_exit)
+      called = true
+      return { kill = function() end }
+    end
+
+    download.prefetch_around(1, 1)
+
+    assert.is_false(called)
+    assert.are.equal(0, vim.tbl_count(download.active_prefetch_handles))
   end)
 end)

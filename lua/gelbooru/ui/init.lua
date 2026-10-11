@@ -54,6 +54,7 @@ function M.teardown()
   download.active_downloads = {}
   pcall(download.abort_all)
   download.pending_resumes = {}
+  pcall(image.abort_all_ffmpeg)
   pcall(image.close_current_placement)
 
   local State = state.State
@@ -74,7 +75,7 @@ function M.teardown()
       pcall(vim.api.nvim_win_close, w, true)
     end
   end
-  for _, k in ipairs({ "img", "hdiv", "meta", "ac" }) do
+  for _, k in ipairs({ "img", "hdiv", "meta", "ac", "tag_modal" }) do
     local b = UI.bufs[k]
     if b and vim.api.nvim_buf_is_valid(b) then
       pcall(vim.api.nvim_buf_delete, b, { force = true })
@@ -98,7 +99,7 @@ function M.set_status(msg, reset_ms)
   end
   UI.status_timer = util.close_timer(UI.status_timer)
   local help =
-    "  j/k: nav  u: artist  < / >: width  \\: zen  o: web  O: open  <CR>: save  m: meta  /: search  q: quit"
+    "  j/k: nav  u: artist  t: tags  d: del  < / >: width  \\: zen  o: web  O: open  <CR>: save  m: meta  /: search  q: quit"
   util.set_lines(UI.bufs.status, { msg and ("  " .. msg) or help })
   if msg and reset_ms and reset_ms > 0 then
     UI.status_timer = vim.loop.new_timer()
@@ -438,7 +439,7 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
 
     local pext = image.file_ext_from_url(preview_url)
     local source_name = image.preview_source_name(p, preview_url)
-    if pext == "mp4" or pext == "webm" then
+    if image.is_video_post({ file_url = preview_url }) then
       if url_idx < #urls then
         load_and_render_image(p, url_idx + 1, 0, force_download)
         return
@@ -693,7 +694,7 @@ function M.render_preview(force_download)
       if is_same_post(State.posts[State.cur], p) then
         load_and_render_image(p, 1, 0, force_download)
         if not p.is_local then
-          download.prefetch_around(State.cur)
+          download.prefetch_around(State.cur, State.scroll_dir)
         end
       else
         log("DEBUG", "RENDER", "scroll_timer stale: wanted post %s, cur is now %s",
@@ -774,6 +775,345 @@ function M.search_active_artist()
     api.execute_search(artist_tag)
   else
     M.set_status("No artist tag found on active post", 2000)
+  end
+end
+
+function M.close_tag_modal()
+  local UI = state.UI
+  if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
+    pcall(vim.api.nvim_win_close, UI.wins.tag_modal, true)
+  end
+  UI.wins.tag_modal = nil
+  if UI.bufs.tag_modal and vim.api.nvim_buf_is_valid(UI.bufs.tag_modal) then
+    pcall(vim.api.nvim_buf_delete, UI.bufs.tag_modal, { force = true })
+  end
+  UI.bufs.tag_modal = nil
+  if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+    pcall(vim.api.nvim_set_current_win, UI.wins.list)
+    M.set_status()
+  end
+end
+
+function M.open_tag_modal()
+  local State = state.State
+  local UI = state.UI
+  local p = State.posts[State.cur]
+  if not p or not p.tags or vim.trim(p.tags) == "" then
+    M.set_status("No tags available for this post", 2000)
+    return
+  end
+
+  local seen = {}
+  local items = {}
+  for raw_tag in p.tags:gmatch("%S+") do
+    local tag = util.decode_html(raw_tag)
+    local tag_lower = tag:lower()
+    if tag ~= "" and not seen[tag_lower] then
+      seen[tag_lower] = true
+      local typ = 0
+      if p.artist and tag_lower == p.artist:lower() then
+        typ = 1
+      elseif State.tags_by_name and State.tags_by_name[tag_lower] then
+        typ = tonumber(State.tags_by_name[tag_lower].t) or 0
+      elseif tag:match("^sort:") or tag:match("^rating:") or tag:match("^id:") or tag:match("^score:") then
+        typ = 5
+      end
+      local badge = config.TAG_BADGES[typ] or "General"
+      table.insert(items, {
+        name = tag,
+        typ = typ,
+        badge = badge,
+        selected = false,
+      })
+    end
+  end
+
+  if #items == 0 then
+    M.set_status("No tags available for this post", 2000)
+    return
+  end
+
+  local type_order = { [1] = 1, [3] = 2, [4] = 3, [0] = 4, [6] = 5, [5] = 6 }
+  table.sort(items, function(a, b)
+    local oa = type_order[a.typ] or 99
+    local ob = type_order[b.typ] or 99
+    if oa ~= ob then
+      return oa < ob
+    end
+    return a.name:lower() < b.name:lower()
+  end)
+
+  if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
+    pcall(vim.api.nvim_win_close, UI.wins.tag_modal, true)
+    UI.wins.tag_modal = nil
+  end
+  if UI.bufs.tag_modal and vim.api.nvim_buf_is_valid(UI.bufs.tag_modal) then
+    pcall(vim.api.nvim_buf_delete, UI.bufs.tag_modal, { force = true })
+    UI.bufs.tag_modal = nil
+  end
+
+  local max_len = 0
+  for _, item in ipairs(items) do
+    local str_len = 4 + #item.badge + 3 + #item.name
+    if str_len > max_len then
+      max_len = str_len
+    end
+  end
+
+  local modal_w = math.max(40, math.min(vim.o.columns - 4, max_len + 6))
+  local modal_h = math.max(3, math.min(#items, math.floor(vim.o.lines * 0.7)))
+  local modal_row = math.max(1, math.floor((vim.o.lines - modal_h) / 2))
+  local modal_col = math.max(1, math.floor((vim.o.columns - modal_w) / 2))
+
+  UI.bufs.tag_modal = vim.api.nvim_create_buf(false, true)
+  vim.bo[UI.bufs.tag_modal].buftype = "nofile"
+  vim.bo[UI.bufs.tag_modal].bufhidden = "wipe"
+  vim.bo[UI.bufs.tag_modal].modifiable = true
+
+  local function render_modal_lines()
+    if not UI.bufs.tag_modal or not vim.api.nvim_buf_is_valid(UI.bufs.tag_modal) then
+      return
+    end
+    local lines = {}
+    for _, item in ipairs(items) do
+      table.insert(lines, string.format("[%s] [%s] %s", item.selected and "x" or " ", item.badge, item.name))
+    end
+    vim.bo[UI.bufs.tag_modal].modifiable = true
+    vim.api.nvim_buf_set_lines(UI.bufs.tag_modal, 0, -1, false, lines)
+    vim.bo[UI.bufs.tag_modal].modifiable = false
+  end
+
+  render_modal_lines()
+
+  UI.wins.tag_modal = util.float(UI.bufs.tag_modal, modal_row, modal_col, modal_w, modal_h, {
+    border = "rounded",
+    title = string.format("  Tags (%d)  ", #items),
+    title_pos = "center",
+    zindex = 75,
+    focusable = true,
+  })
+  vim.wo[UI.wins.tag_modal].cursorline = true
+  vim.wo[UI.wins.tag_modal].winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder"
+  pcall(vim.api.nvim_set_current_win, UI.wins.tag_modal)
+  pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { 1, 0 })
+
+  local function tmap(key, fn)
+    util.keymap(UI.bufs.tag_modal, "n", key, fn)
+  end
+
+  local function nav_down()
+    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
+    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
+    if cur < #items then
+      vim.api.nvim_win_set_cursor(UI.wins.tag_modal, { cur + 1, 0 })
+    end
+  end
+
+  local function nav_up()
+    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
+    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
+    if cur > 1 then
+      vim.api.nvim_win_set_cursor(UI.wins.tag_modal, { cur - 1, 0 })
+    end
+  end
+
+  tmap("j", nav_down)
+  tmap("<Down>", nav_down)
+  tmap("k", nav_up)
+  tmap("<Up>", nav_up)
+
+  local function toggle_cur()
+    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
+    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
+    if items[cur] then
+      items[cur].selected = not items[cur].selected
+      render_modal_lines()
+      pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { cur, 0 })
+    end
+  end
+  tmap("<Space>", toggle_cur)
+  tmap(" ", toggle_cur)
+
+  tmap("a", function()
+    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
+    local all_selected = true
+    for _, it in ipairs(items) do
+      if not it.selected then
+        all_selected = false
+        break
+      end
+    end
+    local new_val = not all_selected
+    for _, it in ipairs(items) do
+      it.selected = new_val
+    end
+    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
+    render_modal_lines()
+    pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { cur, 0 })
+  end)
+
+  tmap("y", function()
+    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
+    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
+    local it = items[cur]
+    if it then
+      pcall(vim.fn.setreg, '"', it.name)
+      pcall(vim.fn.setreg, "+", it.name)
+      M.set_status("Yanked tag: " .. it.name, 2000)
+      pcall(vim.notify, "Yanked tag: " .. it.name, vim.log.levels.INFO)
+    end
+  end)
+
+  tmap("<CR>", function()
+    local chosen = {}
+    for _, it in ipairs(items) do
+      if it.selected then
+        table.insert(chosen, it.name)
+      end
+    end
+    if #chosen == 0 then
+      if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
+        local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
+        if items[cur] then
+          table.insert(chosen, items[cur].name)
+        end
+      end
+    end
+    M.close_tag_modal()
+    if #chosen > 0 then
+      local query_str = table.concat(chosen, " ")
+      if UI.bufs.input and vim.api.nvim_buf_is_valid(UI.bufs.input) then
+        vim.bo[UI.bufs.input].modifiable = true
+        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { query_str })
+      end
+      api.execute_search(query_str)
+    end
+  end)
+
+  tmap("q", M.close_tag_modal)
+  tmap("<Esc>", M.close_tag_modal)
+end
+
+local function find_local_file_for_post(p)
+  if not p then return nil end
+  if p.is_local and p.file_url and not p.file_url:match("^https?://") and vim.fn.filereadable(p.file_url) == 1 then
+    return p.file_url
+  end
+  if p.id then
+    local local_index = require("gelbooru.local.index")
+    local ext = (state.State.saved_index and state.State.saved_index[tonumber(p.id)])
+      or (p.file_url and not p.file_url:match("^https?://") and util.file_ext(p.file_url))
+      or (p.file_url and util.file_ext(p.file_url))
+      or "jpg"
+    local cand = string.format("%s/%s.%s", config.options.save_dir, tostring(p.id), ext)
+    if vim.fn.filereadable(cand) == 1 then
+      return cand
+    end
+    for test_ext in pairs(config.VALID_MEDIA_EXTS) do
+      local test_cand = string.format("%s/%s.%s", config.options.save_dir, tostring(p.id), test_ext)
+      if vim.fn.filereadable(test_cand) == 1 then
+        return test_cand
+      end
+    end
+  end
+  return nil
+end
+
+function M.delete_current()
+  local State = state.State
+  local p = State.posts[State.cur]
+  if not p then return end
+
+  local local_path = find_local_file_for_post(p)
+  if not local_path or vim.fn.filereadable(local_path) == 0 then
+    M.set_status("Post is not saved locally", 2500)
+    return
+  end
+
+  local filename = vim.fn.fnamemodify(local_path, ":t")
+  local prompt_msg = "Delete local file: " .. filename .. "?"
+
+  local function do_delete()
+    local uv = vim.uv or vim.loop
+    if uv and uv.fs_unlink then
+      pcall(uv.fs_unlink, local_path)
+    end
+    if vim.fn.filereadable(local_path) == 1 then
+      pcall(os.remove, local_path)
+      pcall(vim.fn.delete, local_path)
+    end
+
+    local id_num = p.id and tonumber(p.id)
+    if id_num then
+      local local_index = require("gelbooru.local.index")
+      local_index.unmark_saved(id_num)
+      if State.saved_index then
+        State.saved_index[id_num] = nil
+      end
+      local meta_path = util.meta_cache_path(p.id)
+      if meta_path and vim.fn.filereadable(meta_path) == 1 then
+        local cached = util.read_json(meta_path)
+        if cached then
+          if cached.file_url and not p._remote_file_url then
+            p._remote_file_url = cached.file_url
+          end
+          if cached.preview_url and not p._remote_preview_url then
+            p._remote_preview_url = cached.preview_url
+          end
+        end
+        pcall(vim.fn.delete, meta_path)
+      end
+      local vthumb = image.get_video_thumbnail_path(local_path, p.id)
+      if vthumb and vim.fn.filereadable(vthumb) == 1 then
+        pcall(vim.fn.delete, vthumb)
+      end
+      local direct_vthumb = string.format("%s/vthumb_%s.jpg", config.options.cache_dir, tostring(p.id))
+      if vim.fn.filereadable(direct_vthumb) == 1 then
+        pcall(vim.fn.delete, direct_vthumb)
+      end
+      image.clear_snacks_cache_for(p.id)
+    end
+
+    if p.id then
+      p.is_local = false
+      if p._remote_file_url and p._remote_file_url ~= "" then
+        p.file_url = p._remote_file_url
+      end
+      if p._remote_preview_url and p._remote_preview_url ~= "" then
+        p.preview_url = p._remote_preview_url
+      end
+      if not p.file_url or not p.file_url:match("^https?://") then
+        api.fetch_post_by_id(p.id, function(d)
+          if d then
+            if d.file_url then p.file_url = d.file_url end
+            if d.preview_url then p.preview_url = d.preview_url end
+            if d.sample_url then p.sample_url = d.sample_url end
+          end
+        end)
+      end
+    end
+
+    State.cur_id = nil
+    M.render_list()
+    M.render_preview(false)
+    M.render_metadata(p)
+    M.set_status(string.format("Deleted local file: %s (press <CR> to re-download)", filename), 3000)
+  end
+
+  if vim.ui and vim.ui.select then
+    vim.ui.select({ "Yes, delete file", "Cancel" }, {
+      prompt = prompt_msg,
+    }, function(choice)
+      if choice == "Yes, delete file" then
+        do_delete()
+      end
+    end)
+  elseif vim.fn.confirm then
+    if vim.fn.confirm(prompt_msg, "&Yes\n&No", 2) == 1 then
+      do_delete()
+    end
+  else
+    do_delete()
   end
 end
 
@@ -977,6 +1317,9 @@ function M.ensure_ui()
         M.render_list()
         _syncing_cursor = false
         M.render_preview(false)
+        if not (State.posts[State.cur] and State.posts[State.cur].is_local) then
+          download.prefetch_around(State.cur, State.scroll_dir)
+        end
         if State.cur >= #State.posts - 5 then
           api.fetch(1, false)
         end
@@ -1014,6 +1357,7 @@ function M.ensure_ui()
     if #State.posts == 0 then
       return
     end
+    local old_cur = State.cur
     if action == 1 or action == "j" then
       State.cur = math.min(State.cur + 1, #State.posts)
       State.scroll_dir = 1
@@ -1028,12 +1372,20 @@ function M.ensure_ui()
       State.scroll_dir = 1
     elseif type(action) == "number" then
       State.cur = math.max(1, math.min(#State.posts, action))
+      if State.cur > old_cur then
+        State.scroll_dir = 1
+      elseif State.cur < old_cur then
+        State.scroll_dir = -1
+      end
     end
     if State.history[State.history_idx] then
       State.history[State.history_idx].cur = State.cur
     end
     M.render_list()
     M.render_preview(false)
+    if not (State.posts[State.cur] and State.posts[State.cur].is_local) then
+      download.prefetch_around(State.cur, State.scroll_dir)
+    end
     if State.cur >= #State.posts - 5 then
       api.fetch(1, false)
     end
@@ -1109,9 +1461,7 @@ function M.ensure_ui()
     if State.zen_mode then
       if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
         vim.wo[UI.wins.list].cursorline = false
-      end
-      if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) then
-        pcall(vim.api.nvim_set_current_win, UI.wins.img)
+        pcall(vim.api.nvim_set_current_win, UI.wins.list)
       end
     else
       if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
@@ -1125,6 +1475,10 @@ function M.ensure_ui()
   M.toggle_zen = toggle_zen
 
   lm("u", M.search_active_artist)
+  lm("t", M.open_tag_modal)
+  lm("T", M.open_tag_modal)
+  lm("d", M.delete_current)
+  lm("D", M.delete_current)
   lm("<", function()
     State.list_width_ratio = math.max(0.10, math.min(0.40, (State.list_width_ratio or 0.25) - 0.025))
     local l = M.calc_layout(true)
@@ -1209,6 +1563,10 @@ function M.ensure_ui()
     handle_resize()
   end)
   mm("u", M.search_active_artist)
+  mm("t", M.open_tag_modal)
+  mm("T", M.open_tag_modal)
+  mm("d", M.delete_current)
+  mm("D", M.delete_current)
   mm("\\", toggle_zen)
   mm("o", open_web_page)
   mm("O", open_media_viewer)
@@ -1223,6 +1581,10 @@ function M.ensure_ui()
       util.keymap(buf, "n", "q", return_to_list)
       util.keymap(buf, "n", "<Esc>", return_to_list)
       util.keymap(buf, "n", "\\", toggle_zen)
+      util.keymap(buf, "n", "t", M.open_tag_modal)
+      util.keymap(buf, "n", "T", M.open_tag_modal)
+      util.keymap(buf, "n", "d", M.delete_current)
+      util.keymap(buf, "n", "D", M.delete_current)
     end
   end
 
@@ -1234,18 +1596,40 @@ function M.ensure_ui()
     util.keymap(UI.bufs.input, "i", key, fn)
   end
 
+  local function apply_autocomplete_selection(t, add_space)
+    local full = vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or ""
+    local col = #full
+    if UI.wins.input and vim.api.nvim_win_is_valid(UI.wins.input) then
+      local ok, cursor = pcall(vim.api.nvim_win_get_cursor, UI.wins.input)
+      if ok and cursor and type(cursor[2]) == "number" then
+        col = cursor[2]
+      end
+    end
+    local before = full:sub(1, col)
+    local word_before = before:match("(%S*)$") or ""
+    local after = full:sub(col + 1)
+    local word_after = after:match("^(%S*)") or ""
+    local prefix = before:sub(1, #before - #word_before)
+    local rest_after = after:sub(#word_after + 1)
+    local sign = word_before:match("^([|%-~]+)") or ""
+
+    local new_text = prefix .. sign .. t.n .. (add_space and " " or "") .. rest_after
+    vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_text })
+    local new_cursor_col = #prefix + #sign + #t.n + (add_space and 1 or 0)
+    if UI.wins.input and vim.api.nvim_win_is_valid(UI.wins.input) then
+      pcall(vim.api.nvim_win_set_cursor, UI.wins.input, { 1, new_cursor_col })
+    end
+    State.autocomplete_cur = 0
+    State.autocomplete_navigated = false
+    return new_text
+  end
+
   local function submit_input()
     local full = vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or ""
     if State.autocomplete_navigated and State.autocomplete_cur > 0 then
       local t = State.autocomplete_filtered[State.autocomplete_cur]
       if t then
-        local last_word = full:match("(%S*)$") or ""
-        local prefix = full:sub(1, #full - #last_word)
-        local sign = last_word:match("^([|%-~]+)") or ""
-        full = prefix .. sign .. t.n
-        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { full })
-        State.autocomplete_cur = 0
-        State.autocomplete_navigated = false
+        full = apply_autocomplete_selection(t, false)
       end
     end
     full = full:match("^%s*(.-)%s*$")
@@ -1311,27 +1695,32 @@ function M.ensure_ui()
   im_i("<S-Tab>", nav_up)
 
   im_i("<Space>", function()
-    local full = vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or ""
-    local last_word = full:match("(%S*)$") or ""
-
     -- If the user navigated with Tab/Down/C-n, Space always selects the highlighted entry.
     if State.autocomplete_navigated and State.autocomplete_cur > 0 then
       local t = State.autocomplete_filtered[State.autocomplete_cur]
       if t then
-        local prefix = full:sub(1, #full - #last_word)
-        local sign = last_word:match("^([|%-~]+)") or ""
-        local new_text = prefix .. sign .. t.n .. " "
-        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_text })
-        vim.api.nvim_win_set_cursor(UI.wins.input, { 1, #new_text })
-        State.autocomplete_cur = 0
-        State.autocomplete_navigated = false
+        apply_autocomplete_selection(t, true)
         return
       end
     end
 
+    local full = vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or ""
+    local col = #full
+    if UI.wins.input and vim.api.nvim_win_is_valid(UI.wins.input) then
+      local ok, cursor = pcall(vim.api.nvim_win_get_cursor, UI.wins.input)
+      if ok and cursor and type(cursor[2]) == "number" then
+        col = cursor[2]
+      end
+    end
+    local before = full:sub(1, col)
+    local word_before = before:match("(%S*)$") or ""
+    local after = full:sub(col + 1)
+    local word_after = after:match("^(%S*)") or ""
+    local target_word = word_before .. word_after
+
     -- Without explicit navigation: auto-select only if the top suggestion is an
     -- exact or normalised match for what was typed.
-    if last_word == "" or State.autocomplete_cur == 0 then
+    if target_word == "" or State.autocomplete_cur == 0 then
       vim.api.nvim_feedkeys(" ", "n", true)
       return
     end
@@ -1342,7 +1731,7 @@ function M.ensure_ui()
       return
     end
 
-    local search_target = last_word:gsub("^[|%-~]+", ""):lower()
+    local search_target = target_word:gsub("^[|%-~]+", ""):lower()
     local target_norm = util.normalize_str(search_target)
     local t_norm = util.normalize_str(t.n)
 
@@ -1351,13 +1740,7 @@ function M.ensure_ui()
       return
     end
 
-    local prefix = full:sub(1, #full - #last_word)
-    local sign = last_word:match("^([|%-~]+)") or ""
-    local new_text = prefix .. sign .. t.n .. " "
-    vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_text })
-    vim.api.nvim_win_set_cursor(UI.wins.input, { 1, #new_text })
-    State.autocomplete_cur = 0
-    State.autocomplete_navigated = false
+    apply_autocomplete_selection(t, true)
   end)
 
   return true

@@ -36,6 +36,10 @@ M.State = {
   list_width_ratio = 0.25,
   zen_mode = false,
   saved_index = {},
+  session_cache = {},
+  local_folder_posts = nil,
+  local_filter = nil,
+  local_query_tag_str = nil,
 }
 
 M.UI = {
@@ -74,6 +78,10 @@ function M.reset_query_state()
   M.State.list_width_ratio = 0.25
   M.State.zen_mode = false
   M.State.saved_index = {}
+  M.State.session_cache = {}
+  M.State.local_folder_posts = nil
+  M.State.local_filter = nil
+  M.State.local_query_tag_str = nil
   pcall(function()
     require("gelbooru.local.index").reset()
   end)

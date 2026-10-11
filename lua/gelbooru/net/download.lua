@@ -8,6 +8,9 @@ M.active_downloads = {}
 M.active_handles = {}
 M.pending_resumes = {} -- guards the async gap between scan and active_downloads registration
 M.interrupted_dests = {} -- dests killed by teardown; callbacks skip rename and preserve .part
+M.active_prefetch_handles = {}
+M.queued_prefetch_dests = {}
+M.last_prefetch_dir = nil
 
 function M.abort_all()
   M.cancel_pending_resumes()
@@ -20,6 +23,8 @@ function M.abort_all()
     end
   end
   M.active_handles = {}
+  M.active_prefetch_handles = {}
+  M.queued_prefetch_dests = {}
 end
 
 function M.curl_async(url, cb)
@@ -288,18 +293,47 @@ function M.cancel_prefetch_timers()
     end
   end
   UI.prefetch_timers = {}
+  M.queued_prefetch_dests = {}
+  M.last_prefetch_dir = nil
 end
 
-function M.prefetch_around(idx)
-  M.cancel_prefetch_timers()
+function M.prefetch_around(idx, scroll_dir)
+  if state.State.torn_down then
+    return
+  end
 
   local State = state.State
+  if not State.posts or #State.posts == 0 then
+    return
+  end
+
   local UI = state.UI
   local image = require("gelbooru.ui.image")
   local radius = config.options.prefetch_radius
-  local dir = State.scroll_dir or 1
-  local ahead, behind = {}, {}
+  local dir = scroll_dir or State.scroll_dir or 1
+  if dir == 0 then
+    dir = 1
+  end
 
+  -- Direction handling:
+  -- Do not cancel in-flight prefetch downloads if moving in the same direction (`scroll_dir`).
+  -- If scroll direction has reversed, cancel old prefetch timers and abort opposite in-flight prefetch downloads.
+  if M.last_prefetch_dir ~= nil and M.last_prefetch_dir ~= dir then
+    M.cancel_prefetch_timers()
+    for dest, handle in pairs(M.active_prefetch_handles or {}) do
+      if handle and handle.kill then
+        pcall(handle.kill, handle, 9)
+      end
+      if M.active_downloads[dest] then
+        M.active_downloads[dest] = nil
+      end
+      M.active_handles[dest] = nil
+    end
+    M.active_prefetch_handles = {}
+  end
+  M.last_prefetch_dir = dir
+
+  local ahead, behind = {}, {}
   for i = 1, radius do
     local fwd = idx + dir * i
     local bwd = idx - dir * i
@@ -319,39 +353,67 @@ function M.prefetch_around(idx)
     table.insert(ordered, i)
   end
 
+  local immediate_next = idx + dir
   local delay = 0
+
   for _, i in ipairs(ordered) do
     local p = State.posts[i]
-    local urls, dest = image.get_preview_targets(p)
-    local url = urls[1]
+    if p and not p.is_local then
+      local urls, dest = image.get_preview_targets(p)
+      local url = urls and urls[1]
 
-    if url and dest then
-      if vim.fn.filereadable(dest) == 0 and not M.active_downloads[dest] then
-        local timer = vim.loop.new_timer()
-        local timer_idx = #UI.prefetch_timers + 1
-        UI.prefetch_timers[timer_idx] = timer
-        local cap_url, cap_dest = url, dest
-        local cap_pid = p.id
+      if url and dest then
+        if vim.fn.filereadable(dest) == 0 and not M.active_downloads[dest] then
+          if i == immediate_next then
+            -- Immediate next post (`cur + dir`): eliminate artificial 50ms delay, trigger immediately!
+            log("DEBUG", "PREFETCH", "Prefetching immediate next post %s (dir=%d)", tostring(p.id), dir)
+            M.queued_prefetch_dests[dest] = nil
+            local handle = M.download_async(url, dest, function()
+              if M.active_prefetch_handles then
+                M.active_prefetch_handles[dest] = nil
+              end
+            end)
+            if handle and M.active_prefetch_handles then
+              M.active_prefetch_handles[dest] = handle
+            end
+          elseif not M.queued_prefetch_dests[dest] then
+            delay = delay + 50
+            M.queued_prefetch_dests[dest] = true
+            local timer = vim.loop.new_timer()
+            local timer_idx = #UI.prefetch_timers + 1
+            UI.prefetch_timers[timer_idx] = timer
+            local cap_url, cap_dest = url, dest
+            local cap_pid = p.id
 
-        timer:start(
-          delay,
-          0,
-          vim.schedule_wrap(function()
-            if not timer:is_closing() then
-              timer:close()
-            end
-            -- Remove from list so it doesn't grow unboundedly across navigation.
-            UI.prefetch_timers[timer_idx] = nil
-            if state.State.torn_down or not (state.UI.wins and state.UI.wins.frame and vim.api.nvim_win_is_valid(state.UI.wins.frame)) then
-              return
-            end
-            if vim.fn.filereadable(cap_dest) == 0 and not M.active_downloads[cap_dest] then
-              log("DEBUG", "PREFETCH", "Prefetching post %s (dir=%d)", tostring(cap_pid), dir)
-              M.download_async(cap_url, cap_dest)
-            end
-          end)
-        )
-        delay = delay + 50
+            timer:start(
+              delay,
+              0,
+              vim.schedule_wrap(function()
+                if not timer:is_closing() then
+                  timer:close()
+                end
+                UI.prefetch_timers[timer_idx] = nil
+                if M.queued_prefetch_dests then
+                  M.queued_prefetch_dests[cap_dest] = nil
+                end
+                if state.State.torn_down or not (state.UI.wins and state.UI.wins.frame and vim.api.nvim_win_is_valid(state.UI.wins.frame)) then
+                  return
+                end
+                if vim.fn.filereadable(cap_dest) == 0 and not M.active_downloads[cap_dest] then
+                  log("DEBUG", "PREFETCH", "Prefetching post %s (dir=%d)", tostring(cap_pid), dir)
+                  local handle = M.download_async(cap_url, cap_dest, function()
+                    if M.active_prefetch_handles then
+                      M.active_prefetch_handles[cap_dest] = nil
+                    end
+                  end)
+                  if handle and M.active_prefetch_handles then
+                    M.active_prefetch_handles[cap_dest] = handle
+                  end
+                end
+              end)
+            )
+          end
+        end
       end
     end
   end

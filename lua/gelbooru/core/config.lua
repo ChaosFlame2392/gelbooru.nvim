@@ -45,6 +45,9 @@ M.VALID_MEDIA_EXTS = {
   ["webp"] = true,
   ["mp4"] = true,
   ["webm"] = true,
+  ["avi"] = true,
+  ["mov"] = true,
+  ["mkv"] = true,
 }
 
 M.META_TAGS = {

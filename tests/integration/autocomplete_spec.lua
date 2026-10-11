@@ -6,6 +6,7 @@ local ui = require("gelbooru.ui")
 local autocomplete = require("gelbooru.ui.autocomplete")
 local db = require("gelbooru.tags.db")
 local state = require("gelbooru.core.state")
+local api = require("gelbooru.net.api")
 
 describe("Integration: Autocomplete Engine", function()
   before_each(function()
@@ -110,5 +111,107 @@ describe("Integration: Autocomplete Engine", function()
       names[item.n] = true
     end
     assert.is_true(names["sort:random"] == true)
+  end)
+
+  local function get_keymap_cb(buf, mode, key)
+    local maps = vim.api.nvim_buf_get_keymap(buf, mode or "i")
+    for _, m in ipairs(maps) do
+      if m.lhs == key or (key == "<Space>" and m.lhs == " ") or (key == " " and m.lhs == "<Space>") then
+        return m.callback
+      end
+    end
+    return nil
+  end
+
+  describe("Issue 3: Query Bar Substring Autocomplete Cursor Alignment", function()
+    it("completes token under cursor with <Space> when cursor is on earlier token (not tail)", function()
+      ui.open()
+      db.add_tag_to_index({ n = "rating:explicit", t = 5, c = 1000 }, state.State.all_tags, state.State.all_tags_by_first)
+
+      local text = "rating:expli tag1"
+      vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { text })
+      -- Set cursor at end of "rating:expli" (col 12)
+      vim.api.nvim_win_set_cursor(state.UI.wins.input, { 1, 12 })
+
+      state.State.autocomplete_filtered = { { n = "rating:explicit" } }
+      state.State.autocomplete_cur = 1
+      state.State.autocomplete_navigated = true
+
+      local space_cb = get_keymap_cb(state.UI.bufs.input, "i", "<Space>")
+      assert.is_not_nil(space_cb, "<Space> keymap must exist on input buffer")
+      space_cb()
+
+      local lines = vim.api.nvim_buf_get_lines(state.UI.bufs.input, 0, 1, false)
+      assert.are.equal("rating:explicit  tag1", lines[1])
+      local cur = vim.api.nvim_win_get_cursor(state.UI.wins.input)
+      assert.are.equal(16, cur[2]) -- #"" + #"" + #"rating:explicit" + 1 = 16
+    end)
+
+    it("completes token under cursor with <Space> when cursor is in the middle of a token", function()
+      ui.open()
+      local text = "rating:expli tag1"
+      vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { text })
+      -- Set cursor at col 10 (inside "rating:expli", right after "rating:exp")
+      vim.api.nvim_win_set_cursor(state.UI.wins.input, { 1, 10 })
+
+      state.State.autocomplete_filtered = { { n = "rating:explicit" } }
+      state.State.autocomplete_cur = 1
+      state.State.autocomplete_navigated = true
+
+      local space_cb = get_keymap_cb(state.UI.bufs.input, "i", "<Space>")
+      assert.is_not_nil(space_cb)
+      space_cb()
+
+      local lines = vim.api.nvim_buf_get_lines(state.UI.bufs.input, 0, 1, false)
+      assert.are.equal("rating:explicit  tag1", lines[1])
+      local cur = vim.api.nvim_win_get_cursor(state.UI.wins.input)
+      assert.are.equal(16, cur[2])
+    end)
+
+    it("preserves leading modifier prefix (| or -) when completing token under cursor", function()
+      ui.open()
+      local text = "-rating:expli tag1"
+      vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { text })
+      -- Set cursor at col 13 (end of "-rating:expli")
+      vim.api.nvim_win_set_cursor(state.UI.wins.input, { 1, 13 })
+
+      state.State.autocomplete_filtered = { { n = "rating:explicit" } }
+      state.State.autocomplete_cur = 1
+      state.State.autocomplete_navigated = true
+
+      local space_cb = get_keymap_cb(state.UI.bufs.input, "i", "<Space>")
+      assert.is_not_nil(space_cb)
+      space_cb()
+
+      local lines = vim.api.nvim_buf_get_lines(state.UI.bufs.input, 0, 1, false)
+      assert.are.equal("-rating:explicit  tag1", lines[1])
+      local cur = vim.api.nvim_win_get_cursor(state.UI.wins.input)
+      assert.are.equal(17, cur[2]) -- #"" + #"-" + #"rating:explicit" + 1 = 17
+    end)
+
+    it("completes token under cursor with <CR> (submit_input) without extra space and executes search", function()
+      ui.open()
+      local executed_query = nil
+      local orig_search = api.execute_search
+      api.execute_search = function(q)
+        executed_query = q
+      end
+
+      local text = "rating:expli tag1"
+      vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, 1, false, { text })
+      vim.api.nvim_win_set_cursor(state.UI.wins.input, { 1, 12 })
+
+      state.State.autocomplete_filtered = { { n = "rating:explicit" } }
+      state.State.autocomplete_cur = 1
+      state.State.autocomplete_navigated = true
+
+      local cr_cb = get_keymap_cb(state.UI.bufs.input, "i", "<CR>")
+      assert.is_not_nil(cr_cb, "<CR> keymap must exist on input buffer")
+      cr_cb()
+
+      assert.are.equal("rating:explicit tag1", executed_query)
+
+      api.execute_search = orig_search
+    end)
   end)
 end)

@@ -1013,5 +1013,121 @@ describe("Integration: Search & List flow", function()
       local committed_line = vim.api.nvim_buf_get_lines(state.UI.bufs.input, 0, 1, false)[1]
       assert.are.equal("-hatsune_miku ", committed_line)
     end)
+
+    it("Issue 6: normalizes ~rating:, ~score:, ~id: while preserving native booru tags", function()
+      -- Direct normalize_remote_tags verification
+      assert.are.equal("rating:general", api.normalize_remote_tags("~rating:general"))
+      assert.are.equal("rating:explicit", api.normalize_remote_tags("~rating:explicit"))
+      assert.are.equal("score:100", api.normalize_remote_tags("~score:100"))
+      assert.are.equal("score:>=50", api.normalize_remote_tags("~score:>=50"))
+      assert.are.equal("id:12345", api.normalize_remote_tags("~id:12345"))
+      assert.are.equal("~hatsune_miku ~megurine_luka", api.normalize_remote_tags("~hatsune_miku ~megurine_luka"))
+      assert.are.equal(
+        "~hatsune_miku rating:general score:>=100 id:555",
+        api.normalize_remote_tags("~hatsune_miku ~rating:general ~score:>=100 ~id:555")
+      )
+
+      -- Integration: verify remote curl query sends normalized tags
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_curl_async = download.curl_async
+      local captured_urls = {}
+
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          table.insert(captured_urls, url)
+          local posts = {
+            { id = "1", score = "100", tags = "miku", file_url = "https://example.com/1.jpg" },
+          }
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = posts }))
+          end)
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      -- 1. Standard search query with ~rating:, ~score:, and native ~tag
+      api.execute_search("~hatsune_miku ~rating:general ~score:>=100")
+      vim.wait(200, function()
+        return not state.State.loading and #state.State.posts > 0
+      end, 20)
+
+      assert.is_true(#captured_urls > 0)
+      local req_url = captured_urls[1]
+      -- Native tag must keep ~
+      assert.is_truthy(req_url:find("~hatsune_miku"))
+      -- Modifiers must NOT have ~
+      assert.is_falsy(req_url:find("~rating"))
+      assert.is_falsy(req_url:find("~score"))
+      assert.is_truthy(req_url:find("rating%%3Ageneral"))
+      assert.is_truthy(req_url:find("score%%3A"))
+
+      -- 2. Piped search query with ~rating:
+      captured_urls = {}
+      api.execute_search("~hatsune_miku ~rating:sensitive | sort:score:10")
+      vim.wait(200, function()
+        return not state.State.loading and #state.State.posts > 0
+      end, 20)
+
+      assert.is_true(#captured_urls > 0)
+      local pipe_url = captured_urls[1]
+      assert.is_truthy(pipe_url:find("~hatsune_miku"))
+      assert.is_falsy(pipe_url:find("~rating"))
+      assert.is_truthy(pipe_url:find("rating%%3Asensitive"))
+
+      download.curl_async = orig_curl_async
+    end)
+
+    it("Issue 5: executes piped search with open-ended range (sort:id:50..)", function()
+      ui.open()
+      local config = require("gelbooru.core.config")
+      local download = require("gelbooru.net.download")
+      local orig_curl_async = download.curl_async
+      local captured_urls = {}
+
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          table.insert(captured_urls, url)
+          local pid = tonumber(url:match("pid=(%d+)")) or 0
+          local limit = tonumber(url:match("limit=(%d+)")) or 100
+          local posts = {}
+          for i = 1, limit do
+            local id_num = (pid * 100) + i
+            table.insert(posts, {
+              id = tostring(id_num),
+              score = tostring(id_num),
+              tags = "miku",
+              file_url = string.format("https://example.com/%d.jpg", id_num),
+            })
+          end
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = posts }))
+          end)
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      -- sort:id:50.. has offset = 50, limit = nil
+      -- pool_target = math.min(50 + config.options.per_page, 2000)
+      api.execute_search("miku sort:id:50..")
+
+      vim.wait(500, function()
+        return not state.State.loading and #state.State.posts > 0
+      end, 20)
+
+      assert.is_false(state.State.loading)
+      assert.is_true(#captured_urls > 0)
+      -- First request fetches batch 1 (pid=0)
+      assert.is_truthy(captured_urls[1]:find("pid=0"))
+      -- rel_start = 50 - 0 + 1 = 51, rel_end = #candidate_pool = pool_target -> config.options.per_page items
+      local expected_count = config.options.per_page
+      assert.are.equal(expected_count, #state.State.posts)
+      assert.are.equal("51", state.State.posts[1].id)
+      assert.are.equal(tostring(50 + expected_count), state.State.posts[#state.State.posts].id)
+
+      download.curl_async = orig_curl_async
+    end)
   end)
 end)

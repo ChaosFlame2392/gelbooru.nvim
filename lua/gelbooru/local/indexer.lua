@@ -132,19 +132,49 @@ function M.process_next_batch()
         if State.local_filter and State.local_folder_posts then
           local query_mod = require("gelbooru.local.query")
           local new_filtered = query_mod.filter_posts(State.local_folder_posts, State.local_filter)
-          local has_sort = (State.local_filter.sort ~= nil)
-            or (State.local_filter.pipeline_stages and #State.local_filter.pipeline_stages > 0)
+          local is_random_sort = false
+          if State.local_filter.sort and State.local_filter.sort.key == "random" then
+            is_random_sort = true
+          elseif State.local_filter.pipeline_stages then
+            for _, st in ipairs(State.local_filter.pipeline_stages) do
+              if st.key == "random" then
+                is_random_sort = true
+                break
+              end
+            end
+          end
+          local has_sort = not is_random_sort
+            and ((State.local_filter.sort ~= nil)
+              or (State.local_filter.pipeline_stages and #State.local_filter.pipeline_stages > 0))
+
           if #new_filtered ~= #State.posts or has_sort then
             local prev_count = #State.posts
+            local cur_post = State.posts[State.cur]
+            local new_cur = nil
+            if cur_post then
+              for idx, p in ipairs(new_filtered) do
+                if util.is_same_post(p, cur_post) then
+                  new_cur = idx
+                  break
+                end
+              end
+            end
+
             State.posts = new_filtered
+            if new_cur then
+              State.cur = new_cur
+            else
+              State.cur = math.max(1, math.min(State.cur or 1, math.max(1, #new_filtered)))
+            end
+
             local ui = require("gelbooru.ui")
             ui.render_list()
             if prev_count == 0 and #State.posts > 0 then
               State.cur = 1
               ui.render_preview(false)
             else
-              local cur_post = State.posts[State.cur]
-              if util.is_same_post(cur_post, updated_p) then
+              local active_post = State.posts[State.cur]
+              if util.is_same_post(active_post, updated_p) then
                 ui.render_metadata(updated_p)
               end
             end

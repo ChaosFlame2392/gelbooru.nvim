@@ -114,6 +114,15 @@ function M.scan_local_folder(dir)
             if cached.source then
               post.source = cached.source
             end
+            if cached.file_url then
+              post._remote_file_url = cached.file_url
+            end
+            if cached.preview_url then
+              post._remote_preview_url = cached.preview_url
+            end
+            if cached.sample_url then
+              post._remote_sample_url = cached.sample_url
+            end
             post._metadata_fetched = true
           end
         end

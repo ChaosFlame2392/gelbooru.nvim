@@ -126,6 +126,33 @@ function M.is_saved(id)
   return (State.saved_index and State.saved_index[num_id] ~= nil) or false
 end
 
+function M.unmark_saved(id)
+  if not id then
+    return
+  end
+  local num_id = tonumber(id)
+  if not num_id then
+    return
+  end
+  local State = state.State
+  if State.saved_index then
+    State.saved_index[num_id] = nil
+  end
+
+  local uv = vim.uv or vim.loop
+  local target_dir = normalize_dir(config.options.save_dir)
+  if target_dir then
+    local stat = uv.fs_stat(target_dir)
+    if stat and stat.mtime then
+      _last_mtime = stat.mtime.sec or stat.mtime
+      _last_dir = target_dir
+      _has_scanned = true
+      M._last_mtime = _last_mtime
+      M._scanned_dir = _last_dir
+    end
+  end
+end
+
 function M.reset()
   _last_mtime = 0
   _last_dir = nil

@@ -11,6 +11,7 @@ local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
 local config = require("gelbooru.core.config")
 local image = require("gelbooru.ui.image")
+local download = require("gelbooru.net.download")
 
 local function get_keymap_cb(buf, mode, key)
   if not buf or not vim.api.nvim_buf_is_valid(buf) then
@@ -732,7 +733,7 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       vim.api.nvim_buf_clear_namespace = orig_clear
     end)
 
-    it("Issue 0.3: toggle_zen disables cursorline and focuses UI.wins.img; exiting restores cursorline and focuses UI.wins.list", function()
+    it("Issue 0.3: toggle_zen disables cursorline and maintains UI.wins.list focus; exiting restores cursorline", function()
       ui.open()
       assert.is_true(vim.wo[state.UI.wins.list].cursorline)
 
@@ -740,13 +741,53 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       ui.toggle_zen()
       assert.is_true(state.State.zen_mode)
       assert.is_false(vim.wo[state.UI.wins.list].cursorline, "cursorline must be disabled on list window in Zen mode")
-      assert.are.equal(state.UI.wins.img, vim.api.nvim_get_current_win(), "img window must be focused in Zen mode")
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "list window must maintain focus in Zen mode")
 
       -- Exit Zen mode
       ui.toggle_zen()
       assert.is_false(state.State.zen_mode)
       assert.is_true(vim.wo[state.UI.wins.list].cursorline, "cursorline must be re-enabled on list window when exiting Zen mode")
-      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "list window must be re-focused when exiting Zen mode")
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "list window must remain focused when exiting Zen mode")
+    end)
+
+    it("Issue 11: Zen Mode maintains focus on UI.wins.list and moves cursor up/down seamlessly without cursor artifacts on UI.wins.img", function()
+      ui.open()
+      state.State.posts = {
+        { id = 1, file_url = "https://example.com/1.jpg", score = 10 },
+        { id = 2, file_url = "https://example.com/2.jpg", score = 20 },
+        { id = 3, file_url = "https://example.com/3.jpg", score = 30 },
+      }
+      state.State.cur = 1
+      ui.render_list()
+
+      -- Enter Zen mode
+      ui.toggle_zen()
+      assert.is_true(state.State.zen_mode)
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "list window must maintain focus in Zen mode")
+      assert.are_not.equal(state.UI.wins.img, vim.api.nvim_get_current_win(), "UI.wins.img must never receive focus in Zen mode")
+      assert.is_false(vim.wo[state.UI.wins.list].cursorline, "cursorline on list must be false in Zen mode")
+
+      -- Standard navigation in list buffer
+      local j_cb = get_keymap_cb(state.UI.bufs.list, "n", "j")
+      assert.is_not_nil(j_cb, "'j' keymap must be registered on list buffer")
+      j_cb()
+      assert.are.equal(2, state.State.cur, "cursor should advance down to post 2")
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "focus must remain on list window")
+
+      j_cb()
+      assert.are.equal(3, state.State.cur, "cursor should advance down to post 3")
+
+      local k_cb = get_keymap_cb(state.UI.bufs.list, "n", "k")
+      assert.is_not_nil(k_cb, "'k' keymap must be registered on list buffer")
+      k_cb()
+      assert.are.equal(2, state.State.cur, "cursor should move up to post 2")
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win())
+
+      -- Exit Zen mode restores layout and cursorline
+      ui.toggle_zen()
+      assert.is_false(state.State.zen_mode)
+      assert.is_true(vim.wo[state.UI.wins.list].cursorline, "cursorline must be re-enabled on exit")
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win())
     end)
 
     it("Issue 0.3: image buffer attaches full browsing keymaps (j, k, gg, G, r, R, m, u, o, O, <CR>, \\, q, <Esc>, /, i)", function()
@@ -879,6 +920,61 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       assert.are.equal(vthumb, last.src, "Should render cached vthumb instead of low-res preview URL")
 
       vim.fn.delete(vthumb)
+    end)
+
+    it("Issue 4: on_cursor_change triggers download.prefetch_around eagerly with State.cur and State.scroll_dir", function()
+      ui.open()
+
+      state.State.posts = {
+        { id = 1001, file_url = "https://example.com/1001.jpg" },
+        { id = 1002, file_url = "https://example.com/1002.jpg" },
+        { id = 1003, file_url = "https://example.com/1003.jpg" },
+      }
+      state.State.cur = 1
+      state.State.scroll_dir = 1
+      ui.render_list()
+
+      local prefetch_calls = {}
+      local orig_prefetch = download.prefetch_around
+      download.prefetch_around = function(idx, dir)
+        table.insert(prefetch_calls, { idx = idx, dir = dir })
+      end
+
+      -- Trigger cursor move down (j / 1)
+      ui.on_cursor_change(1)
+
+      -- Must be triggered eagerly synchronously without waiting for 150ms scroll_timer!
+      assert.is_true(#prefetch_calls >= 1)
+      local last_call = prefetch_calls[#prefetch_calls]
+      assert.are.equal(2, last_call.idx)
+      assert.are.equal(1, last_call.dir)
+
+      -- Trigger cursor move up (k / -1)
+      ui.on_cursor_change(-1)
+      assert.is_true(#prefetch_calls >= 2)
+      last_call = prefetch_calls[#prefetch_calls]
+      assert.are.equal(1, last_call.idx)
+      assert.are.equal(-1, last_call.dir)
+
+      download.prefetch_around = orig_prefetch
+    end)
+
+    it("Issue 13: ui.teardown invokes image.abort_all_ffmpeg() and kills active ffmpeg processes", function()
+      ui.open()
+
+      local killed = {}
+      local mock_ffmpeg_handle = {
+        kill = function(self, sig)
+          table.insert(killed, sig)
+        end,
+      }
+      image.active_ffmpeg_handles[mock_ffmpeg_handle] = mock_ffmpeg_handle
+
+      ui.teardown()
+
+      assert.are.equal(1, #killed)
+      assert.are.equal(9, killed[1])
+      assert.are.equal(0, vim.tbl_count(image.active_ffmpeg_handles))
     end)
   end)
 end)

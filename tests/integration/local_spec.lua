@@ -1183,4 +1183,237 @@ describe("Integration: Local Folder Browser Mode", function()
       assert.is_nil(state.UI.indexer_timer)
     end)
   end)
+
+  describe("Local File Deletion ('d' / 'D')", function()
+    local function get_keymap_cb(buf, mode, key)
+      if not buf or not vim.api.nvim_buf_is_valid(buf) then
+        return nil
+      end
+      local maps = vim.api.nvim_buf_get_keymap(buf, mode or "n")
+      for _, m in ipairs(maps) do
+        if m.lhs == key then
+          return m.callback or function()
+            if m.rhs then
+              vim.cmd("normal! " .. m.rhs)
+            end
+          end
+        end
+      end
+      return nil
+    end
+
+    it("guards against deleting unsaved remote post and displays status notice", function()
+      ui.open()
+      state.State.posts = {
+        { id = 5001, file_url = "https://example.com/5001.jpg", rating = "g", score = 10, is_local = false },
+      }
+      state.State.cur = 1
+      ui.render_list()
+
+      local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
+      assert.is_not_nil(d_cb, "'d' keymap must be registered on list buffer")
+
+      local select_called = false
+      local orig_select = vim.ui.select
+      vim.ui.select = function()
+        select_called = true
+      end
+
+      d_cb()
+
+      assert.is_false(select_called, "confirmation dialog should not be shown for unsaved post")
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_truthy(status_lines[1]:find("Post is not saved locally"))
+
+      vim.ui.select = orig_select
+    end)
+
+    it("cancels deletion when user selects Cancel in confirmation dialog", function()
+      ui.open_local(tmp_dir)
+      local target_file = tmp_dir .. "/1001.jpg"
+      assert.are.equal(1, vim.fn.filereadable(target_file))
+
+      local orig_select = vim.ui.select
+      vim.ui.select = function(items, opts, on_choice)
+        assert.is_truthy(opts.prompt:find("Delete local file: 1001.jpg"))
+        on_choice("Cancel")
+      end
+
+      local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
+      d_cb()
+
+      -- File remains on disk
+      assert.are.equal(1, vim.fn.filereadable(target_file))
+      -- Post remains in State.posts
+      assert.are.equal(3, #state.State.posts)
+      assert.are.equal(1, state.State.cur)
+
+      vim.ui.select = orig_select
+    end)
+
+    it("deletes local file, removes cached metadata and thumbnail, unmarks saved_index, keeps user focused in viewer, and updates display", function()
+      local local_index = require("gelbooru.local.index")
+      local target_file = tmp_dir .. "/1001.jpg"
+      assert.are.equal(1, vim.fn.filereadable(target_file))
+
+      -- Create meta cache file and thumbnail file
+      local meta_path = util.meta_cache_path("1001")
+      util.write_json(meta_path, {
+        id = "1001",
+        file_url = "https://example.com/1001.jpg",
+        preview_url = "https://example.com/1001_prev.jpg",
+        tags = "hatsune_miku 1girl",
+      })
+      local vthumb_path = string.format("%s/vthumb_%s.jpg", config.options.cache_dir, "1001")
+      local vf = io.open(vthumb_path, "wb")
+      if vf then vf:write("dummy thumbnail") vf:close() end
+
+      ui.open_local(tmp_dir)
+      local initial_count = #state.State.posts
+      assert.are.equal(1, state.State.cur)
+
+      local orig_select = vim.ui.select
+      vim.ui.select = function(items, opts, on_choice)
+        assert.is_truthy(opts.prompt:find("1001.jpg"))
+        on_choice("Yes, delete file")
+      end
+
+      local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
+      d_cb()
+
+      -- 1. File removed from disk
+      assert.are.equal(0, vim.fn.filereadable(target_file))
+      -- 2. Metadata cache removed
+      assert.are.equal(0, vim.fn.filereadable(meta_path))
+      -- 3. Video thumbnail removed
+      assert.are.equal(0, vim.fn.filereadable(vthumb_path))
+      -- 4. Unmarked from saved_index
+      assert.is_false(local_index.is_saved(1001))
+      -- 5. User remains focused on the EXACT same post
+      assert.are.equal(initial_count, #state.State.posts)
+      assert.are.equal(1, state.State.cur)
+      local current_post = state.State.posts[state.State.cur]
+      assert.are.equal("1001", tostring(current_post.id))
+      -- 6. is_local switched to false and remote URLs preserved
+      assert.is_false(current_post.is_local)
+      assert.are.equal("https://example.com/1001.jpg", current_post.file_url)
+      -- 7. Post list display updated (no [SAVED] marker)
+      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_nil(list_lines[1]:find("%[SAVED%]"))
+      -- 8. Status notice displayed
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_truthy(status_lines[1]:find("Deleted local file: 1001.jpg %(press <CR> to re%-download%)"))
+
+      vim.ui.select = orig_select
+    end)
+
+    it("allows immediate re-download via <CR> after deleting local file", function()
+      local local_index = require("gelbooru.local.index")
+      local target_file = tmp_dir .. "/1001.jpg"
+
+      -- Seed cached metadata with online URLs
+      local meta_path = util.meta_cache_path("1001")
+      util.write_json(meta_path, {
+        id = "1001",
+        file_url = "https://example.com/1001.jpg",
+        tags = "hatsune_miku",
+      })
+
+      ui.open_local(tmp_dir)
+
+      local orig_select = vim.ui.select
+      vim.ui.select = function(items, opts, on_choice)
+        on_choice("Yes, delete file")
+      end
+
+      local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
+      d_cb()
+
+      assert.are.equal(0, vim.fn.filereadable(target_file))
+      assert.is_false(local_index.is_saved(1001))
+
+      -- Now press <CR> to re-download the post
+      local save_done = false
+      api.save_current(function(saved, dest)
+        save_done = true
+        assert.is_true(saved)
+        assert.is_truthy(dest:find("1001"))
+      end)
+
+      vim.wait(300, function() return save_done end, 10)
+      assert.is_true(save_done)
+      assert.is_true(local_index.is_saved(1001))
+
+      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_truthy(list_lines[1]:find("%[SAVED%]"))
+
+      vim.ui.select = orig_select
+    end)
+
+    it("keymap 'D' and keymap 'd' from meta buffer work identically", function()
+      local target_file = tmp_dir .. "/1001.jpg"
+      ui.open_local(tmp_dir)
+
+      -- 1. 'D' on list buffer
+      local D_cb = get_keymap_cb(state.UI.bufs.list, "n", "D")
+      assert.is_not_nil(D_cb, "'D' must be registered on list buffer")
+
+      -- 2. 'd' and 'D' on meta buffer
+      local meta_d_cb = get_keymap_cb(state.UI.bufs.meta, "n", "d")
+      local meta_D_cb = get_keymap_cb(state.UI.bufs.meta, "n", "D")
+      assert.is_not_nil(meta_d_cb, "'d' must be registered on meta buffer")
+      assert.is_not_nil(meta_D_cb, "'D' must be registered on meta buffer")
+
+      local orig_select = vim.ui.select
+      vim.ui.select = function(items, opts, on_choice)
+        on_choice("Yes, delete file")
+      end
+
+      meta_d_cb()
+
+      assert.are.equal(0, vim.fn.filereadable(target_file))
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_truthy(status_lines[1]:find("Deleted local file: 1001.jpg"))
+
+      vim.ui.select = orig_select
+    end)
+
+    it("deletes a downloaded online post in config.options.save_dir", function()
+      local local_index = require("gelbooru.local.index")
+      -- Create downloaded post in save_dir
+      local saved_file = config.options.save_dir .. "/1001.jpg"
+      local f = io.open(saved_file, "wb")
+      if f then f:write(string.rep("Z", 2048)) f:close() end
+      local_index.mark_saved(1001, "jpg")
+      assert.is_true(local_index.is_saved(1001))
+
+      ui.open("hatsune_miku")
+      state.State.posts = {
+        { id = 1001, file_url = "https://example.com/1001.jpg", rating = "g", score = 50, is_local = false },
+      }
+      state.State.cur = 1
+      ui.render_list()
+
+      local list_lines_before = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_truthy(list_lines_before[1]:find("%[SAVED%]"))
+
+      local orig_select = vim.ui.select
+      vim.ui.select = function(items, opts, on_choice)
+        on_choice("Yes, delete file")
+      end
+
+      local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
+      d_cb()
+
+      assert.are.equal(0, vim.fn.filereadable(saved_file))
+      assert.is_false(local_index.is_saved(1001))
+      assert.are.equal(1, state.State.cur)
+      assert.are.equal(1, #state.State.posts)
+
+      local list_lines_after = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_nil(list_lines_after[1]:find("%[SAVED%]"))
+
+      vim.ui.select = orig_select
+    end)
+  end)
 end)

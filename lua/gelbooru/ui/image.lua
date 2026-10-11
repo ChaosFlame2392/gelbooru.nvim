@@ -5,14 +5,24 @@ local util = require("gelbooru.core.util")
 
 local M = {}
 
+M.active_ffmpeg_handles = {}
+
 function M.file_ext_from_url(url)
   local ext = util.file_ext(url)
   return ext ~= "" and ext or "jpg"
 end
 
+M.VIDEO_EXTS = {
+  ["mp4"] = true,
+  ["webm"] = true,
+  ["avi"] = true,
+  ["mov"] = true,
+  ["mkv"] = true,
+}
+
 function M.is_video_post(p)
   local ext = M.file_ext_from_url(p and p.file_url)
-  return ext == "mp4" or ext == "webm"
+  return M.VIDEO_EXTS[ext] == true
 end
 
 function M.preview_source_name(p, url)
@@ -59,6 +69,15 @@ function M.get_preview_targets(p, url_idx)
   return urls, string.format("%s/prev_%s.%s", cache_dir, p.id, ext:lower())
 end
 
+function M.abort_all_ffmpeg()
+  for h in pairs(M.active_ffmpeg_handles or {}) do
+    if h and h.kill then
+      pcall(h.kill, h, 9)
+    end
+  end
+  M.active_ffmpeg_handles = {}
+end
+
 function M.close_current_placement()
   local UI = state.UI
   if UI.current_placement and UI.current_placement.close then
@@ -69,6 +88,7 @@ function M.close_current_placement()
     and UI.bufs and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img) then
     pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
   end
+  M.abort_all_ffmpeg()
 end
 
 local function attach_defensive_keymaps(buf)
@@ -184,6 +204,32 @@ local function attach_defensive_keymaps(buf)
   util.keymap(buf, "n", "q", handle_q)
   util.keymap(buf, "n", "<Esc>", handle_q)
 
+  util.keymap(buf, "n", "t", function()
+    local ui = require("gelbooru.ui")
+    if ui and ui.open_tag_modal then
+      ui.open_tag_modal()
+    end
+  end)
+  util.keymap(buf, "n", "T", function()
+    local ui = require("gelbooru.ui")
+    if ui and ui.open_tag_modal then
+      ui.open_tag_modal()
+    end
+  end)
+
+  util.keymap(buf, "n", "d", function()
+    local ui = require("gelbooru.ui")
+    if ui and ui.delete_current then
+      ui.delete_current()
+    end
+  end)
+  util.keymap(buf, "n", "D", function()
+    local ui = require("gelbooru.ui")
+    if ui and ui.delete_current then
+      ui.delete_current()
+    end
+  end)
+
   for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
     util.keymap(buf, "n", k, go_search)
   end
@@ -237,13 +283,13 @@ function M.get_saved_video_path(post_id)
     local idx = local_index.update_saved_index()
     saved_ext = num_id and idx and idx[num_id]
   end
-  if saved_ext and (saved_ext == "mp4" or saved_ext == "webm") then
+  if saved_ext and M.VIDEO_EXTS[saved_ext] then
     local candidate = string.format("%s/%s.%s", save_dir, tostring(post_id), saved_ext)
     if vim.fn.filereadable(candidate) == 1 then
       return candidate
     end
   end
-  for _, ext in ipairs({ "mp4", "webm" }) do
+  for ext in pairs(M.VIDEO_EXTS) do
     local candidate = string.format("%s/%s.%s", save_dir, tostring(post_id), ext)
     if vim.fn.filereadable(candidate) == 1 then
       return candidate
@@ -303,7 +349,9 @@ function M.extract_video_thumbnail(video_path, post_id, cb)
   local util = require("gelbooru.core.util")
   util.ensure(config.options.cache_dir)
 
-  local spawn_ok = pcall(function()
+  local handle = nil
+  local done = false
+  local spawn_ok, res = pcall(function()
     return vim.system({
       "ffmpeg",
       "-ss",
@@ -317,7 +365,14 @@ function M.extract_video_thumbnail(video_path, post_id, cb)
       thumb_dest,
       "-y",
     }, {}, function(out)
+      done = true
+      if handle then
+        M.active_ffmpeg_handles[handle] = nil
+      end
       vim.schedule(function()
+        if handle then
+          M.active_ffmpeg_handles[handle] = nil
+        end
         if out.code == 0 and vim.fn.filereadable(thumb_dest) == 1 and (vim.fn.getfsize(thumb_dest) or 0) > 512 then
           if cb then cb(thumb_dest) end
         else
@@ -326,9 +381,17 @@ function M.extract_video_thumbnail(video_path, post_id, cb)
       end)
     end)
   end)
-  if not spawn_ok and cb then
-    cb(nil)
+
+  if not spawn_ok or not res then
+    if cb then cb(nil) end
+    return nil
   end
+
+  handle = res
+  if handle and not done then
+    M.active_ffmpeg_handles[handle] = handle
+  end
+  return handle
 end
 
 function M.render_video_placeholder(p, message)
@@ -404,7 +467,7 @@ function M.clear_snacks_cache_for(post_id)
   end
 end
 
-local function sanitize_dpi(img)
+function M.sanitize_dpi(img)
   if img and img.info and img.info.dpi then
     local dpi = img.info.dpi
     if (dpi.width and (dpi.width > 300 or dpi.width < 50))
@@ -414,6 +477,7 @@ local function sanitize_dpi(img)
     end
   end
 end
+local sanitize_dpi = M.sanitize_dpi
 
 -- Nudge the active placement to re-render at the current window dimensions.
 -- Clears the cached state so snacks does not skip the update as a no-op.

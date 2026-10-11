@@ -13,7 +13,52 @@ local function ensure_array(v)
   return v
 end
 
+local SESSION_CACHE_TTL = 300 -- 5 minutes in-session TTL
+
+local function get_session_cache(key)
+  local sc = state.State.session_cache
+  if not sc or not sc[key] then
+    return nil
+  end
+  local entry = sc[key]
+  if os.time() > entry.expires_at then
+    sc[key] = nil
+    return nil
+  end
+  return entry.data
+end
+
+local function set_session_cache(key, data)
+  if not state.State.session_cache then
+    state.State.session_cache = {}
+  end
+  state.State.session_cache[key] = {
+    data = data,
+    expires_at = os.time() + SESSION_CACHE_TTL,
+  }
+end
+
 local M = {}
+
+function M.clear_session_cache()
+  state.State.session_cache = {}
+end
+
+--- Normalizes query modifiers for Gelbooru API compatibility.
+--- Gelbooru DAPI accepts ~ strictly on tags (~hatsune_miku ~megurine_luka),
+--- but rejects ~rating:..., ~score:..., or ~id:..., returning 0 results.
+---@param tags_str string|nil
+---@return string
+function M.normalize_remote_tags(tags_str)
+  if not tags_str or tags_str == "" then
+    return ""
+  end
+  local s = tags_str
+  s = s:gsub("~rating:([%w_]+)", "rating:%1")
+  s = s:gsub("~score:(%S+)", "score:%1")
+  s = s:gsub("~id:(%S+)", "id:%1")
+  return s
+end
 
 function M.fetch(direction, is_explicit)
   direction = direction or 1
@@ -25,7 +70,7 @@ function M.fetch(direction, is_explicit)
     return
   end
 
-  local query_mod = require("gelbooru.local.query")
+  local query_mod = require("gelbooru.query")
   local pipe = query_mod.parse_pipeline(State.query)
   if pipe and pipe.stages and #pipe.stages > 0 then
     if is_explicit ~= false then
@@ -70,10 +115,32 @@ function M.fetch(direction, is_explicit)
       nonce_param = "&_nonce=" .. nonce
     end
   end
+  local remote_tags = M.normalize_remote_tags(State.query or "")
+  local cache_key = (nonce_param == "")
+      and string.format("page:%s:pid=%d:limit=%d", remote_tags, State.page, config.options.per_page)
+    or nil
+  if cache_key then
+    local cached_posts = get_session_cache(cache_key)
+    if cached_posts and #cached_posts > 0 then
+      for _, p in ipairs(cached_posts) do
+        table.insert(State.posts, p)
+      end
+      State.page = State.page + 1
+      State.loading = false
+      history.save_current_history()
+      ui.set_status()
+      ui.render_list()
+      if State.cur == 1 then
+        ui.render_preview(false)
+      end
+      return
+    end
+  end
+
   local url = string.format(
     "%s&tags=%s&limit=%d&pid=%d%s%s",
     config.options.api_base,
-    util.url_encode(State.query),
+    util.url_encode(remote_tags),
     config.options.per_page,
     State.page,
     util.auth_qs(),
@@ -114,6 +181,9 @@ function M.fetch(direction, is_explicit)
       util.set_lines(UI.bufs.img, { "  No posts found" })
       util.set_lines(UI.bufs.meta, {})
       return
+    end
+    if cache_key and #posts > 0 then
+      set_session_cache(cache_key, posts)
     end
     for _, p in ipairs(posts) do
       table.insert(State.posts, p)
@@ -174,7 +244,7 @@ function M.execute_search(query, opts)
         end
       end
       if not is_random then
-        local query_mod = require("gelbooru.local.query")
+        local query_mod = require("gelbooru.query")
         local p = query_mod.parse_pipeline(query)
         if p and p.stages then
           for _, st in ipairs(p.stages) do
@@ -211,7 +281,7 @@ function M.execute_search(query, opts)
   State.cur_id = nil
   ui.render_list()
 
-  local query_mod = require("gelbooru.local.query")
+  local query_mod = require("gelbooru.query")
   local pipe = query_mod.parse_pipeline(query)
 
   if pipe and #pipe.stages > 0 then
@@ -267,7 +337,7 @@ end
 function M.execute_piped_search(query, pipe)
   local State = state.State
   local ui = require("gelbooru.ui")
-  local query_mod = require("gelbooru.local.query")
+  local query_mod = require("gelbooru.query")
 
   local epoch = State.search_epoch
   local stages = pipe.stages
@@ -285,10 +355,13 @@ function M.execute_piped_search(query, pipe)
   -- Determine candidate pool target size:
   -- If stage1 has a range/offset (e.g. sort:id:1000..1200 or offset:1000), fetch needed window.
   -- If stage1 has a limit (e.g. sort:id:1000), pool_target = math.min(stage1.limit, 2000).
+  -- If stage1 has an open-ended range/offset (e.g. sort:id:50..), pool_target = math.min(stage1.offset + config.options.per_page, 2000).
   -- If stage1 has no limit, but any downstream stage has a limit (e.g. tag | sort:score:200 | sort:random),
   -- ensure pool_target = math.min(2000, math.max(max_stage_limit, config.options.per_page)).
   local pool_target
-  if stage1 and stage1.offset and stage1.offset > 0 then
+  if stage1 and stage1.offset and not stage1.limit then
+    pool_target = math.min(stage1.offset + config.options.per_page, 2000)
+  elseif stage1 and stage1.offset and stage1.offset > 0 then
     local base_offset = start_pid * page_size
     local rel_start = stage1.offset - base_offset
     local count = (stage1.limit and stage1.limit > stage1.offset) and (stage1.limit - stage1.offset) or config.options.per_page
@@ -330,6 +403,7 @@ function M.execute_piped_search(query, pipe)
       end
     end
   end
+  remote_tags = M.normalize_remote_tags(remote_tags)
 
   local nonce_param = ""
   if remote_tags:lower():find("sort:random", 1, true) or remote_tags:lower():find("order:random", 1, true) then
@@ -363,8 +437,13 @@ function M.execute_piped_search(query, pipe)
     if stage1 and stage1.offset and stage1.offset > 0 then
       local base_offset = start_pid * page_size
       local rel_start = math.max(1, (stage1.offset - base_offset) + 1)
-      local rel_end = (stage1.limit and stage1.limit > 0) and (stage1.limit - base_offset) or #candidate_pool
-      rel_end = math.min(#candidate_pool, rel_end)
+      local rel_end
+      if stage1.offset and not stage1.limit then
+        rel_end = #candidate_pool
+      else
+        rel_end = (stage1.limit and stage1.limit > 0) and (stage1.limit - base_offset) or #candidate_pool
+        rel_end = math.min(#candidate_pool, rel_end)
+      end
 
       local window_posts = {}
       if rel_start <= #candidate_pool then
@@ -540,6 +619,9 @@ function M.save_current(cb)
             width = p.width,
             height = p.height,
             source = p.source,
+            file_url = p.file_url,
+            preview_url = p.preview_url,
+            sample_url = p.sample_url,
           }
           util.write_json(meta_path, meta_data)
         end
@@ -579,6 +661,9 @@ function M.save_current(cb)
           width = p.width,
           height = p.height,
           source = p.source,
+          file_url = p.file_url,
+          preview_url = p.preview_url,
+          sample_url = p.sample_url,
         }
         util.write_json(meta_path, meta_data)
       end
@@ -657,11 +742,16 @@ function M.fetch_post_metadata(p, cb)
       if cached.source then
         p.source = cached.source
       end
+      if cached.file_url then
+        p._remote_file_url = cached.file_url
+      end
       if cached.preview_url and (not p.preview_url or p.preview_url == p.file_url) then
         p.preview_url = cached.preview_url
+        p._remote_preview_url = cached.preview_url
       end
       if cached.sample_url and (not p.sample_url or p.sample_url == p.file_url) then
         p.sample_url = cached.sample_url
+        p._remote_sample_url = cached.sample_url
       end
       p._metadata_fetched = true
       if not state.State.torn_down and cb then
@@ -696,11 +786,16 @@ function M.fetch_post_metadata(p, cb)
     if d.source then
       p.source = d.source
     end
+    if d.file_url then
+      p._remote_file_url = d.file_url
+    end
     if d.preview_url and (not p.preview_url or p.preview_url == p.file_url) then
       p.preview_url = d.preview_url
+      p._remote_preview_url = d.preview_url
     end
     if d.sample_url and (not p.sample_url or p.sample_url == p.file_url) then
       p.sample_url = d.sample_url
+      p._remote_sample_url = d.sample_url
     end
     if meta_path then
       local meta_data = {
@@ -711,6 +806,7 @@ function M.fetch_post_metadata(p, cb)
         width = p.width,
         height = p.height,
         source = p.source,
+        file_url = d.file_url or p._remote_file_url or p.file_url,
         preview_url = p.preview_url,
         sample_url = p.sample_url,
       }

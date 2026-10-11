@@ -7,7 +7,7 @@ local image = require("gelbooru.ui.image")
 local download = require("gelbooru.net.download")
 local util = require("gelbooru.core.util")
 
-local query = require("gelbooru.local.query")
+local query = require("gelbooru.query")
 local index = require("gelbooru.local.index")
 local indexer = require("gelbooru.local.indexer")
 
@@ -24,6 +24,7 @@ M.matches_post = query.matches_post
 M.matches_query = query.matches_query
 M.index = index
 M.indexer = indexer
+M.unmark_saved = index.unmark_saved
 
 function M.open_local(query_or_dir)
   download.cancel_prefetch_timers()

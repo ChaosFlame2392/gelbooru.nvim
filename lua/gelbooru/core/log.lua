@@ -30,6 +30,10 @@ function M.log(level, cat, fmt, ...)
   end
 
   local msg = select("#", ...) > 0 and string.format(fmt, ...) or (fmt or "")
+  if msg and msg ~= "" then
+    msg = msg:gsub("([?&]api_key=)[^&%s]+", "%1[REDACTED]")
+             :gsub("([?&]user_id=)[^&%s]+", "%1[REDACTED]")
+  end
   local line = string.format("[%s] [%-5s] [%-10s] %s\n", os.date("%Y-%m-%d %H:%M:%S"), level, cat, msg)
   local f = io.open(config.options.log_file, "a")
   if f then

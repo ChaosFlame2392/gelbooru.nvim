@@ -37,6 +37,11 @@ The top query bar accepts both online and local library search expressions:
   - `sort:date` / `sort:date:asc` (`sort:mtime`) — Sort local posts by file modification timestamp (`mtime`).
   - `sort:random` / `order:random` / `random` — Randomly shuffle matching local files using Fisher-Yates algorithm.
 - `id:<digits>` or bare `<digits>` — Directly loads a single post by its Gelbooru numeric ID.
+- **Multi-Stage Cascading Pipeline Syntax**: Unix pipe syntax (`|`) or space-separated sort/limit directives chain filtering stages:
+  - `tag1 tag2 | sort:id:1000..1200 | sort:score:50 | sort:random`
+  - Range & Offset Jumping: `sort:id:1000..1200`, `limit:1000..1200`, `offset:1000`. Starts remote fetching directly at server page `pid = math.floor(offset / 100)`, bypassing unneeded network roundtrips and slicing the exact window in memory.
+  - In-Session TTL Query Caching: In-memory candidate pool (`pool::<tags>:pid=<pid>`) and page batch (`page::<query>:pid=<pid>`) caching with 5-minute TTL. Adding or tweaking query conditions re-evaluates cached candidate pools instantly without re-fetching 500 images over the network. Zero disk persistence across Neovim sessions; completely purged on UI exit (`M.teardown()`) and force-refreshed on `R`.
+
 
 ### 2.3 Three-Mode Interaction Model
 
@@ -57,10 +62,12 @@ When viewing posts, the post list window is focused with `cursorline` enabled:
 | `m` | Toggle metadata panel | Toggles `State.show_meta` boolean. Recalculates floating layout dimensions via `calc_layout()`, hides or displays the metadata window (`wins.meta`) and divider (`wins.hdiv`), and adjusts preview canvas height. |
 | `M` | Focus metadata inspector | Ensures `State.show_meta = true`, recalculates layout, and transfers window focus to `UI.wins.meta` with `cursorline = true` for deep tag inspection. |
 | `u` | Quick Artist Search | Single-key artist lookup. Extracts the artist tag of the focused post and immediately populates and queries it in the search bar. |
+| `t` / `T` | Tag Picker Modal | Opens centered floating modal (`wins.tag_modal`) displaying badged tags of active post with `<Space>` checkbox toggle, `a` toggle all, `y` yank tag, and `<CR>` search commit. |
+| `d` / `D` | Delete local file | Prompts confirmation dialog to delete saved image/video from disk, unmarks `saved_index`, and keeps viewer focused on the exact post in online mode with re-download continuity. |
 | `o` | Open post web page | Spawns system default browser with full post page (`https://gelbooru.com/index.php?page=post&s=view&id=...`). |
 | `O` | Open locally with media viewer | Opens media file directly in system media viewer (`open` on macOS honoring Finder default such as IINA, `xdg-open` on Linux, or user-configured `config.options.media_player`). If post is not downloaded yet, automatically downloads it to `save_dir` first, then opens it locally. |
 | `<` / `>` | Adjust explorer width | Increments or decrements post list width ratio (`State.list_width_ratio`, clamped 0.10–0.40, default 0.25), dynamically resizing image canvas and nudging placement. |
-| `\` | Toggle Zen Mode | Collapses post list to 0 width, allocating 100% of display width to the image canvas for full-screen viewing; pressing `\` restores list. Transfers focus to image canvas and disables list cursorline to eliminate cursor artifacts. |
+| `\` | Toggle Zen Mode | Collapses post list to 0 width, allocating 100% of display width to the image canvas for full-screen viewing; pressing `\` restores list. Maintains focus on list window and disables list cursorline to eliminate cursor artifacts while enabling seamless up/down navigation. |
 | `i`, `I`, `a`, `A`, `s`, `S`, `/` | Enter Search Mode | Shifts focus to input window, enters insert mode, sets `State.input_focused = true`, pops open autocomplete dropdown (`wins.ac`), and updates completion candidates. |
 | `[` / `]` | Previous / Next History | Navigates search history stack (`history_prev` / `history_next`), restoring queries, post arrays, and cursor positions. |
 | `<C-d>` / `<C-u>` | Scroll metadata | Scrolls metadata text buffer down / up by 5 lines without shifting focus. |
@@ -79,6 +86,8 @@ Entered via `M` from the list window:
 | `q`, `<Esc>`, `M` | Return to post list | Restores focus to `UI.wins.list` without altering scroll position. |
 | `m` | Hide & return to list | Sets `State.show_meta = false`, recalculates layout to hide meta panel, and returns focus to `UI.wins.list`. |
 | `u` | Quick Artist Search | Immediately queries the artist of the active post in the search bar. |
+| `t` / `T` | Tag Picker Modal | Opens centered floating modal displaying badged tags of active post. |
+| `d` / `D` | Delete local file | Prompts confirmation dialog to delete local file while maintaining viewer focus. |
 | `/`, `i`, `I`, `a`, `A`, `s`, `S` | Jump to search | Transitions directly into Search Mode in the input bar. |
 | `o` | Open web page | Opens full post URL (`https://gelbooru.com/index.php?page=post&s=view&id=...`) in default browser. |
 | `O` | Open locally | Opens local media file in system viewer (`open`, VLC, IINA, Preview), downloading first if not yet downloaded. |
@@ -151,6 +160,12 @@ gelbooru.nvim/
     │   ├── init.lua                  # Facade re-exporting API and download submodules
     │   ├── api.lua                   # Gelbooru REST client, query execution, metadata hydration
     │   └── download.lua              # Async curl download queue, dedup, retry, & prefetch scheduler
+    ├── query/
+    │   ├── init.lua                  # Dedicated query package facade (parse, filter, sort, pipeline)
+    │   ├── parse.lua                 # Query tokenizer & modifier parser (rating:, score:, -tag, ranges)
+    │   ├── pipeline.lua              # Piped query parser (|) and stage execution engine
+    │   ├── sort.lua                  # Post sorting engine (score, id, mtime, random)
+    │   └── filter.lua                # Post matching and condition filter engine
     ├── tags/
     │   ├── init.lua                  # Facade re-exporting db, fetcher, resolve submodules
     │   ├── db.lua                    # Tag loading, memory indexing, bucketing, validation
@@ -208,7 +223,15 @@ Dual-tier lookahead engine:
 - **Tier 2 (Background - Folder Indexer)**: Throttled async queue crawling unindexed posts with max 2 concurrent workers and 100ms pacing, aborted cleanly on navigation or teardown.
 
 #### `lua/gelbooru/local/query.lua`
-Unified query expression parser, filter, and sorting engine: parses `local:` and `local:<dir>` prefixes, tags, exact negative exclusions (`-tag`), rating filters (`rating:general`), numeric score comparisons (`score:>=50`), and sorting directives (`sort:score`, `sort:id`, `sort:date`/`sort:mtime`, `sort:random`/`order:random`). Isolates sort directives from tag matching and provides `M.sort_posts(posts, sort_opt)` with disk metadata fallback.
+Compatibility re-export layer: cleanly re-exports all functions, submodules, and interfaces from the dedicated `lua/gelbooru/query/` package (`parse_query`, `filter_posts`, `sort_posts`, `execute_pipeline`, etc.) ensuring seamless zero-breaking-change backwards compatibility for existing plugins and tests requiring `gelbooru.local.query`.
+
+#### `lua/gelbooru/query/`
+Dedicated query parser, filtering, pipeline execution, and sorting package:
+- `query/init.lua`: Top-level facade exposing unified parsing, filtering, sorting, and pipeline functions and submodule handles (`parse`, `pipeline`, `sort`, `filter`).
+- `query/parse.lua`: Query tokenizer (`tokenize_query`), modifier parser (`rating:`, `score:`, `local:`, `-tag`, `id:`, tilde/pipe OR syntax), directory detector, and numeric/range bound parser (`50..`, `..100`).
+- `query/pipeline.lua`: Pipeline parser (`parse_pipeline` with pipe `|` splitting) and cascading stage execution engine (`execute_pipeline` with offset/limit/range slicing and sorting).
+- `query/sort.lua`: Post sorting engine (`sort_posts`) supporting `score`, `id`, `date`/`mtime`, and `random` with disk metadata score hydration and filesystem timestamp fallback.
+- `query/filter.lua`: Post matching engine (`matches_post` / `matches_query`) and collection filtering (`filter_posts`).
 
 #### `lua/gelbooru/local/scan.lua`
 Safe directory traversal and post ID extractor using `vim.loop.fs_scandir`. Safely parses filenames with unicode, spaces, multiple dots, and brackets without external shell subshells. Falls back to `fs_stat` when filesystem returns nil `ftype`.
@@ -372,7 +395,7 @@ graph TD
 3. **Extmark Spinner Suppression**:
    `snacks.image.placement:progress()` creates an extmark spinner on row 0 that is not wiped when conversion finishes, leaving persistent `convert loading ...` text. Suppressing `placement.progress = function() end` and clearing row 0 extmarks prevents visual clutter while relying on Gelbooru's native placeholders.
 4. **Canvas Rescaling & Zen Mode**:
-   Resizing list width (`<` / `>`) or toggling Zen mode (`\`) triggers `image.nudge_current_placement()` to dynamically re-scale the active image to full canvas bounds. In Zen Mode, `UI.wins.list` cursorline is disabled and focus transfers to the image canvas.
+   Resizing list width (`<` / `>`) or toggling Zen mode (`\`) triggers `image.nudge_current_placement()` to dynamically re-scale the active image to full canvas bounds. In Zen Mode, `UI.wins.list` cursorline is disabled and focus remains strictly on `UI.wins.list`, eliminating terminal cursor block artifacts on the image canvas while permitting seamless `j`/`k`/`gg`/`G` navigation.
 
 ---
 
@@ -463,6 +486,18 @@ Maintainers and agents modifying `gelbooru.nvim` **MUST** strictly uphold the fo
 ### 11. Media Opener Platform Defaults
 - `util.open_media` must honor user's operating system default application (macOS Finder default via `open`, Linux default via `xdg-open`) unless `config.options.media_player` is explicitly configured.
 
+### 12. Zen Mode Focus & Canvas Cleanliness Invariant
+- Zen Mode (`\`) must maintain focus on `UI.wins.list` while disabling `cursorline` and setting list width to 1 (with `hide = true`). It must strictly NEVER focus `UI.wins.img`, preventing solid rectangular terminal block cursor artifacts from rendering on the image canvas while permitting `j`/`k`/`gg`/`G` list motions to navigate seamlessly. Exiting Zen Mode restores `cursorline = true`.
+
+### 13. Local File Deletion In-Place Continuity
+- When deleting a local or saved post (`d` / `D`), the file is safely unlinked from disk, removed from `saved_index`, and caches are purged. However, the post must strictly remain in `State.posts` and `State.cur` must NOT change or advance. The post state transitions to online mode (`p.is_local = false`), keeping the preview and metadata visible in the viewer so the user can immediately re-download the post by pressing `<CR>`.
+
+### 14. Upstream Booru API Modifier Normalization
+- Upstream Gelbooru DAPI accepts the `~` prefix strictly on native tags for disjunction (`~tag1 ~tag2`), and returns empty responses if `~` is prepended to metadata modifiers (e.g. `~rating:questionable`). Outgoing remote queries must normalize `~rating:`, `~score:`, and `~id:` to strip the leading `~` while strictly preserving native tag disjunction tildes.
+
+### 15. Concurrency Child Process Management
+- All external child processes (such as `ffmpeg` thumbnail extraction spawned via `vim.system`) must be tracked in `image.active_ffmpeg_handles`. On image replacement, canvas reset, or `ui.teardown()`, all active handles must be killed with SIGKILL (9) via `image.abort_all_ffmpeg()`, preventing orphaned zombie processes.
+
 ---
 
 ## 7. Testing Protocols, Harness & Verification
@@ -525,6 +560,19 @@ This branch introduces unified local library browsing, offline booru metadata en
 - **Canvas & Playback Polish**: Implemented Zen Mode (`\`), dynamic explorer width adjustment (`<` / `>`), quick artist lookup (`u`), video badge detection (`[VIDEO]`), and instant full-resolution preview upgrades on `<CR>`.
 - **Process & Lifecycle Hardening**: Added managed resume timers, teardown guards, and history FIFO capacity caps.
 - **Search Mode Usability & Recovery**: Defensive boundary keymaps (`/` and `i` re-enter insert mode, `<BS>` in normal mode smoothly edits query, and status line hints on empty query).
+- **Server-Side Range & Offset Jumping (`sort:id:1000..1200`, `offset:1000`)**: Server-side offset pagination jumping via `pid = math.floor(offset / 100)` in `lua/gelbooru/net/api.lua`, reducing remote API requests by 83–98% for deep queries and slicing intermediate windows in memory.
+- **In-Session TTL Query & Candidate Pool Caching**: In-memory caching (`State.session_cache`) with 5-minute TTL for candidate pools (`pool::<tags>:pid=<pid>`) and paginated API batches (`page::<query>:pid=<pid>`). Allows instant filter re-evaluation without network re-fetching when query conditions change. Completely cleared on session termination / teardown (`State.session_cache = {}`) and force-refreshed via `R`. Zero persistent disk footprint.
+- **Unified Helper Deduplication & Security Sanitization**: Consolidated `util.close_timer`, `util.file_ext`, `util.is_same_post`, `util.shuffle`, and `config.VALID_MEDIA_EXTS`. Added credential redaction (`api_key`, `user_id`) in logger and POSIX command argument separators (`--`) in system openers.
+- **Interactive Tag Picker Modal (`t` / `T`)**: Centered floating modal window (`UI.wins.tag_modal`) displaying categorized, badged tags of the active post. Provides `<Space>` selection toggle, `a` toggle all, `y` yank to clipboard/registers, and `<CR>` instant multi-tag search commit, returning smoothly to list focus.
+- **In-Place Local File Deletion (`d` / `D`) with Online Continuity**: Safely unlinks local files and clears cache entries upon user confirmation (`vim.ui.select`), unmarking the item from `saved_index`. Strictly preserves active viewer focus (`State.cur` and `State.posts`), transitioning the post to online mode (`p.is_local = false`) so users can immediately re-download the file with `<CR>`.
+- **Query Bar Substring Autocomplete Cursor Alignment**: Dynamic token boundary slicing using active cursor column (`col = cursor[2]`) in `ui/init.lua`, allowing completion of previous tokens anywhere in the query string without mangling trailing tokens.
+- **Open-Ended Range Bounds Syntax (`50..` / `50-` / `..100`)**: Support for open-ended range notation in pipeline slicing and remote search pool sizing across both online and local libraries.
+- **Upstream Booru API Modifier Normalization (`~rating:`, `~score:`, `~id:`)**: Transparent normalization of upstream modifier expressions in `net/api.lua`, preventing empty `<posts count="0"/>` API failures while preserving native tag disjunction tildes (`~tag1 ~tag2`).
+- **Dedicated `gelbooru.query` Package Modularization**: Extracted parsing, filtering, sorting, and pipelining into `lua/gelbooru/query/` (`init.lua`, `parse.lua`, `pipeline.lua`, `sort.lua`, `filter.lua`) while maintaining 100% backwards compatibility via `lua/gelbooru/local/query.lua`.
+- **Eager Lookahead & Zero-Delay Prefetch Pipeline**: Prefetching initiates immediately upon cursor motion without waiting for cooldown timers. Eliminates artificial delay for immediate next posts and preserves in-flight downloads during same-direction navigation.
+- **Child Process Lifecycle Management for `ffmpeg`**: Active process handles tracked in `image.active_ffmpeg_handles` and cleanly terminated with SIGKILL (9) on placement close and teardown.
+- **Zen Mode List Focus Preservation & Artifact Elimination**: Full canvas allocation (`list.width = 1`, `hide = true`) while maintaining focus on `UI.wins.list` and disabling `cursorline`, eliminating terminal block cursor artifacts on the canvas and preserving motion navigation (`j`/`k`/`gg`/`G`).
+- **Test Suite Efficacy & Quality Audit**: Purged tautological tests, added substantive real-path tests for download retries, referer headers, atomic `.part` renames, URL parsing, video formats, and new modular query/tag suites.
 
 ---
 
@@ -540,29 +588,21 @@ This branch introduces unified local library browsing, offline booru metadata en
   - Implement top-down count refresh (`:GelbooruTags refresh`) scraping from page 0 downward to update the top 50,000 most popular tags in place.
   - Implement query-time self-healing: when a single-tag search returns 0 results, query the tag API asynchronously and prune the tag if confirmed dead or aliased.
 
-#### 2. [COMPLETED] Online `sort:random` Query Reseeding & Cache Invalidation
-- **Implemented**: Dynamic cache-busting nonces appended to outgoing API requests, forcing remote and intermediate caches to return freshly shuffled batches on repeated executions.
-
-#### 3. Eager Lookahead & Network Prefetch Pipeline Optimization (~500ms Delay)
-- **Problem**: Scrolling between posts in online mode exhibits noticeable latency (~500ms delay before preview renders), even on high-speed internet connections (50+ MB/s). The lookahead engine does not adequately mask network transit times.
-- **Root Cause**:
-  1. **Deferred Prefetch**: In `lua/gelbooru/ui/init.lua`, `download.prefetch_around()` is called strictly *inside* the 150ms `UI.scroll_timer` cooldown callback, meaning lookahead downloads do not even start until 150ms *after* the user pauses cursor movement.
-  2. **Premature Timer Cancellation**: Every cursor motion (`j`/`k`) calls `M.cancel_prefetch_timers()`, destroying in-flight prefetch timers before their staggered delays fire.
-  3. **Staggered Delays**: Prefetch items are scheduled with artificial 50ms incremental delays (`delay = delay + 50`), stalling adjacent posts.
-  4. **Process Concurrency & Handshake Overhead**: Each prefetch spawns an independent child `curl` process without HTTP keep-alive connection reuse, incurring full TCP and TLS handshakes on every image.
+#### 2. Tiny Image Canvas Scaling & Minimum Dimension Guard
+- **Problem**: Certain images with small native pixel dimensions or unusual aspect ratios render miniature or stamp-sized on the canvas instead of scaling up to fill available window space.
+- **Root Cause (Diagnostic Findings)**:
+  1. **Gelbooru URL Selection**: Posts $\le 1200\text{px}$ omit `sample_url` (`sample: 0`). When `sample_url` is absent, the fallback chain selects `preview_url` (150px–250px thumbnail) instead of `file_url`, permanently rendering low-resolution thumbnails without upgrading.
+  2. **Snacks No-Upscaling Early Return**: In `Snacks.image.util.fit`, line 65 contains `if img_cells.width <= cells.width and img_cells.height <= cells.height then return img_cells end`, strictly preventing any upscaling beyond 1:1 pixel size.
+  3. **DPI Poisoning**: Art exported with standard 300 DPI headers bypasses strict inequality `dpi.width > 300` sanitization and gets divided by $300/96$, shrinking image cell area down to 32%.
 - **Resolution**:
-  - Decouple lookahead prefetch scheduling from the active preview cooldown timer, triggering eager prefetch downloads immediately on cursor movement in `State.scroll_dir`.
-  - Maintain active prefetch workers across cursor steps in the same direction instead of aggressively cancelling in-flight downloads for nearby posts.
-  - Eliminate the artificial 50ms delay for the immediate next post (`cur + dir`).
-  - Pass `--keepalive` / persistent connection parameters to `curl` where supported.
-
-#### 4. [COMPLETED] Flexible `local:` Syntax Anywhere in Query Bar
-- **Implemented**: Robust token-boundary matching in `lua/gelbooru/core/util.lua` (`util.is_local_query`) and `lua/gelbooru/local/query.lua` extracts `local:` and `local:<dir>` regardless of token position in query string.
+  - Prioritize `file_url` when `sample_url` is empty for image posts.
+  - Provide an upscale wrapper or override in `image.render_image` to calculate canvas fill aspect ratio when `img_cells` are smaller than the floating window.
+  - Unconditionally normalize DPI to 96 DPI for all screen raster rendering.
 
 ### 9.2 Medium Severity (Performance, Memory & UI Polish)
 
-#### 5. UI Orchestrator Modularization (`ui/init.lua`)
-- **Problem**: `lua/gelbooru/ui/init.lua` is over 1,450 lines long, tightly coupling floating window coordinate math, buffer-local keymap dispatch, preview cooldown timers, and window lifecycle orchestration into a single file.
+#### 3. UI Orchestrator Modularization (`ui/init.lua`)
+- **Problem**: `lua/gelbooru/ui/init.lua` is over 1,750 lines long, tightly coupling floating window coordinate math, buffer-local keymap dispatch, preview cooldown timers, and window lifecycle orchestration into a single file.
 - **Resolution**:
   - Split `ui/init.lua` into four specialized submodules:
     - `ui/layout.lua`: Layout geometry math (`calc_layout`), responsive scaling, and floating window coordinate calculation.
@@ -571,40 +611,19 @@ This branch introduces unified local library browsing, offline booru metadata en
     - `ui/lifecycle.lua`: Open, close, teardown, and autocommand management.
   - Retain `ui/init.lua` as a thin facade re-exporting the submodules without breaking external call sites.
 
-#### 6. Centralized Named Constants Table (`core/constants.lua`)
+#### 4. Centralized Named Constants Table (`core/constants.lua`)
 - **Problem**: Hardcoded magic numbers for layout ratios, debounce timeouts, curl limits, and scoring weights are scattered across modules.
 - **Resolution**:
   - Consolidate all constants into a centralized `core/constants.lua` table (`LAYOUT_SCALE = 0.95`, `MIN_WIDTH = 80`, `AC_DEBOUNCE_MS = 50`, `PREVIEW_CACHED_MS = 30`, `PREVIEW_REMOTE_MS = 150`, `TAG_BATCH_SIZE = 40`, `SCORE_EXACT = 35.0`, `POP_MULTIPLIER = 10.0`).
 
-#### 7. Local File Deletion Workflow (`d` / `D`)
-- **Problem**: Users browsing local libraries (`:GelbooruLocal` or `local:`) currently have no in-plugin mechanism to delete unwanted images or videos from disk; managing local collections requires exiting Neovim or running manual shell commands.
-- **Resolution**:
-  - Bind `d` (or `D` / `<Del>`) in Browse Mode and Metadata Inspector Mode to trigger local file deletion.
-  - Guard with an interactive confirmation modal (e.g. `vim.ui.select` or `vim.fn.confirm("Delete " .. fname .. "?", "&Yes\n&No")`).
-  - Upon confirmation, safely delete the file from disk (using `uv.fs_unlink`), purge cached metadata (`meta_<id>.json`), remove generated video thumbnail (`vthumb_<id>.jpg`), clear snacks image cache, update `saved_index`, remove the post from `State.posts`, and advance the cursor seamlessly to the adjacent item without UI flickering.
-  - Strictly disable the keymap on remote, un-downloaded posts to prevent undefined states.
-
-#### 8. Zen Mode Cursor Artifact Elimination
-- **Problem**: When entering Zen Mode (`\`), a solid white rectangular block cursor (`█`) is left visible in the top-left cell (row 1, col 1) of the image placement window, cluttering full-canvas viewing (verified in user screenshot).
-- **Root Cause**: When Zen Mode transfers window focus to `UI.wins.img` to capture hotkeys without list distractions, Neovim's terminal cursor is rendered at `{1, 0}` on the canvas buffer using standard `guicursor` rules.
-- **Resolution**:
-  - Hide the terminal cursor in Zen Mode (e.g. via `set guicursor+=a:ver0` or linking a transparent/hidden cursor highlight group `Cursor` / `TermCursor`).
-  - Alternatively, park the cursor out of view or retain list window focus while mapping global Zen navigation, completely preventing terminal cursor artifacts on the image canvas.
-
-#### 9. Tiny Image Canvas Scaling & Minimum Dimension Guard
-- **Problem**: Despite extreme DPI sanitization (`sanitize_dpi` clamping DPIs >300 to 96), certain images with small native pixel dimensions or unusual aspect ratios still render miniature or stamp-sized on the canvas instead of scaling up to fill available window space.
-- **Root Cause**: `snacks.image` calculates terminal cell coverage based on native pixel resolution divided by terminal font cell geometry. If an image has small native dimensions (e.g. 150×200 or low-res thumbnails), snacks renders it 1:1 without upscaling to the floating window bounds.
-- **Resolution**:
-  - Implement an upscaling policy or configure snacks image placement options (such as `max_width`, `max_height`, or scaling transforms via ImageMagick) to enforce a minimum rendered canvas footprint, ensuring small media files scale smoothly to fit floating window dimensions.
-
 ### 9.3 Low Severity (Edge Cases & Distribution)
 
-#### 10. Sequential Filename Collision Guard in Local Scanner (`local/scan.lua`)
+#### 5. Sequential Filename Collision Guard in Local Scanner (`local/scan.lua`)
 - **Problem**: In `lua/gelbooru/local/scan.lua`, `extract_post_id` matches bare numeric filenames (`filename:match("^(%d+)%..+$")`). If a user opens a folder with sequential non-booru files (e.g. `001.jpg`, `1.png`), the scanner extracts IDs `1`, `2`, and queries Gelbooru for unrelated historic posts.
 - **Resolution**:
   - Require a minimum post ID threshold (e.g. numeric ID $\ge 10000$ or minimum 5 digits) for bare numeric filenames to be considered Gelbooru post IDs, or check for known booru prefix patterns.
 
-#### 11. Distribution Packaging & Metadata Exclusions (`.gitattributes`)
+#### 6. Distribution Packaging & Metadata Exclusions (`.gitattributes`)
 - **Problem**: Package managers download developer test suites, makefiles, and documentation artifacts into user runtimes.
 - **Resolution**:
   - Add `.gitattributes` configuring `export-ignore` for `tests/`, `Makefile`, and `AGENTS.md` to ensure lightweight installation for end users.
@@ -613,30 +632,11 @@ This branch introduces unified local library browsing, offline booru metadata en
 
 ### 9.4 Future Product Directions & Architectural Roadmap (Future Scope)
 
-#### 12. [COMPLETED] Multi-Stage Piped Search & Cascading Sorting Pipeline
-- **Concept**: A composable, multi-stage sorting and filtering engine allowing users to chain query operations in sequence.
-- **Example Use Case**:
-  - Fetch the latest 1,000 uploaded posts (`sort:id:1000`), sort those 1,000 by score to extract the top 500 highest-rated posts (`sort:score:500`), and randomly shuffle those 500 for browsing (`sort:random`).
-- **Syntax & Execution**:
-  - Support Unix-style pipe syntax in the search bar: `tag1 tag2 | sort:id:1000 | sort:score:500 | sort:random`.
-  - Stage 1 fetches the candidate pool from Gelbooru API or local storage.
-  - Stage 2 applies intermediate filtering/sorting on the in-memory pool.
-  - Final stage orders the results for the post list display.
-- **Benefit**: Unlocks sophisticated media exploration combining recency, quality ranking, and novelty without requiring complex external scripts.
-
-#### 13. Interactive Tag Picker / Deep-Dive Selection Modal (Achievable / High Usability)
-- **Concept**: A dedicated floating modal for quickly exploring and querying individual or multiple tags belonging to the active post.
-- **Workflow & Interaction**:
-  - Hotkey (e.g. `t` or `T` from Browse Mode or Metadata Inspector Mode) opens a centered floating selection window populated with the current post's tags, categorized and badged (Artist, Character, Series, General, Meta).
-  - Navigate suggestions with `j` / `k` (or `<Down>` / `<Up>`).
-  - Press `<Space>` to select/toggle or immediately activate a tag.
-  - Press `<CR>` to commit the selected tag(s) directly into the query bar and trigger a fresh search.
-- **Benefit**: Provides an instant, tactile deep-dive mechanism for pivoting to related art and tags without manually typing complex tag names in the search bar.
-
-#### 14. Generalized Multi-Booru Provider Engine & Aggregator Mode (Long-Term Architectural Scope)
+#### 7. Generalized Multi-Booru Provider Engine & Aggregator Mode (Long-Term Architectural Scope)
 - **Concept**: Generalize the API and scraper layers beyond Gelbooru to support arbitrary booru engines (Danbooru, Moebooru, Safebooru, e621, etc.) through a pluggable provider interface.
 - **Architectural Scope**:
   - **Pluggable Provider Abstraction**: Decouple REST endpoints, authentication query params, and JSON schema parsing behind a uniform booru client contract (`search(tags, page)`, `fetch_metadata(id)`, `autocomplete(query)`).
   - **Single Provider Switcher**: Allow users to switch active boards globally or per query (e.g. `:Gelbooru --provider danbooru` or `danbooru: <tags>`).
   - **Federated Booru Aggregator**: An aggregated multi-board mode that queries multiple configured boorus concurrently, merges and normalizes results, deduplicates cross-posted media via MD5 / perceptual image hashes, and presents a consolidated browsing stream.
 - **Feasibility Assessment**: Deliberately slated for future milestones following hybrid local engine stabilization due to significant architectural scope.
+

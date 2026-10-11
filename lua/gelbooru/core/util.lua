@@ -181,10 +181,10 @@ function M.open_url(url)
     pcall(vim.fn.jobstart, { "cmd.exe", "/c", "start", '""', url }, { detach = true })
     return true
   elseif vim.fn.has("mac") == 1 then
-    pcall(vim.fn.jobstart, { "open", url }, { detach = true })
+    pcall(vim.fn.jobstart, { "open", "--", url }, { detach = true })
     return true
   else
-    pcall(vim.fn.jobstart, { "xdg-open", url }, { detach = true })
+    pcall(vim.fn.jobstart, { "xdg-open", "--", url }, { detach = true })
     return true
   end
 end
@@ -240,7 +240,7 @@ function M.file_ext(url_or_path)
   if not url_or_path or type(url_or_path) ~= "string" then
     return ""
   end
-  local clean = url_or_path:gsub("[?#].*$", "")
+  local clean = url_or_path:gsub("[?#].*$", ""):gsub("[/\\]+$", "")
   local fname = clean:match("([^/\\]+)$") or clean
   local ext = fname:match("%.([^%.]+)$") or ""
   return ext:lower()
