@@ -504,6 +504,10 @@ The repository includes unit and integration test suites using `plenary.nvim` an
 This branch introduces unified local library browsing, offline booru metadata enrichment, and advanced viewing controls to `gelbooru.nvim`. It bridges online imageboard exploration and offline collection management into a single seamless interface.
 
 ### 8.2 Completed Architectural Features
+- **Multi-Stage Piped Search & Cascading Sorting Pipeline**: Unix-style pipe syntax (`tag1 tag2 | sort:id:1000 | sort:score:300 | sort:random`) supported across both local and online modes. Parsed in `lua/gelbooru/local/query.lua`, executed in-memory for local libraries and with bounded candidate pool gathering (`math.min(stage1.limit, 1000)`) in `lua/gelbooru/net/api.lua`.
+- **Native Booru Tilde (`~`) OR Syntax & Rating Disjunctions**: Integrated native booru `~` OR syntax, tag disjunction pipes (`tag1|tag2`), rating disjunctions (`rating:q,e`, `rating:q|e`, `~rating:questionable ~rating:explicit`), and case-insensitive matching in local library search.
+- **Flexible `local:` Placement Anywhere in Query Bar**: Robust token-boundary pattern matching in `lua/gelbooru/core/util.lua` (`util.is_local_query`) and `lua/gelbooru/local/query.lua` allowing `local:` and `local:<dir>` anywhere in search queries with quotes and spaces handled properly.
+- **Online `sort:random` Reseeding & Cache Invalidation**: Appended cache-busting nonces (`&_nonce=`) to outgoing API requests in `lua/gelbooru/net/api.lua` when `sort:random` is present, bypassing server and proxy caching on re-execution.
 - **Unified Query Expression & Local Sorting Engine**: Implemented `local:` and `local:<dir>` query support in `lua/gelbooru/local/query.lua`, handling booru tags, negative exclusions (`-tag`), ratings (`rating:general`), score operators (`score:>=50`), and sorting directives (`sort:score`, `sort:id`, `sort:date`/`sort:mtime`, `sort:random`/`order:random`). Isolates sort directives from `positive_tags` and supports instant offline score sorting via disk metadata cache fallback.
 - **Strictly Local FFMPEG Video Previews**: Integrated asynchronous frame extraction in `lua/gelbooru/ui/image.lua` using `ffmpeg -ss 00:00:01 -i ... -frames:v 1 -q:v 2 <cache>/vthumb_<id>.jpg -y` with atomic `.part` guards and 0-byte validation. Zero online queries for local videos.
 - **Hybrid Video High-Quality Upgrade**: When saving videos in online mode, `save_current()` immediately extracts the high-quality local `ffmpeg` frame and renders it; both online and local browsing automatically prioritize the high-quality local `ffmpeg` frame over compressed web previews.
@@ -536,13 +540,8 @@ This branch introduces unified local library browsing, offline booru metadata en
   - Implement top-down count refresh (`:GelbooruTags refresh`) scraping from page 0 downward to update the top 50,000 most popular tags in place.
   - Implement query-time self-healing: when a single-tag search returns 0 results, query the tag API asynchronously and prune the tag if confirmed dead or aliased.
 
-#### 2. Online `sort:random` Query Reseeding & Cache Invalidation
-- **Problem**: In online search mode, executing a query with `sort:random` (or re-submitting `<CR>` on the same random query) returns the exact same list of posts rather than a fresh randomized batch. In contrast, local `sort:random` correctly reshuffles on every execution.
-- **Root Cause**: Gelbooru's remote API or intermediate HTTP caches treat identical search queries as idempotent when `pid = 0`, caching the result set. Furthermore, internal search dispatchers short-circuit re-queries when the query string is identical.
-- **Resolution**:
-  - In `net/api.lua`, when `sort:random` is present in an online search, bypass identical-query equality guards to force an immediate re-fetch on `<CR>`.
-  - Append a randomized query nonce or cache-busting timestamp param to the outgoing API request.
-  - Add `Cache-Control: no-cache` and `Pragma: no-cache` headers to `curl_async` requests for random searches.
+#### 2. [COMPLETED] Online `sort:random` Query Reseeding & Cache Invalidation
+- **Implemented**: Dynamic cache-busting nonces appended to outgoing API requests, forcing remote and intermediate caches to return freshly shuffled batches on repeated executions.
 
 #### 3. Eager Lookahead & Network Prefetch Pipeline Optimization (~500ms Delay)
 - **Problem**: Scrolling between posts in online mode exhibits noticeable latency (~500ms delay before preview renders), even on high-speed internet connections (50+ MB/s). The lookahead engine does not adequately mask network transit times.
@@ -557,12 +556,8 @@ This branch introduces unified local library browsing, offline booru metadata en
   - Eliminate the artificial 50ms delay for the immediate next post (`cur + dir`).
   - Pass `--keepalive` / persistent connection parameters to `curl` where supported.
 
-#### 4. Flexible `local:` Syntax Anywhere in Query Bar
-- **Problem**: Querying `tag1 tag2 local:` or `solo local: tag2` fails to trigger local browsing mode; the parser treats `local:` as an unrecognized remote booru tag rather than switching the query engine into local library mode.
-- **Root Cause**: `local/query.lua`, `init.lua`, and `autocomplete.lua` use strict prefix matching (`line:match("^[Ll][Oo][Cc][Aa][Ll]:")`), expecting `local:` strictly as the first token.
-- **Resolution**:
-  - Update query tokenizer in `lua/gelbooru/local/query.lua` and `lua/gelbooru/init.lua` to detect `local:` or `local:<dir>` anywhere in the input token stream.
-  - Extract the local directory and normalize the remaining tokens into local positive/negative tag filters, ensuring consistent local routing regardless of token ordering in the query bar.
+#### 4. [COMPLETED] Flexible `local:` Syntax Anywhere in Query Bar
+- **Implemented**: Robust token-boundary matching in `lua/gelbooru/core/util.lua` (`util.is_local_query`) and `lua/gelbooru/local/query.lua` extracts `local:` and `local:<dir>` regardless of token position in query string.
 
 ### 9.2 Medium Severity (Performance, Memory & UI Polish)
 
@@ -618,7 +613,7 @@ This branch introduces unified local library browsing, offline booru metadata en
 
 ### 9.4 Future Product Directions & Architectural Roadmap (Future Scope)
 
-#### 12. Multi-Stage Piped Search & Cascading Sorting Pipeline
+#### 12. [COMPLETED] Multi-Stage Piped Search & Cascading Sorting Pipeline
 - **Concept**: A composable, multi-stage sorting and filtering engine allowing users to chain query operations in sequence.
 - **Example Use Case**:
   - Fetch the latest 1,000 uploaded posts (`sort:id:1000`), sort those 1,000 by score to extract the top 500 highest-rated posts (`sort:score:500`), and randomly shuffle those 500 for browsing (`sort:random`).

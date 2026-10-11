@@ -54,6 +54,14 @@ function M.normalize_str(s)
   return (s or ""):gsub("[^%w]", ""):lower()
 end
 
+function M.is_local_query(q)
+  if not q or type(q) ~= "string" then
+    return false
+  end
+  return q:match("^%s*[\"']?[Ll][Oo][Cc][Aa][Ll]:") ~= nil
+    or q:match("[%s%|]+[\"']?[Ll][Oo][Cc][Aa][Ll]:") ~= nil
+end
+
 function M.decode_html(str)
   if not str then
     return ""

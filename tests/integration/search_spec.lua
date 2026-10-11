@@ -385,6 +385,116 @@ describe("Integration: Search & List flow", function()
       download.curl_async = orig_curl_async
     end)
 
+    it("reseeds online search when sort:random is used, bypassing identical query guard and appending nonce", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+
+      local requested_urls = {}
+      local current_curl = download.curl_async
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          table.insert(requested_urls, url)
+        end
+        current_curl(url, cb)
+      end
+
+      api.execute_search("hatsune_miku sort:random")
+      vim.wait(100, function()
+        return #state.State.posts > 0
+      end)
+
+      assert.are.equal(1, #requested_urls)
+      assert.is_truthy(requested_urls[1]:find("&_nonce="))
+
+      -- Re-executing identical query with sort:random bypasses guard and issues second fetch with fresh nonce
+      api.execute_search("hatsune_miku sort:random")
+      vim.wait(100, function()
+        return #requested_urls >= 2
+      end)
+
+      assert.are.equal(2, #requested_urls)
+      assert.is_truthy(requested_urls[2]:find("&_nonce="))
+      assert.are.not_equal(requested_urls[1], requested_urls[2])
+
+      download.curl_async = current_curl
+    end)
+
+    it("delegates to ui.open_local when local: is placed anywhere in the query string", function()
+      ui.open()
+      local open_local_called = false
+      local open_local_query = nil
+      local orig_open_local = ui.open_local
+      ui.open_local = function(q)
+        open_local_called = true
+        open_local_query = q
+      end
+
+      api.execute_search("solo hatsune_miku local: sort:score")
+      assert.is_true(open_local_called)
+      assert.are.equal("solo hatsune_miku local: sort:score", open_local_query)
+
+      open_local_called = false
+      api.execute_search("~foot_focus local:")
+      assert.is_true(open_local_called)
+      assert.are.equal("~foot_focus local:", open_local_query)
+
+      ui.open_local = orig_open_local
+    end)
+
+    it("QA 1: online search does not hijack is_local:true or -local:tag", function()
+      ui.open()
+      local open_local_called = false
+      local orig_open_local = ui.open_local
+      ui.open_local = function()
+        open_local_called = true
+      end
+
+      api.execute_search("is_local:true")
+      assert.is_false(open_local_called)
+
+      api.execute_search("-local:tag")
+      assert.is_false(open_local_called)
+
+      api.execute_search("nonlocal:tag")
+      assert.is_false(open_local_called)
+
+      ui.open_local = orig_open_local
+    end)
+
+    it("QA 3: case-insensitive sort:RANDOM and order:Random online reseeding", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+
+      local requested_urls = {}
+      local current_curl = download.curl_async
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          table.insert(requested_urls, url)
+        end
+        current_curl(url, cb)
+      end
+
+      api.execute_search("hatsune_miku sort:RANDOM")
+      vim.wait(100, function()
+        return #state.State.posts > 0
+      end)
+
+      assert.are.equal(1, #requested_urls)
+      assert.is_truthy(requested_urls[1]:find("&_nonce="))
+
+      -- Second execution bypasses guard due to case-insensitive match
+      api.execute_search("hatsune_miku sort:RANDOM")
+      vim.wait(100, function()
+        return #requested_urls >= 2
+      end)
+
+      assert.are.equal(2, #requested_urls)
+      assert.is_truthy(requested_urls[2]:find("&_nonce="))
+      assert.are.not_equal(requested_urls[1], requested_urls[2])
+
+      download.curl_async = current_curl
+    end)
+
     it("ignores execute_search when State.torn_down is true", function()
       ui.open()
       ui.teardown()
@@ -395,6 +505,258 @@ describe("Integration: Search & List flow", function()
 
       assert.are.not_equal("should_be_ignored", state.State.query)
       assert.are.equal(prev_epoch, state.State.search_epoch)
+    end)
+  end)
+
+  describe("Multi-Stage Piped Online Search (| sort:<key>[:<limit>])", function()
+    it("fetches multi-page candidate pool up to pool limit, then reduces by score and randomizes in memory", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local requested_urls = {}
+
+      -- Simulate 300 posts on Gelbooru: 3 pages of 100 posts each
+      local dummy_pages = {}
+      for page = 0, 2 do
+        local page_posts = {}
+        for i = 1, 100 do
+          local id_num = 300 - (page * 100 + i - 1) -- 300 down to 1
+          table.insert(page_posts, {
+            id = id_num,
+            score = (id_num % 100), -- scores 0..99
+            tags = "hatsune_miku 1girl",
+            file_url = string.format("https://example.com/%d.jpg", id_num),
+            preview_url = string.format("https://example.com/%d_p.jpg", id_num),
+          })
+        end
+        dummy_pages[page] = page_posts
+      end
+
+      local orig_curl_async = download.curl_async
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          table.insert(requested_urls, url)
+          local pid = tonumber(url:match("pid=(%d+)")) or 0
+          local posts = dummy_pages[pid] or {}
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = posts }))
+          end)
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      -- Query: hatsune_miku | sort:id:300 | sort:score:50 | sort:random
+      api.execute_search("hatsune_miku | sort:id:300 | sort:score:50 | sort:random")
+
+      vim.wait(500, function()
+        return #state.State.posts > 0 and not state.State.loading
+      end, 20)
+
+      -- 1. Verify candidate pool batch fetching
+      assert.are.equal(3, #requested_urls)
+      assert.is_truthy(requested_urls[1]:find("limit=100") and requested_urls[1]:find("pid=0"))
+      assert.is_truthy(requested_urls[2]:find("limit=100") and requested_urls[2]:find("pid=1"))
+      assert.is_truthy(requested_urls[3]:find("limit=100") and requested_urls[3]:find("pid=2"))
+
+      -- 2. Verify remote query included sort:id:desc
+      assert.is_truthy(requested_urls[1]:find("sort%%3Aid%%3Adesc") or requested_urls[1]:find("sort:id:desc"))
+
+      -- 3. Verify in-memory reduction to top 50 scores
+      assert.are.equal(50, #state.State.posts)
+      for _, p in ipairs(state.State.posts) do
+        assert.is_truthy(tonumber(p.score) >= 50)
+      end
+
+      -- 4. Verify list rendering & cursor
+      assert.are.equal(1, state.State.cur)
+      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      assert.are.equal(50, #list_lines)
+      assert.is_truthy(list_lines[1]:find("▶"))
+
+      download.curl_async = orig_curl_async
+    end)
+
+    it("single-page candidate pool fetching when pool limit <= 100", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local requested_urls = {}
+
+      local sample_posts = {}
+      for i = 1, 40 do
+        table.insert(sample_posts, {
+          id = 1000 + i,
+          score = i * 2,
+          tags = "solo",
+          file_url = string.format("https://example.com/%d.jpg", 1000 + i),
+        })
+      end
+
+      local orig_curl_async = download.curl_async
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          table.insert(requested_urls, url)
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = sample_posts }))
+          end)
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      api.execute_search("solo | sort:score:15 | sort:random")
+
+      vim.wait(300, function()
+        return #state.State.posts > 0 and not state.State.loading
+      end, 20)
+
+      -- Only 1 batch request issued with limit=15
+      assert.are.equal(1, #requested_urls)
+      assert.is_truthy(requested_urls[1]:find("limit=15"))
+      assert.is_truthy(requested_urls[1]:find("sort%%3Ascore%%3Adesc") or requested_urls[1]:find("sort:score:desc"))
+      assert.are.equal(15, #state.State.posts)
+
+      download.curl_async = orig_curl_async
+    end)
+
+    it("handles server returning fewer posts than requested without hanging", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+
+      local orig_curl_async = download.curl_async
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          -- Return 10 posts even though limit requested 100
+          local short_batch = {}
+          for i = 1, 10 do
+            table.insert(short_batch, { id = 500 + i, score = i, file_url = "https://example.com/short.jpg" })
+          end
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = short_batch }))
+          end)
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      -- Target pool 500, but server returns only 10
+      api.execute_search("short_tag | sort:id:500 | sort:score:5 | sort:random")
+
+      vim.wait(300, function()
+        return #state.State.posts > 0 and not state.State.loading
+      end, 20)
+
+      -- Pipeline completes with available posts reduced to 5
+      assert.are.equal(5, #state.State.posts)
+
+      download.curl_async = orig_curl_async
+    end)
+
+    it("handles empty API response on piped search gracefully", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+
+      local orig_curl_async = download.curl_async
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = {} }))
+          end)
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      api.execute_search("nonexistent_tag | sort:id:1000 | sort:random")
+
+      vim.wait(300, function()
+        return not state.State.loading
+      end, 20)
+
+      assert.are.equal(0, #state.State.posts)
+      local img_lines = harness.get_buf_lines(state.UI.bufs.img)
+      assert.are.same({ "  No posts found" }, img_lines)
+
+      download.curl_async = orig_curl_async
+    end)
+
+    it("guards forward and backward pagination on piped searches without issuing network requests and displays notice", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local curl_called = false
+      local orig_curl_async = download.curl_async
+
+      -- Prepopulate state as if a piped search had completed
+      state.State.query = "miku | sort:id:500 | sort:random"
+      state.State.posts = { { id = 1, tags = "miku", score = 10 } }
+      state.State.page = 1
+      state.State.loading = false
+
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          curl_called = true
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      -- Attempt forward pagination (<Tab> / api.fetch(1))
+      api.fetch(1)
+      assert.is_false(curl_called)
+      local status_lines = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_truthy(status_lines[1] and status_lines[1]:find("Pagination not supported on piped searches"))
+
+      -- Attempt backward pagination (<S-Tab> / api.fetch(-1))
+      api.fetch(-1)
+      assert.is_false(curl_called)
+      assert.are.equal(1, #state.State.posts)
+
+      download.curl_async = orig_curl_async
+    end)
+
+    it("processes partial candidate pool into top scores on mid-stream network failure without hanging", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+
+      local req_count = 0
+      local orig_curl_async = download.curl_async
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          req_count = req_count + 1
+          if req_count == 1 then
+            -- Page 1 succeeds with 100 posts (scores 1..100)
+            local page1_posts = {}
+            for i = 1, 100 do
+              table.insert(page1_posts, { id = 1000 + i, score = i, file_url = "https://example.com/p.jpg" })
+            end
+            vim.schedule(function()
+              cb(vim.fn.json_encode({ post = page1_posts }))
+            end)
+          else
+            -- Page 2 fails (e.g. network disconnect returning nil)
+            vim.schedule(function()
+              cb(nil)
+            end)
+          end
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      -- Target pool 300 posts, reduce to top 20 scores
+      api.execute_search("network_test | sort:id:300 | sort:score:20")
+
+      vim.wait(300, function()
+        return not state.State.loading and #state.State.posts > 0
+      end, 20)
+
+      -- Verify it recovered from mid-stream failure, finished the pipeline with available 100 posts,
+      -- and reduced to top 20 scores (scores 81..100)
+      assert.is_false(state.State.loading)
+      assert.are.equal(20, #state.State.posts)
+      assert.are.equal(100, tonumber(state.State.posts[1].score))
+      assert.are.equal(81, tonumber(state.State.posts[20].score))
+
+      download.curl_async = orig_curl_async
     end)
   end)
 end)

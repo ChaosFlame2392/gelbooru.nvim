@@ -5,6 +5,7 @@ local state = require("gelbooru.core.state")
 local history = require("gelbooru.core.history")
 local image = require("gelbooru.ui.image")
 local download = require("gelbooru.net.download")
+local util = require("gelbooru.core.util")
 
 local query = require("gelbooru.local.query")
 local index = require("gelbooru.local.index")
@@ -16,6 +17,8 @@ M.parse_query = query.parse_query
 M.parse_local_query = query.parse_local_query
 M.parse_tags = query.parse_tags
 M.sort_posts = query.sort_posts
+M.execute_pipeline = query.execute_pipeline
+M.parse_pipeline = query.parse_pipeline
 M.filter_posts = query.filter_posts
 M.matches_post = query.matches_post
 M.matches_query = query.matches_query
@@ -42,7 +45,7 @@ function M.open_local(query_or_dir)
   image.reset_canvas(#filtered_posts == 0 and "  No images found" or "  Loading...")
 
   local new_query
-  if query_or_dir and type(query_or_dir) == "string" and query_or_dir:match("^[Ll][Oo][Cc][Aa][Ll]:") then
+  if query_or_dir and type(query_or_dir) == "string" and util.is_local_query(query_or_dir) then
     new_query = query_or_dir
   else
     if tag_str and tag_str ~= "" then

@@ -22,15 +22,76 @@ end
 
 M.normalize_rating = normalize_rating
 
+local function tokenize_query(str)
+  local tokens = {}
+  local i = 1
+  local len = #str
+  while i <= len do
+    while i <= len and str:sub(i, i):match("%s") do
+      i = i + 1
+    end
+    if i > len then break end
+
+    -- Check if token starts with local: followed by quote, e.g. local:"/path"
+    local local_match_quote = str:sub(i):match("^[Ll][Oo][Cc][Aa][Ll]:([\"'])")
+    if local_match_quote then
+      local q = local_match_quote
+      local start_content = i + 7 -- after local:"
+      local j = start_content
+      while j <= len and str:sub(j, j) ~= q do
+        j = j + 1
+      end
+      local content = str:sub(start_content, j - 1)
+      table.insert(tokens, { is_local_dir = true, text = content, quoted = true, raw = str:sub(i, math.min(j, len)) })
+      i = j + 1
+    else
+      local c = str:sub(i, i)
+      if c == '"' or c == "'" then
+        local q = c
+        local j = i + 1
+        while j <= len and str:sub(j, j) ~= q do
+          j = j + 1
+        end
+        local content = str:sub(i + 1, j - 1)
+        table.insert(tokens, { text = content, quoted = true, raw = str:sub(i, math.min(j, len)) })
+        i = j + 1
+      else
+        local j = i
+        while j <= len and not str:sub(j, j):match("%s") do
+          j = j + 1
+        end
+        local token = str:sub(i, j - 1)
+        table.insert(tokens, { text = token, quoted = false, raw = token })
+        i = j
+      end
+    end
+  end
+  return tokens
+end
+
+local function is_dir_token(token_str)
+  if not token_str or token_str == "" then return false end
+  local clean = token_str:gsub('^["\']', ""):gsub('["\']$', "")
+  if clean == "" then return false end
+  local starts_path = clean:match("^/") ~= nil
+    or clean:match("^%~[/\\]") ~= nil
+    or clean == "~"
+    or clean:match("^%.[/\\]") ~= nil
+    or clean == "."
+    or clean == ".."
+  if starts_path then
+    return true
+  end
+  local expanded = vim.fn.expand(clean)
+  return vim.fn.isdirectory(expanded) == 1
+end
+
 --- Parses query string into directory path, tag string, and structured filter table.
 --- Handles:
 ---   `local: <tags>`, `local:<dir> <tags>`, `local:<dir>`, `local:`,
+---   flexible placement (e.g. `solo hatsune_miku local: sort:score`, `~foot_focus local:`),
 ---   quoted directories (e.g. `local:"/path with spaces" tag1`),
 ---   or bare directories/tags without `local:`.
----
---- Robust detection: If the first token after `local:` starts with `/`, `~`, `.`,
---- or `vim.fn.isdirectory(vim.fn.expand(token)) == 1`, treat it as `<dir>`.
---- Otherwise, treat it as part of `<tags>` in default `config.options.save_dir`.
 ---@param query_str string|nil
 ---@return string target_dir
 ---@return string tag_str
@@ -43,90 +104,349 @@ function M.parse_query(query_str)
   end
 
   local s = vim.trim(query_str)
-  local is_local_prefix = s:match("^[Ll][Oo][Cc][Aa][Ll]:") ~= nil
-  local has_space_after_colon = s:match("^[Ll][Oo][Cc][Aa][Ll]:%s+") ~= nil
-  local is_direct_local_dir = is_local_prefix and not has_space_after_colon
-
-  local remainder = s:match("^[Ll][Oo][Cc][Aa][Ll]:%s*(.*)")
-  if not remainder then
-    remainder = s:match("^[Ll][Oo][Cc][Aa][Ll]:(.*)")
-  end
-
-  if not remainder then
-    remainder = s
-  end
-  remainder = vim.trim(remainder)
-
-  if remainder == "" then
+  local tokens = tokenize_query(s)
+  if #tokens == 0 then
     local def_dir = config.options.save_dir
     return def_dir, "", M.parse_tags("")
   end
 
-  local first_token = nil
-  local rest_str = ""
+  local target_dir = nil
+  local local_idx = nil
+  local has_local_prefix = false
 
-  local q = remainder:sub(1, 1)
-  if q == '"' or q == "'" then
-    first_token, rest_str = remainder:match('^"([^"]*)"%s*(.*)')
-    if not first_token then
-      first_token, rest_str = remainder:match("^'([^']*)'%s*(.*)")
+  -- Look for local: token or local:<dir> token anywhere in the token stream
+  for idx, t in ipairs(tokens) do
+    if t.is_local_dir then
+      -- local:"/path with spaces"
+      has_local_prefix = true
+      local_idx = idx
+      target_dir = t.text
+      break
+    elseif t.text:lower() == "local:" then
+      has_local_prefix = true
+      local_idx = idx
+      local next_t = tokens[idx + 1]
+      if next_t and is_dir_token(next_t.text) then
+        target_dir = next_t.text
+      else
+        target_dir = config.options.save_dir
+      end
+      break
+    elseif t.text:lower():match("^local:(.+)$") then
+      has_local_prefix = true
+      local_idx = idx
+      local val = t.text:match("^[Ll][Oo][Cc][Aa][Ll]:(.*)")
+      if is_dir_token(val) then
+        target_dir = val
+      else
+        -- e.g. local:not_a_dir_tag1 -> target_dir is save_dir, and val is treated as a tag!
+        target_dir = config.options.save_dir
+        t.text = val
+        t.raw = val
+        local_idx = nil
+      end
+      break
     end
-    if not first_token then
-      -- Unclosed quote: capture the trailing unclosed quoted text as a search token
-      first_token = remainder:sub(2)
-      rest_str = ""
-    end
-  else
-    first_token, rest_str = remainder:match("^(%S+)%s*(.*)")
   end
 
-  if not first_token or first_token == "" then
-    local def_dir = config.options.save_dir
-    return def_dir, "", M.parse_tags("")
+  local remaining_tokens = {}
+  if has_local_prefix then
+    local skip_next = (target_dir ~= nil and target_dir ~= config.options.save_dir and local_idx and tokens[local_idx] and tokens[local_idx].text:lower() == "local:")
+    for idx, t in ipairs(tokens) do
+      if idx == local_idx then
+        -- Skip the local: or local:"..." token
+      elseif skip_next and idx == local_idx + 1 then
+        -- Skip the consumed directory token
+      else
+        table.insert(remaining_tokens, t)
+      end
+    end
+  else
+    -- No local: prefix found. Check if first token is directory.
+    local first = tokens[1]
+    if first and is_dir_token(first.text) then
+      target_dir = first.text
+      for idx = 2, #tokens do
+        table.insert(remaining_tokens, tokens[idx])
+      end
+    else
+      target_dir = config.options.save_dir
+      for idx = 1, #tokens do
+        table.insert(remaining_tokens, tokens[idx])
+      end
+    end
   end
 
-  local expanded = vim.fn.expand(first_token)
-  local starts_path_char = first_token:match("^[/%~%.]") ~= nil
-  local is_dir = starts_path_char or (is_direct_local_dir and vim.fn.isdirectory(expanded) == 1)
-
-  local target_dir = config.options.save_dir
-  local tag_str = ""
-
-  if is_dir then
-    target_dir = first_token:gsub('^["\']', ""):gsub('["\']$', "")
-    tag_str = vim.trim(rest_str or "")
-  else
+  if not target_dir or target_dir == "" then
     target_dir = config.options.save_dir
-    tag_str = remainder:gsub('^["\']', "")
   end
+  target_dir = target_dir:gsub('^["\']', ""):gsub('["\']$', "")
 
+  -- Reconstruct tag_str
+  local tag_parts = {}
+  for _, t in ipairs(remaining_tokens) do
+    if t.quoted or t.text:find("%s") then
+      table.insert(tag_parts, '"' .. t.text .. '"')
+    else
+      table.insert(tag_parts, t.text)
+    end
+  end
+  local tag_str = vim.trim(table.concat(tag_parts, " "))
   local parsed_filter = M.parse_tags(tag_str)
   return target_dir, tag_str, parsed_filter
 end
 
---- Parses tag string into structured conditions.
---- Supports:
----   - ratings: `rating:general` (`rating:g`), `rating:sensitive` (`rating:s`),
----              `rating:questionable` (`rating:q`), `rating:explicit` (`rating:e`),
----              and negative forms: `-rating:<r>`
----   - scores: `score:>=50`, `score:>10`, `score:<=5`, `score:<0`, `score:=20`, `score:20`
----   - artists: `artist:<name>`, `-artist:<name>`
----   - characters: `character:<name>`, `-character:<name>`
----   - ids: `id:<number>`
----   - negative tags: `-tag`
----   - positive plain tags: `tag`
----@param tag_str string|nil
----@return table filter
-function M.parse_tags(tag_str)
+local function split_by_pipeline_pipe(str)
+  if not str or str == "" then
+    return {}
+  end
+  local parts = {}
+  local len = #str
+  local i = 1
+  local cur_start = 1
+  local in_quote = nil
+
+  while i <= len do
+    local c = str:sub(i, i)
+    if in_quote then
+      if c == in_quote then
+        in_quote = nil
+      end
+      i = i + 1
+    else
+      if c == '"' or c == "'" then
+        in_quote = c
+        i = i + 1
+      elseif c == "|" then
+        local is_pipe_delim = false
+        local before_char = (i > 1) and str:sub(i - 1, i - 1) or " "
+        local after_char = (i < len) and str:sub(i + 1, i + 1) or " "
+
+        if before_char:match("%s") or after_char:match("%s") or i == 1 then
+          is_pipe_delim = true
+        else
+          local rest = str:sub(i + 1):lower()
+          if rest:match("^sort:") or rest:match("^order:") or rest:match("^limit:") or rest:match("^random") then
+            is_pipe_delim = true
+          end
+        end
+
+        if is_pipe_delim then
+          table.insert(parts, str:sub(cur_start, i - 1))
+          cur_start = i + 1
+        end
+        i = i + 1
+      else
+        i = i + 1
+      end
+    end
+  end
+
+  table.insert(parts, str:sub(cur_start, len))
+  return parts
+end
+
+local function parse_stage(stage_str)
+  if not stage_str or stage_str == "" then
+    return nil
+  end
+  local stage = { key = nil, dir = nil, limit = nil }
+  local matched = false
+
+  for token in stage_str:gmatch("%S+") do
+    token = token:gsub('^["\']', ""):gsub('["\']$', "")
+    token = token:gsub("^|+", "")
+    local t = token:lower()
+
+    if t == "random" then
+      stage.key = "random"
+      stage.dir = "asc"
+      matched = true
+    elseif t == "order:random" or t == "sort:random" then
+      stage.key = "random"
+      stage.dir = "asc"
+      matched = true
+    elseif t:match("^order:random:(%d+)$") or t:match("^sort:random:(%d+)$") then
+      stage.key = "random"
+      stage.dir = "asc"
+      stage.limit = tonumber(t:match(":(%d+)$"))
+      matched = true
+    elseif t:match("^limit:(%d+)$") then
+      stage.limit = tonumber(t:match("^limit:(%d+)$"))
+      matched = true
+    elseif t:match("^sort:(.+)$") then
+      local expr = t:match("^sort:(.+)$")
+      if expr == "random" then
+        stage.key = "random"
+        stage.dir = "asc"
+        matched = true
+      elseif expr:match("^random:(%d+)$") then
+        stage.key = "random"
+        stage.dir = "asc"
+        stage.limit = tonumber(expr:match("^random:(%d+)$"))
+        matched = true
+      else
+        local parts = {}
+        for p in expr:gmatch("[^:]+") do
+          table.insert(parts, p)
+        end
+        if #parts == 1 then
+          local p1 = parts[1]
+          if p1 == "random" then
+            stage.key = "random"
+            stage.dir = "asc"
+            matched = true
+          elseif p1:match("^%d+$") then
+            stage.limit = tonumber(p1)
+            matched = true
+          elseif p1 ~= "" then
+            stage.key = p1
+            stage.dir = "desc"
+            matched = true
+          end
+        elseif #parts == 2 then
+          local p1, p2 = parts[1], parts[2]
+          stage.key = p1
+          if p2:match("^%d+$") then
+            stage.limit = tonumber(p2)
+            stage.dir = (p1 == "random") and "asc" or "desc"
+            matched = true
+          elseif p2 == "asc" or p2 == "desc" then
+            stage.dir = p2
+            matched = true
+          else
+            stage.dir = "desc"
+            matched = true
+          end
+        elseif #parts >= 3 then
+          local p1, p2, p3 = parts[1], parts[2], parts[3]
+          stage.key = p1
+          if p2 == "asc" or p2 == "desc" then
+            stage.dir = p2
+            if p3:match("^%d+$") then
+              stage.limit = tonumber(p3)
+            end
+            matched = true
+          elseif p2:match("^%d+$") then
+            stage.limit = tonumber(p2)
+            if p3 == "asc" or p3 == "desc" then
+              stage.dir = p3
+            else
+              stage.dir = "desc"
+            end
+            matched = true
+          else
+            stage.dir = "desc"
+            matched = true
+          end
+        end
+      end
+    elseif t:match("^order:(.+)$") then
+      local oval = t:match("^order:(.+)$")
+      if oval == "asc" or oval == "desc" then
+        stage.dir = oval
+        matched = true
+      elseif oval == "random" then
+        stage.key = "random"
+        stage.dir = "asc"
+        matched = true
+      else
+        local o_key, o_dir = oval:match("^([%w]+)_([%w]+)$")
+        if o_key and (o_dir == "asc" or o_dir == "desc") then
+          stage.key = o_key
+          stage.dir = o_dir
+          matched = true
+        elseif oval ~= "" then
+          stage.key = oval
+          stage.dir = "desc"
+          matched = true
+        end
+      end
+    end
+  end
+
+  if not matched or (not stage.key and not stage.limit) then
+    return nil
+  end
+
+  if stage.key and not stage.dir then
+    stage.dir = (stage.key == "random") and "asc" or "desc"
+  end
+
+  return stage
+end
+
+--- Parses a query or tag string containing pipe-separated stages.
+--- Format: <base_query> | sort:<key>[:<limit>] | sort:<key>[:<limit>] ...
+---@param query_or_tags string|nil
+---@return table { base_query = string, stages = table[] }
+function M.parse_pipeline(query_or_tags)
+  if not query_or_tags or query_or_tags == "" or type(query_or_tags) ~= "string" then
+    return { base_query = "", stages = {} }
+  end
+
+  local s = vim.trim(query_or_tags)
+  if s == "" then
+    return { base_query = "", stages = {} }
+  end
+
+  local parts = split_by_pipeline_pipe(s)
+  if #parts <= 1 then
+    return { base_query = s, stages = {} }
+  end
+
+  local first_str = vim.trim(parts[1] or "")
+  local first_lower = first_str:lower()
+  local has_explicit_stage_prefix = first_lower:match("^sort:") ~= nil
+    or first_lower:match("^order:") ~= nil
+    or first_lower:match("^limit:") ~= nil
+
+  local base_query = ""
+  local start_stage_idx = 2
+  local stages = {}
+
+  if has_explicit_stage_prefix and not first_lower:find("^local:") then
+    local stage1 = parse_stage(first_str)
+    if stage1 then
+      base_query = ""
+      table.insert(stages, stage1)
+      start_stage_idx = 2
+    else
+      base_query = first_str
+      start_stage_idx = 2
+    end
+  else
+    base_query = first_str
+    start_stage_idx = 2
+  end
+
+  for i = start_stage_idx, #parts do
+    local part_str = vim.trim(parts[i])
+    if part_str ~= "" then
+      local stage = parse_stage(part_str)
+      if stage then
+        table.insert(stages, stage)
+      else
+        return { base_query = s, stages = {} }
+      end
+    end
+  end
+
+  return { base_query = base_query, stages = stages }
+end
+
+local function _parse_tags_internal(tag_str)
   local filter = {
     positive_tags = {},
     negative_tags = {},
+    or_tags = {},
     ratings = {},
     scores = {},
     artists = {},
     characters = {},
     ids = {},
     sort = nil,
+    pipeline_stages = nil,
     raw = tag_str or "",
   }
 
@@ -134,100 +454,163 @@ function M.parse_tags(tag_str)
     return filter
   end
 
+  local function add_rating(op, val)
+    for _, r in ipairs(filter.ratings) do
+      if r.op == op and r.val == val then
+        return
+      end
+    end
+    table.insert(filter.ratings, { op = op, val = val })
+  end
+
+  local function add_or_tag(tag)
+    tag = tag:gsub("^~+", ""):gsub("~+$", ""):lower()
+    if tag == "" or tag:match("^%s*$") then
+      return
+    end
+    for _, t in ipairs(filter.or_tags) do
+      if t == tag then
+        return
+      end
+    end
+    table.insert(filter.or_tags, tag)
+  end
+
+  local function add_sort_stage(key, dir)
+    if not filter.sort then
+      filter.sort = { key = key, dir = dir }
+      table.insert(filter.sort, { key = key, dir = dir })
+    else
+      table.insert(filter.sort, { key = key, dir = dir })
+      filter.sort.key = filter.sort[1].key
+      filter.sort.dir = filter.sort[1].dir
+    end
+  end
+
   for token in tag_str:gmatch("%S+") do
     -- Strip optional outer quotes around individual tags
     token = token:gsub('^["\']', ""):gsub('["\']$', "")
 
-    -- Match sort: and order: directives
-    local sort_key, sort_dir = token:match("^sort:([%w_]+):?([%w_]*)$")
-    local order_val = token:match("^order:([%w_]+)$")
-    if sort_key then
-      if sort_key:lower() == "random" then
-        filter.sort = { key = "random", dir = "asc" }
-      else
-        filter.sort = {
-          key = sort_key:lower(),
-          dir = (sort_dir:lower() == "asc") and "asc" or "desc",
-        }
-      end
-    elseif order_val then
-      local oval = order_val:lower()
-      if oval == "asc" or oval == "desc" then
-        if filter.sort then
-          filter.sort.dir = oval
-        else
-          filter.sort = { key = "date", dir = oval }
-        end
-      else
-        local o_key, o_dir = oval:match("^([%w]+)_([%w]+)$")
-        if o_key and (o_dir == "asc" or o_dir == "desc") then
-          filter.sort = { key = o_key, dir = o_dir }
-        else
-          filter.sort = {
-            key = oval,
-            dir = (filter.sort and filter.sort.dir) or "desc",
-          }
-        end
-      end
-    elseif token:lower() == "random" then
-      filter.sort = { key = "random", dir = "asc" }
+    if token == "|" then
+      -- Pipe separator between stages, e.g. "hatsune_miku | sort:score"
+      -- Just skip the literal pipe token
     else
-      -- 1. Score: score:>=50, score:>10, score:<=5, score:<0, score:=20, score:20
-      local score_op, score_val = token:match("^score:([><=]=?)(%-?%d+)$")
-      if not score_op then
-        score_val = token:match("^score:(%-?%d+)$")
-        if score_val then
+      -- 1. Sort and Order directives (including piped |sort: and comma-separated sort:score:desc,date:desc)
+      local sort_expr = token:match("^%|?sort:(.+)$")
+      local order_val = token:match("^%|?order:(.+)$")
+      if sort_expr then
+        for part in sort_expr:gmatch("[^,]+") do
+          local p_key, p_dir = part:match("^([%w_]+):?([%w_]*)$")
+          if p_key then
+            if p_key:lower() == "random" then
+              add_sort_stage("random", "asc")
+            else
+              local k = p_key:lower()
+              local d = (p_dir:lower() == "asc") and "asc" or "desc"
+              add_sort_stage(k, d)
+            end
+          end
+        end
+      elseif order_val then
+        local oval = order_val:lower()
+        if oval == "asc" or oval == "desc" then
+          if filter.sort and #filter.sort > 0 then
+            filter.sort[#filter.sort].dir = oval
+            if #filter.sort == 1 then
+              filter.sort.dir = oval
+            end
+          else
+            add_sort_stage("date", oval)
+          end
+        else
+          local o_key, o_dir = oval:match("^([%w]+)_([%w]+)$")
+          if o_key and (o_dir == "asc" or o_dir == "desc") then
+            add_sort_stage(o_key, o_dir)
+          else
+            local d = (filter.sort and filter.sort.dir) or "desc"
+            add_sort_stage(oval, d)
+          end
+        end
+      elseif token:lower() == "random" or token:lower() == "|random" then
+        add_sort_stage("random", "asc")
+      else
+        -- 2. Score: score:>=50, score:>10, score:<=5, score:<0, score:=20, score:20
+        local score_op, score_val = token:match("^score:([><=]=?)(%-?%d+)$")
+        if not score_op then
+          score_val = token:match("^score:(%-?%d+)$")
+          if score_val then
+            score_op = "=="
+          end
+        elseif score_op == "=" then
           score_op = "=="
         end
-      elseif score_op == "=" then
-        score_op = "=="
-      end
 
-      if score_op and score_val then
-        table.insert(filter.scores, { op = score_op, val = tonumber(score_val) })
-      else
-        -- 2. Rating: rating:<r> or -rating:<r>
-        local pos_rating = token:match("^rating:(%a+)$")
-        local neg_rating = token:match("^%-rating:(%a+)$")
-        if pos_rating then
-          local canon = normalize_rating(pos_rating)
-          if canon then
-            table.insert(filter.ratings, { op = "eq", val = canon })
-          end
-        elseif neg_rating then
-          local canon = normalize_rating(neg_rating)
-          if canon then
-            table.insert(filter.ratings, { op = "neq", val = canon })
-          end
+        if score_op and score_val then
+          table.insert(filter.scores, { op = score_op, val = tonumber(score_val) })
         else
-          -- 3. Explicit artist modifier: artist:<name> or -artist:<name>
-          local pos_artist = token:match("^artist:(.+)$")
-          local neg_artist = token:match("^%-artist:(.+)$")
-          if pos_artist then
-            table.insert(filter.artists, { op = "eq", val = pos_artist:lower() })
-          elseif neg_artist then
-            table.insert(filter.artists, { op = "neq", val = neg_artist:lower() })
+          -- 3. Rating: rating:<r>, -rating:<r>, ~rating:<r>, multi-ratings: rating:q,e, rating:q|e, ~rating:q|e, -rating:q,e
+          local neg_rating = token:match("^%-[Rr][Aa][Tt][Ii][Nn][Gg]:(.+)$")
+          local pos_rating = token:match("^~?[Rr][Aa][Tt][Ii][Nn][Gg]:(.+)$")
+          if neg_rating then
+            for r in neg_rating:gmatch("[^,%|]+") do
+              local canon = normalize_rating(vim.trim(r))
+              if canon then
+                add_rating("neq", canon)
+              end
+            end
+          elseif pos_rating then
+            for r in pos_rating:gmatch("[^,%|]+") do
+              local canon = normalize_rating(vim.trim(r))
+              if canon then
+                add_rating("eq", canon)
+              end
+            end
           else
-            -- 4. Explicit character modifier: character:<name> or -character:<name>
-            local pos_char = token:match("^character:(.+)$")
-            local neg_char = token:match("^%-character:(.+)$")
-            if pos_char then
-              table.insert(filter.characters, { op = "eq", val = pos_char:lower() })
-            elseif neg_char then
-              table.insert(filter.characters, { op = "neq", val = neg_char:lower() })
+            -- 4. Explicit artist modifier: artist:<name> or -artist:<name>
+            local pos_artist = token:match("^artist:(.+)$")
+            local neg_artist = token:match("^%-artist:(.+)$")
+            if pos_artist then
+              table.insert(filter.artists, { op = "eq", val = pos_artist:lower() })
+            elseif neg_artist then
+              table.insert(filter.artists, { op = "neq", val = neg_artist:lower() })
             else
-              -- 5. ID: id:<digits>
-              local id_val = token:match("^id:(%d+)$")
-              if id_val then
-                table.insert(filter.ids, id_val)
+              -- 5. Explicit character modifier: character:<name> or -character:<name>
+              local pos_char = token:match("^character:(.+)$")
+              local neg_char = token:match("^%-character:(.+)$")
+              if pos_char then
+                table.insert(filter.characters, { op = "eq", val = pos_char:lower() })
+              elseif neg_char then
+                table.insert(filter.characters, { op = "neq", val = neg_char:lower() })
               else
-                -- 6. Negative tags: -tag
-                local neg_tag = token:match("^%-(.+)$")
-                if neg_tag and neg_tag ~= "" then
-                  table.insert(filter.negative_tags, neg_tag:lower())
+                -- 6. ID: id:<digits>
+                local id_val = token:match("^id:(%d+)$")
+                if id_val then
+                  table.insert(filter.ids, id_val)
                 else
-                  -- 7. Plain positive tags
-                  table.insert(filter.positive_tags, token:lower())
+                  -- 7. Negative tags: -tag
+                  local neg_tag = token:match("^%-(.+)$")
+                  if neg_tag and neg_tag ~= "" then
+                    table.insert(filter.negative_tags, neg_tag:lower())
+                  else
+                    -- 8. Intra-token Tag Disjunction (|): foot_focus|soles|foot_job
+                    if token:find("|", 1, true) then
+                      for part in token:gmatch("[^|]+") do
+                        local clean_part = part:gsub("^~", "")
+                        if clean_part ~= "" then
+                          add_or_tag(clean_part)
+                        end
+                      end
+                    -- 9. Native Booru Tilde (~) OR Syntax: ~foot_focus
+                    elseif token:sub(1, 1) == "~" then
+                      local tilde_tag = token:sub(2)
+                      if tilde_tag ~= "" then
+                        add_or_tag(tilde_tag)
+                      end
+                    -- 10. Plain positive tags
+                    else
+                      table.insert(filter.positive_tags, token:lower())
+                    end
+                  end
                 end
               end
             end
@@ -238,6 +621,54 @@ function M.parse_tags(tag_str)
   end
 
   return filter
+end
+
+--- Parses tag string into structured conditions.
+--- Supports:
+---   - ratings: `rating:general` (`rating:g`), `rating:sensitive` (`rating:s`),
+---              `rating:questionable` (`rating:q`), `rating:explicit` (`rating:e`),
+---              `~rating:<r>`, multi-ratings `rating:q,e`, `rating:q|e`, and negative forms: `-rating:<r>`
+---   - scores: `score:>=50`, `score:>10`, `score:<=5`, `score:<0`, `score:=20`, `score:20`
+---   - artists: `artist:<name>`, `-artist:<name>`
+---   - characters: `character:<name>`, `-character:<name>`
+---   - ids: `id:<number>`
+---   - negative tags: `-tag`
+---   - tilde OR tags: `~tag`
+---   - intra-token pipe OR tags: `tag1|tag2`
+---   - positive plain tags: `tag`
+---   - sort directives & multi-stage cascading: `sort:score:desc,date:desc`, `| sort:...`
+---@param tag_str string|nil
+---@return table filter
+function M.parse_tags(tag_str)
+  if not tag_str or tag_str == "" then
+    return _parse_tags_internal(tag_str)
+  end
+
+  local pipe = M.parse_pipeline(tag_str)
+  if pipe and #pipe.stages > 0 then
+    local base_filter = _parse_tags_internal(pipe.base_query)
+    base_filter.pipeline_stages = pipe.stages
+    local sort_tbl = nil
+    for _, st in ipairs(pipe.stages) do
+      if st.key then
+        if not sort_tbl then
+          sort_tbl = { key = st.key, dir = st.dir or "desc" }
+          table.insert(sort_tbl, { key = st.key, dir = st.dir or "desc" })
+        else
+          table.insert(sort_tbl, { key = st.key, dir = st.dir or "desc" })
+        end
+      end
+    end
+    if sort_tbl then
+      sort_tbl.key = sort_tbl[1].key
+      sort_tbl.dir = sort_tbl[1].dir
+      base_filter.sort = sort_tbl
+    end
+    base_filter.raw = tag_str
+    return base_filter
+  end
+
+  return _parse_tags_internal(tag_str)
 end
 
 --- Determines whether a post satisfies the given query filter.
@@ -269,19 +700,25 @@ function M.matches_post(post, filter)
     end
   end
 
-  -- 2. Ratings check: rating:general (rating:g), -rating:explicit (-rating:e), etc.
+  -- 2. Ratings check: rating:general (rating:g), -rating:explicit (-rating:e), ~rating:<r>, multi-ratings
   if filter.ratings and #filter.ratings > 0 then
     local pr = normalize_rating(post.rating)
+    local has_pos = false
+    local pos_matched = false
     for _, rf in ipairs(filter.ratings) do
-      if rf.op == "eq" then
-        if not pr or pr ~= rf.val then
-          return false
-        end
-      elseif rf.op == "neq" then
+      if rf.op == "neq" then
         if pr and pr == rf.val then
           return false
         end
+      elseif rf.op == "eq" then
+        has_pos = true
+        if pr and pr == rf.val then
+          pos_matched = true
+        end
       end
+    end
+    if has_pos and not pos_matched then
+      return false
     end
   end
 
@@ -345,6 +782,54 @@ function M.matches_post(post, filter)
     filename_tokens[w] = true
   end
 
+  local function matches_tag(candidate)
+    -- Match in booru tags
+    for _, t in ipairs(post_tags) do
+      if t == candidate then
+        return true
+      end
+      for w in t:gmatch("[^_]+") do
+        if w == candidate then
+          return true
+        end
+      end
+    end
+
+    -- Match in artists
+    for _, a in ipairs(post_artists) do
+      if a == candidate then
+        return true
+      end
+      for w in a:gmatch("[^_]+") do
+        if w == candidate then
+          return true
+        end
+      end
+    end
+
+    -- Match in characters
+    for _, c in ipairs(post_characters) do
+      if c == candidate then
+        return true
+      end
+      for w in c:gmatch("[^_]+") do
+        if w == candidate then
+          return true
+        end
+      end
+    end
+
+    -- Fallback to normalized filename words
+    if filename_tokens[candidate] or stem == candidate then
+      return true
+    end
+    if candidate:find("[%s_%-%.]") and stem:find(candidate, 1, true) then
+      return true
+    end
+
+    return false
+  end
+
   -- 4. Explicit artist filter
   if filter.artists and #filter.artists > 0 then
     for _, af in ipairs(filter.artists) do
@@ -402,122 +887,34 @@ function M.matches_post(post, filter)
   -- 6. Negative tags: -tag (must NOT match in tags, artists, characters, or filename tokens)
   if filter.negative_tags and #filter.negative_tags > 0 then
     for _, neg in ipairs(filter.negative_tags) do
-      -- Booru tags
-      for _, t in ipairs(post_tags) do
-        if t == neg then
-          return false
-        end
-        for w in t:gmatch("[^_]+") do
-          if w == neg then
-            return false
-          end
-        end
-      end
-      -- Artists
-      for _, a in ipairs(post_artists) do
-        if a == neg then
-          return false
-        end
-        for w in a:gmatch("[^_]+") do
-          if w == neg then
-            return false
-          end
-        end
-      end
-      -- Characters
-      for _, c in ipairs(post_characters) do
-        if c == neg then
-          return false
-        end
-        for w in c:gmatch("[^_]+") do
-          if w == neg then
-            return false
-          end
-        end
-      end
-      -- Filename tokens
-      if filename_tokens[neg] or stem == neg then
-        return false
-      end
-      if neg:find("[%s_%-%.]") and stem:find(neg, 1, true) then
+      if matches_tag(neg) then
         return false
       end
     end
   end
 
-  -- 7. Plain tags: must match in post tags/artists/characters,
+  -- 7. Plain positive tags: must match in post tags/artists/characters,
   --    OR fallback to normalized filename words for untagged / local items
   if filter.positive_tags and #filter.positive_tags > 0 then
     for _, pos in ipairs(filter.positive_tags) do
-      local matched = false
-
-      -- Match in booru tags
-      for _, t in ipairs(post_tags) do
-        if t == pos then
-          matched = true
-          break
-        end
-        for w in t:gmatch("[^_]+") do
-          if w == pos then
-            matched = true
-            break
-          end
-        end
-        if matched then
-          break
-        end
-      end
-
-      -- Match in artists
-      if not matched then
-        for _, a in ipairs(post_artists) do
-          if a == pos then
-            matched = true
-            break
-          end
-          for w in a:gmatch("[^_]+") do
-            if w == pos then
-              matched = true
-              break
-            end
-          end
-          if matched then
-            break
-          end
-        end
-      end
-
-      -- Match in characters
-      if not matched then
-        for _, c in ipairs(post_characters) do
-          if c == pos then
-            matched = true
-            break
-          end
-          for w in c:gmatch("[^_]+") do
-            if w == pos then
-              matched = true
-              break
-            end
-          end
-          if matched then
-            break
-          end
-        end
-      end
-
-      -- Fallback to normalized filename words
-      if not matched then
-        if filename_tokens[pos] or stem == pos then
-          matched = true
-        elseif pos:find("[%s_%-%.]") and stem:find(pos, 1, true) then
-          matched = true
-        end
-      end
-
-      if not matched then
+      if not matches_tag(pos) then
         return false
       end
+    end
+  end
+
+  -- 8. OR tags: post must match at least one tag in filter.or_tags
+  --    (across booru tags, artists, characters, and filename tokens)
+  if filter.or_tags and #filter.or_tags > 0 then
+    local or_matched = false
+    for _, ot in ipairs(filter.or_tags) do
+      if matches_tag(ot) then
+        or_matched = true
+        break
+      end
+    end
+    if not or_matched then
+      return false
     end
   end
 
@@ -558,20 +955,33 @@ local function get_post_mtime(p)
   return 0
 end
 
---- Sorts an array of posts by sort options table { key = "...", dir = "asc"|"desc" }.
+--- Sorts an array of posts by sort options table { key = "...", dir = "asc"|"desc" }
+--- or cascading stages array { { key = "...", dir = "..." }, ... }.
 --- Mutates and returns the array.
 ---@param posts table[]
 ---@param sort_opt table
 ---@return table[]
 function M.sort_posts(posts, sort_opt)
-  if not posts or #posts <= 1 or not sort_opt or not sort_opt.key then
+  if not posts or #posts <= 1 or not sort_opt then
     return posts or {}
   end
 
-  local key = sort_opt.key:lower()
-  local is_asc = (sort_opt.dir == "asc")
+  local stages = {}
+  if sort_opt[1] and type(sort_opt[1]) == "table" then
+    for _, st in ipairs(sort_opt) do
+      if st.key then
+        table.insert(stages, st)
+      end
+    end
+  elseif sort_opt.key then
+    table.insert(stages, { key = sort_opt.key, dir = sort_opt.dir or "desc" })
+  end
 
-  if key == "random" then
+  if #stages == 0 then
+    return posts
+  end
+
+  if stages[1].key == "random" then
     local uv = vim.uv or vim.loop
     math.randomseed(os.time() + (uv.hrtime() % 1000000))
     for i = #posts, 2, -1 do
@@ -581,55 +991,101 @@ function M.sort_posts(posts, sort_opt)
     return posts
   end
 
-  if key == "score" then
-    table.sort(posts, function(a, b)
-      local sa = get_post_score(a)
-      local sb = get_post_score(b)
-      if sa ~= sb then
-        if is_asc then
-          return sa < sb
-        else
-          return sa > sb
-        end
-      end
-      return (tonumber(a.id) or 0) > (tonumber(b.id) or 0)
-    end)
-    return posts
-  end
+  table.sort(posts, function(a, b)
+    for _, st in ipairs(stages) do
+      local key = st.key:lower()
+      local is_asc = (st.dir == "asc")
 
-  if key == "id" then
-    table.sort(posts, function(a, b)
-      local ida = tonumber(a.id) or 0
-      local idb = tonumber(b.id) or 0
-      if ida ~= idb then
-        if is_asc then
-          return ida < idb
-        else
-          return ida > idb
+      if key == "score" then
+        local sa = get_post_score(a)
+        local sb = get_post_score(b)
+        if sa ~= sb then
+          if is_asc then
+            return sa < sb
+          else
+            return sa > sb
+          end
+        end
+      elseif key == "id" then
+        local ida = tonumber(a.id) or 0
+        local idb = tonumber(b.id) or 0
+        if ida ~= idb then
+          if is_asc then
+            return ida < idb
+          else
+            return ida > idb
+          end
+        end
+      elseif key == "date" or key == "mtime" then
+        local ma = get_post_mtime(a)
+        local mb = get_post_mtime(b)
+        if ma ~= mb then
+          if is_asc then
+            return ma < mb
+          else
+            return ma > mb
+          end
         end
       end
-      return (a.file_url or "") < (b.file_url or "")
-    end)
-    return posts
-  end
+    end
 
-  if key == "date" or key == "mtime" then
-    table.sort(posts, function(a, b)
-      local ma = get_post_mtime(a)
-      local mb = get_post_mtime(b)
-      if ma ~= mb then
-        if is_asc then
-          return ma < mb
-        else
-          return ma > mb
-        end
-      end
-      return (tonumber(a.id) or 0) > (tonumber(b.id) or 0)
-    end)
-    return posts
-  end
+    local ida = tonumber(a.id) or 0
+    local idb = tonumber(b.id) or 0
+    if ida ~= idb then
+      return ida > idb
+    end
+    return (a.file_url or "") < (b.file_url or "")
+  end)
 
   return posts
+end
+
+--- Executes a multi-stage piped sorting and slicing pipeline sequentially on a list of posts.
+--- For each stage:
+---   a. Sorting:
+---      - If stage.key == "random": randomly shuffle array using Fisher-Yates.
+---      - Else: sort array by stage.key ("id", "score", "date"/"mtime") in stage.dir ("desc" or "asc").
+---   b. Slicing / Limiting:
+---      - If stage.limit and stage.limit > 0 and #posts > stage.limit: slice to 1..stage.limit.
+---@param posts table[]
+---@param stages table[]
+---@return table[]
+function M.execute_pipeline(posts, stages)
+  if not posts or #posts == 0 or not stages or #stages == 0 then
+    return posts or {}
+  end
+
+  local current = {}
+  for i = 1, #posts do
+    current[i] = posts[i]
+  end
+
+  for _, stage in ipairs(stages) do
+    if stage.key then
+      local key = stage.key:lower()
+      if key == "random" then
+        local uv = vim.uv or vim.loop
+        math.randomseed(os.time() + (uv.hrtime() % 1000000))
+        for i = #current, 2, -1 do
+          local j = math.random(i)
+          current[i], current[j] = current[j], current[i]
+        end
+      else
+        local dir = (stage.dir and stage.dir:lower() == "asc") and "asc" or "desc"
+        current = M.sort_posts(current, { key = key, dir = dir })
+      end
+    end
+
+    if stage.limit and stage.limit > 0 and #current > stage.limit then
+      local sliced = {}
+      for i = 1, stage.limit do
+        sliced[i] = current[i]
+      end
+      current = sliced
+    end
+  end
+
+  return current
 end
 
 --- Filters an array of posts by tag/query filter, returning a new filtered array.
@@ -644,6 +1100,7 @@ function M.filter_posts(posts, filter_or_tag_str)
 
   local has_criteria = (filter.positive_tags and #filter.positive_tags > 0)
     or (filter.negative_tags and #filter.negative_tags > 0)
+    or (filter.or_tags and #filter.or_tags > 0)
     or (filter.ratings and #filter.ratings > 0)
     or (filter.scores and #filter.scores > 0)
     or (filter.artists and #filter.artists > 0)
@@ -663,7 +1120,9 @@ function M.filter_posts(posts, filter_or_tag_str)
     end
   end
 
-  if filter.sort then
+  if filter.pipeline_stages and #filter.pipeline_stages > 0 then
+    res = M.execute_pipeline(res, filter.pipeline_stages)
+  elseif filter.sort then
     res = M.sort_posts(res, filter.sort)
   end
 

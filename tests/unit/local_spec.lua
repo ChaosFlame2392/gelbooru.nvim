@@ -834,6 +834,33 @@ describe("local.query: Query Parsing and Post Filtering", function()
       assert.are.equal(dir1, dir2)
       assert.are.equal(tags1, tags2)
     end)
+
+    it("supports flexible placement of local: anywhere in the query string", function()
+      local dir1, tags1, f1 = local_query.parse_query("solo hatsune_miku local: sort:score")
+      assert.are.equal(config.options.save_dir, dir1)
+      assert.are.equal("solo hatsune_miku sort:score", tags1)
+      assert.are.equal(2, #f1.positive_tags)
+      assert.are.equal("solo", f1.positive_tags[1])
+      assert.are.equal("hatsune_miku", f1.positive_tags[2])
+      assert.is_not_nil(f1.sort)
+      assert.are.equal("score", f1.sort.key)
+
+      local dir2, tags2, f2 = local_query.parse_query("~foot_focus local:")
+      assert.are.equal(config.options.save_dir, dir2)
+      assert.are.equal("~foot_focus", tags2)
+      assert.are.equal(1, #f2.or_tags)
+      assert.are.equal("foot_focus", f2.or_tags[1])
+
+      local dir3, tags3, f3 = local_query.parse_query("tag1 tag2 local:/custom/dir tag3")
+      assert.are.equal("/custom/dir", dir3)
+      assert.are.equal("tag1 tag2 tag3", tags3)
+      assert.are.equal(3, #f3.positive_tags)
+
+      local dir4, tags4, f4 = local_query.parse_query('tag1 local:"/path with spaces" tag2')
+      assert.are.equal("/path with spaces", dir4)
+      assert.are.equal("tag1 tag2", tags4)
+      assert.are.equal(2, #f4.positive_tags)
+    end)
   end)
 
   describe("Post Filtering (filter_posts / matches_post)", function()
@@ -993,9 +1020,194 @@ describe("local.query: Query Parsing and Post Filtering", function()
       assert.are.equal(1, #result)
       assert.are.equal("101", result[1].id)
     end)
+
+    it("supports native booru tilde (~) OR syntax: local: ~foot_focus ~soles ~foot_job", function()
+      local posts = {
+        { id = "1", tags = "1girl foot_focus", is_local = true },
+        { id = "2", tags = "1girl soles", is_local = true },
+        { id = "3", tags = "1girl foot_job", is_local = true },
+        { id = "4", tags = "1girl hands", is_local = true },
+      }
+
+      local f = local_query.parse_tags("~foot_focus ~soles ~foot_job")
+      assert.are.equal(3, #f.or_tags)
+      assert.are.equal("foot_focus", f.or_tags[1])
+      assert.are.equal("soles", f.or_tags[2])
+      assert.are.equal("foot_job", f.or_tags[3])
+      assert.are.equal(0, #f.positive_tags)
+
+      local matched = local_query.filter_posts(posts, f)
+      assert.are.equal(3, #matched)
+      assert.are.equal("1", matched[1].id)
+      assert.are.equal("2", matched[2].id)
+      assert.are.equal("3", matched[3].id)
+    end)
+
+    it("combines positive AND tags with tilde (~) OR group: hatsune_miku ~foot_focus ~soles", function()
+      local posts = {
+        { id = "1", tags = "hatsune_miku 1girl foot_focus", is_local = true },
+        { id = "2", tags = "hatsune_miku 1girl soles", is_local = true },
+        { id = "3", tags = "hatsune_miku 1girl portrait", is_local = true },
+        { id = "4", tags = "megurine_luka 1girl soles", is_local = true },
+      }
+
+      local f = local_query.parse_tags("hatsune_miku ~foot_focus ~soles")
+      assert.are.equal(1, #f.positive_tags)
+      assert.are.equal("hatsune_miku", f.positive_tags[1])
+      assert.are.equal(2, #f.or_tags)
+
+      local matched = local_query.filter_posts(posts, f)
+      assert.are.equal(2, #matched)
+      assert.are.equal("1", matched[1].id)
+      assert.are.equal("2", matched[2].id)
+    end)
+
+    it("combines tilde (~) OR group with negative exclusions: ~foot_focus ~soles -comic", function()
+      local posts = {
+        { id = "1", tags = "foot_focus solo", is_local = true },
+        { id = "2", tags = "soles comic", is_local = true },
+        { id = "3", tags = "soles illustration", is_local = true },
+        { id = "4", tags = "hands illustration", is_local = true },
+      }
+
+      local f = local_query.parse_tags("~foot_focus ~soles -comic")
+      assert.are.equal(2, #f.or_tags)
+      assert.are.equal(1, #f.negative_tags)
+      assert.are.equal("comic", f.negative_tags[1])
+
+      local matched = local_query.filter_posts(posts, f)
+      assert.are.equal(2, #matched)
+      assert.are.equal("1", matched[1].id)
+      assert.are.equal("3", matched[2].id)
+    end)
+
+    it("supports intra-token tag disjunction (|): foot_focus|soles|foot_job", function()
+      local posts = {
+        { id = "1", tags = "foot_focus solo", is_local = true },
+        { id = "2", tags = "soles solo", is_local = true },
+        { id = "3", tags = "foot_job solo", is_local = true },
+        { id = "4", tags = "landscape", is_local = true },
+      }
+
+      local f = local_query.parse_tags("foot_focus|soles|foot_job")
+      assert.are.equal(3, #f.or_tags)
+      assert.are.equal("foot_focus", f.or_tags[1])
+      assert.are.equal("soles", f.or_tags[2])
+      assert.are.equal("foot_job", f.or_tags[3])
+
+      local matched = local_query.filter_posts(posts, f)
+      assert.are.equal(3, #matched)
+
+      local combined = local_query.filter_posts(posts, "solo foot_focus|soles -landscape")
+      assert.are.equal(2, #combined)
+      assert.are.equal("1", combined[1].id)
+      assert.are.equal("2", combined[2].id)
+    end)
+
+    it("supports rating disjunctions across all forms: ~rating:q ~rating:e, rating:q,e, rating:q|e", function()
+      local posts = {
+        { id = "1", rating = "general", is_local = true },
+        { id = "2", rating = "sensitive", is_local = true },
+        { id = "3", rating = "questionable", is_local = true },
+        { id = "4", rating = "explicit", is_local = true },
+        { id = "5", rating = nil, is_local = true },
+      }
+
+      -- 1. Tilde rating syntax: ~rating:questionable ~rating:explicit
+      local f1 = local_query.parse_tags("~rating:questionable ~rating:explicit")
+      assert.are.equal(2, #f1.ratings)
+      assert.are.equal("eq", f1.ratings[1].op)
+      assert.are.equal("questionable", f1.ratings[1].val)
+      assert.are.equal("eq", f1.ratings[2].op)
+      assert.are.equal("explicit", f1.ratings[2].val)
+
+      local m1 = local_query.filter_posts(posts, f1)
+      assert.are.equal(2, #m1)
+      assert.are.equal("3", m1[1].id)
+      assert.are.equal("4", m1[2].id)
+
+      -- 2. Comma separated rating: rating:questionable,explicit
+      local f2 = local_query.parse_tags("rating:questionable,explicit")
+      local m2 = local_query.filter_posts(posts, f2)
+      assert.are.equal(2, #m2)
+      assert.are.equal("3", m2[1].id)
+      assert.are.equal("4", m2[2].id)
+
+      -- 3. Short aliases comma separated: rating:q,e
+      local f3 = local_query.parse_tags("rating:q,e")
+      local m3 = local_query.filter_posts(posts, f3)
+      assert.are.equal(2, #m3)
+      assert.are.equal("3", m3[1].id)
+      assert.are.equal("4", m3[2].id)
+
+      -- 4. Pipe separated short aliases: rating:q|e and ~rating:q|e
+      local f4 = local_query.parse_tags("rating:q|e")
+      local m4 = local_query.filter_posts(posts, f4)
+      assert.are.equal(2, #m4)
+
+      local f5 = local_query.parse_tags("~rating:q|e")
+      local m5 = local_query.filter_posts(posts, f5)
+      assert.are.equal(2, #m5)
+
+      -- 5. Negative rating still strictly rejects
+      local f6 = local_query.parse_tags("rating:q,e -rating:e")
+      local m6 = local_query.filter_posts(posts, f6)
+      assert.are.equal(1, #m6)
+      assert.are.equal("3", m6[1].id)
+
+      -- 6. Unhydrated post (nil rating) is rejected when positive rating is required
+      assert.is_false(local_query.matches_post(posts[5], f3))
+    end)
   end)
 
   describe("Local Sorting Engine (parse_tags sort directives & sort_posts)", function()
+    it("supports cascading & multi-stage sorting with secondary tie-breaking", function()
+      -- 1. Comma-separated sort stages: sort:score:desc,date:desc
+      local f1 = local_query.parse_tags("sort:score:desc,date:desc")
+      assert.is_not_nil(f1.sort)
+      assert.are.equal("score", f1.sort.key)
+      assert.are.equal("desc", f1.sort.dir)
+      assert.are.equal(2, #f1.sort)
+      assert.are.equal("score", f1.sort[1].key)
+      assert.are.equal("desc", f1.sort[1].dir)
+      assert.are.equal("date", f1.sort[2].key)
+      assert.are.equal("desc", f1.sort[2].dir)
+
+      -- 2. Multiple sort tokens: sort:score:desc sort:id:asc
+      local f2 = local_query.parse_tags("sort:score:desc sort:id:asc")
+      assert.are.equal(2, #f2.sort)
+      assert.are.equal("score", f2.sort[1].key)
+      assert.are.equal("id", f2.sort[2].key)
+      assert.are.equal("asc", f2.sort[2].dir)
+
+      -- 3. Piped query stages: hatsune_miku | sort:score:desc | sort:id:asc
+      local f3 = local_query.parse_tags("hatsune_miku | sort:score:desc | sort:id:asc")
+      assert.are.equal(1, #f3.positive_tags)
+      assert.are.equal("hatsune_miku", f3.positive_tags[1])
+      assert.are.equal(2, #f3.sort)
+      assert.are.equal("score", f3.sort[1].key)
+      assert.are.equal("id", f3.sort[2].key)
+
+      -- 4. Secondary tie-breaking execution
+      local p1 = { id = "10", score = 50, _mtime = 1000, file_url = "/a.jpg" }
+      local p2 = { id = "20", score = 50, _mtime = 2000, file_url = "/b.jpg" }
+      local p3 = { id = "30", score = 100, _mtime = 500, file_url = "/c.jpg" }
+
+      -- Primary score desc, secondary date desc
+      -- p3 has score 100 (1st)
+      -- p1 and p2 tie on score (50). p2 has _mtime 2000 > p1 _mtime 1000 -> p2 is 2nd, p1 is 3rd
+      local sorted = local_query.sort_posts({ p1, p2, p3 }, f1.sort)
+      assert.are.equal("30", sorted[1].id)
+      assert.are.equal("20", sorted[2].id)
+      assert.are.equal("10", sorted[3].id)
+
+      -- Primary score desc, secondary id asc
+      -- p1 id 10 < p2 id 20 -> p1 is 2nd, p2 is 3rd
+      local sorted2 = local_query.sort_posts({ p1, p2, p3 }, f2.sort)
+      assert.are.equal("30", sorted2[1].id)
+      assert.are.equal("10", sorted2[2].id)
+      assert.are.equal("20", sorted2[3].id)
+    end)
     it("parses sort:score, sort:id, sort:date, sort:random, sort:mtime, and order: directives", function()
       local f1 = local_query.parse_tags("hatsune_miku sort:score")
       assert.is_not_nil(f1.sort)
@@ -1406,6 +1618,169 @@ describe("local.query: Query Parsing and Post Filtering", function()
       local post_nil_tags = { id = "2", file_url = tmp_dir .. "/solo_art.png", tags = nil }
       assert.is_true(local_query.matches_post(post_nil_tags, "solo"))
     end)
+
+    it("QA 1: prevents local substring hijack on is_local:true, -local:tag, nonlocal:tag", function()
+      local util = require("gelbooru.core.util")
+      assert.is_false(util.is_local_query("is_local:true"))
+      assert.is_false(util.is_local_query("-local:tag"))
+      assert.is_false(util.is_local_query("nonlocal:tag"))
+      assert.is_false(util.is_local_query("my_local:folder"))
+
+      assert.is_true(util.is_local_query("local: /tmp"))
+      assert.is_true(util.is_local_query("solo local:"))
+      assert.is_true(util.is_local_query("tag1 | local: tag2"))
+      assert.is_true(util.is_local_query("local:~/Downloads"))
+    end)
+
+    it("QA 2: case-insensitive rating prefix: Rating:general and RATING:q,e parse and match properly", function()
+      local f = local_query.parse_tags("Rating:general RATING:q,e -Rating:s")
+      assert.are.equal(4, #f.ratings)
+      assert.are.equal("general", f.ratings[1].val)
+      assert.are.equal("questionable", f.ratings[2].val)
+      assert.are.equal("explicit", f.ratings[3].val)
+      assert.are.equal("sensitive", f.ratings[4].val)
+      assert.are.equal("neq", f.ratings[4].op)
+
+      local p_gen = { id = "1", rating = "general" }
+      local p_exp = { id = "2", rating = "explicit" }
+      local p_sens = { id = "3", rating = "sensitive" }
+      local p_other = { id = "4", rating = "questionable" }
+
+      assert.is_true(local_query.matches_post(p_gen, f))
+      assert.is_true(local_query.matches_post(p_exp, f))
+      assert.is_false(local_query.matches_post(p_sens, f))
+      assert.is_true(local_query.matches_post(p_other, f))
+    end)
+
+    it("QA 4: malformed OR input (empty tildes, trailing pipes, double pipes) handled cleanly", function()
+      local f1 = local_query.parse_tags("~ ~~ ~|~ || |")
+      assert.are.equal(0, #f1.or_tags)
+
+      local f2 = local_query.parse_tags("tag1||tag2 tag3| |tag4 ~~~tag5")
+      assert.are.equal(5, #f2.or_tags)
+      assert.are.equal("tag1", f2.or_tags[1])
+      assert.are.equal("tag2", f2.or_tags[2])
+      assert.are.equal("tag3", f2.or_tags[3])
+      assert.are.equal("tag4", f2.or_tags[4])
+      assert.are.equal("tag5", f2.or_tags[5])
+
+      local posts = {
+        { id = "1", tags = "tag2 solo" },
+        { id = "2", tags = "other solo" },
+      }
+      local matched = local_query.filter_posts(posts, f2)
+      assert.are.equal(1, #matched)
+      assert.are.equal("1", matched[1].id)
+    end)
+
+    it("QA 5: multi-clause OR grouping behavior (a|b c|d)", function()
+      local f = local_query.parse_tags("a|b c|d")
+      assert.are.equal(4, #f.or_tags)
+      assert.are.equal("a", f.or_tags[1])
+      assert.are.equal("b", f.or_tags[2])
+      assert.are.equal("c", f.or_tags[3])
+      assert.are.equal("d", f.or_tags[4])
+
+      local p_a = { id = "1", tags = "a extra" }
+      local p_d = { id = "2", tags = "d extra" }
+      local p_none = { id = "3", tags = "z extra" }
+
+      assert.is_true(local_query.matches_post(p_a, f))
+      assert.is_true(local_query.matches_post(p_d, f))
+      assert.is_false(local_query.matches_post(p_none, f))
+    end)
+
+    it("QA 6: single-quoted directory paths with spaces in local queries", function()
+      local dir1, tags1 = local_query.parse_query("local:'/path with spaces/folder' tag1")
+      assert.are.equal("/path with spaces/folder", dir1)
+      assert.are.equal("tag1", tags1)
+
+      local dir2, tags2 = local_query.parse_query("tag1 local:'/path with spaces/folder' tag2")
+      assert.are.equal("/path with spaces/folder", dir2)
+      assert.are.equal("tag1 tag2", tags2)
+    end)
+
+    it("QA 7: post sorting stability with 200 tied / all-nil records without Lua strict weak ordering errors", function()
+      local posts = {}
+      for i = 1, 200 do
+        posts[i] = { id = nil, score = nil, _mtime = nil, file_url = nil }
+      end
+
+      -- Should execute with 0 errors across all sort modes
+      assert.has_no.errors(function()
+        local_query.sort_posts(posts, { key = "score", dir = "desc" })
+      end)
+      assert.are.equal(200, #posts)
+
+      assert.has_no.errors(function()
+        local_query.sort_posts(posts, { key = "date", dir = "asc" })
+      end)
+      assert.are.equal(200, #posts)
+
+      assert.has_no.errors(function()
+        local_query.sort_posts(posts, {
+          { key = "score", dir = "desc" },
+          { key = "date", dir = "asc" },
+        })
+      end)
+      assert.are.equal(200, #posts)
+    end)
+
+    it("QA 8: negative rating filter retains unhydrated local posts (-rating:explicit)", function()
+      local p_unhydrated = { id = "1", rating = nil, tags = "local" }
+      local p_explicit = { id = "2", rating = "explicit", tags = "local" }
+      local p_general = { id = "3", rating = "general", tags = "local" }
+
+      -- Negative rating: unhydrated post is not explicit, so it is retained
+      local f_neg = local_query.parse_tags("-rating:explicit")
+      assert.is_true(local_query.matches_post(p_unhydrated, f_neg))
+      assert.is_false(local_query.matches_post(p_explicit, f_neg))
+      assert.is_true(local_query.matches_post(p_general, f_neg))
+
+      -- Positive rating: unhydrated post does not have general rating, so it is rejected
+      local f_pos = local_query.parse_tags("rating:general")
+      assert.is_false(local_query.matches_post(p_unhydrated, f_pos))
+      assert.is_true(local_query.matches_post(p_general, f_pos))
+    end)
+
+    it("QA 9: component word matching in booru tags and artist credits (~focus, ~balk)", function()
+      local post = {
+        id = "1",
+        tags = "foot_focus 1girl",
+        artist = "balk_art",
+        is_local = true,
+      }
+
+      local f1 = local_query.parse_tags("~focus ~unrelated")
+      assert.is_true(local_query.matches_post(post, f1))
+
+      local f2 = local_query.parse_tags("~balk ~unrelated")
+      assert.is_true(local_query.matches_post(post, f2))
+
+      local f3 = local_query.parse_tags("~nomatch ~unrelated")
+      assert.is_false(local_query.matches_post(post, f3))
+    end)
+
+    it("QA 10: secondary sort fallback on unknown keys", function()
+      local p1 = { id = "10", score = 20 }
+      local p2 = { id = "20", score = 50 }
+      local p3 = { id = "30", score = 10 }
+
+      -- Fallback when primary key is unknown: uses secondary stage score:desc
+      local sorted = local_query.sort_posts({ p1, p2, p3 }, {
+        { key = "unknown_stage", dir = "desc" },
+        { key = "score", dir = "desc" },
+      })
+      assert.are.equal("20", sorted[1].id)
+      assert.are.equal("10", sorted[2].id)
+      assert.are.equal("30", sorted[3].id)
+
+      -- Fallback when all keys are unknown: deterministic ID desc
+      local sorted_fallback = local_query.sort_posts({ p1, p2, p3 }, { key = "nonexistent", dir = "asc" })
+      assert.are.equal("30", sorted_fallback[1].id)
+      assert.are.equal("20", sorted_fallback[2].id)
+      assert.are.equal("10", sorted_fallback[3].id)
+    end)
   end)
 end)
 
@@ -1779,6 +2154,257 @@ describe("local.indexer: Dual-Tier Lookahead Prefetch & Background Indexing", fu
       assert.are.equal("902", requests[2])
 
       indexer.stop()
+    end)
+  end)
+end)
+
+describe("Multi-Stage Piped Sorting Pipeline (parse_pipeline & execute_pipeline)", function()
+  local local_query = require("gelbooru.local.query")
+
+  describe("query.parse_pipeline", function()
+    it("parses empty or nil input to empty base_query and empty stages", function()
+      local p1 = local_query.parse_pipeline(nil)
+      assert.are.equal("", p1.base_query)
+      assert.are.same({}, p1.stages)
+
+      local p2 = local_query.parse_pipeline("")
+      assert.are.equal("", p2.base_query)
+      assert.are.same({}, p2.stages)
+
+      local p3 = local_query.parse_pipeline("   ")
+      assert.are.equal("", p3.base_query)
+      assert.are.same({}, p3.stages)
+    end)
+
+    it("parses queries without pipes to base_query with empty stages", function()
+      local p1 = local_query.parse_pipeline("hatsune_miku rating:general")
+      assert.are.equal("hatsune_miku rating:general", p1.base_query)
+      assert.are.same({}, p1.stages)
+
+      local p2 = local_query.parse_pipeline("local:/path/to/folder solo")
+      assert.are.equal("local:/path/to/folder solo", p2.base_query)
+      assert.are.same({}, p2.stages)
+    end)
+
+    it("parses multi-stage pipe syntax for local and online queries", function()
+      -- Example local bare
+      local p1 = local_query.parse_pipeline("local: | sort:id:1000 | sort:score:300 | sort:random")
+      assert.are.equal("local:", p1.base_query)
+      assert.are.equal(3, #p1.stages)
+      assert.are.same({ key = "id", dir = "desc", limit = 1000 }, p1.stages[1])
+      assert.are.same({ key = "score", dir = "desc", limit = 300 }, p1.stages[2])
+      assert.are.same({ key = "random", dir = "asc", limit = nil }, p1.stages[3])
+
+      -- Example local with tags
+      local p2 = local_query.parse_pipeline("local: ~foot_focus ~soles | sort:id:1000 | sort:score:300 | sort:random")
+      assert.are.equal("local: ~foot_focus ~soles", p2.base_query)
+      assert.are.equal(3, #p2.stages)
+      assert.are.same({ key = "id", dir = "desc", limit = 1000 }, p2.stages[1])
+      assert.are.same({ key = "score", dir = "desc", limit = 300 }, p2.stages[2])
+      assert.are.same({ key = "random", dir = "asc", limit = nil }, p2.stages[3])
+
+      -- Example online single tag
+      local p3 = local_query.parse_pipeline("hatsune_miku | sort:id:1000 | sort:score:300 | sort:random")
+      assert.are.equal("hatsune_miku", p3.base_query)
+      assert.are.equal(3, #p3.stages)
+      assert.are.same({ key = "id", dir = "desc", limit = 1000 }, p3.stages[1])
+      assert.are.same({ key = "score", dir = "desc", limit = 300 }, p3.stages[2])
+      assert.are.same({ key = "random", dir = "asc", limit = nil }, p3.stages[3])
+
+      -- Example online multi tags
+      local p4 = local_query.parse_pipeline("solo twintails | sort:id:500 | sort:score:100 | sort:random")
+      assert.are.equal("solo twintails", p4.base_query)
+      assert.are.equal(3, #p4.stages)
+      assert.are.same({ key = "id", dir = "desc", limit = 500 }, p4.stages[1])
+      assert.are.same({ key = "score", dir = "desc", limit = 100 }, p4.stages[2])
+      assert.are.same({ key = "random", dir = "asc", limit = nil }, p4.stages[3])
+    end)
+
+    it("parses directives with various key, dir, limit formats", function()
+      -- sort:<key>:<dir>:<limit>
+      local p1 = local_query.parse_pipeline("tag | sort:score:asc:250")
+      assert.are.same({ { key = "score", dir = "asc", limit = 250 } }, p1.stages)
+
+      -- sort:<key>:<limit>:<dir>
+      local p2 = local_query.parse_pipeline("tag | sort:score:250:asc")
+      assert.are.same({ { key = "score", dir = "asc", limit = 250 } }, p2.stages)
+
+      -- sort:<key>:<dir>
+      local p3 = local_query.parse_pipeline("tag | sort:id:asc")
+      assert.are.same({ { key = "id", dir = "asc", limit = nil } }, p3.stages)
+
+      -- sort:<key> (default desc)
+      local p4 = local_query.parse_pipeline("tag | sort:score")
+      assert.are.same({ { key = "score", dir = "desc", limit = nil } }, p4.stages)
+
+      -- sort:date and sort:mtime
+      local p5 = local_query.parse_pipeline("tag | sort:date:50 | sort:mtime:asc:25")
+      assert.are.same({
+        { key = "date", dir = "desc", limit = 50 },
+        { key = "mtime", dir = "asc", limit = 25 },
+      }, p5.stages)
+
+      -- order:random, sort:random, random, limit:N
+      local p6 = local_query.parse_pipeline("tag | order:random | random | limit:42")
+      assert.are.same({
+        { key = "random", dir = "asc", limit = nil },
+        { key = "random", dir = "asc", limit = nil },
+        { key = nil, dir = nil, limit = 42 },
+      }, p6.stages)
+    end)
+
+    it("handles case-insensitivity, leading pipes, and quoted paths cleanly", function()
+      local p1 = local_query.parse_pipeline("TAG | sort:ID:ASC:100 | sort:SCORE:DESC:50 | sort:RANDOM")
+      assert.are.same({
+        { key = "id", dir = "asc", limit = 100 },
+        { key = "score", dir = "desc", limit = 50 },
+        { key = "random", dir = "asc", limit = nil },
+      }, p1.stages)
+
+      -- Leading pipe without base query
+      local p2 = local_query.parse_pipeline("| sort:id:1000 | sort:score:300")
+      assert.are.equal("", p2.base_query)
+      assert.are.equal(2, #p2.stages)
+
+      -- Intra-token pipe preserved as base query, not stage delimiter
+      local p3 = local_query.parse_pipeline("foot_focus|soles | sort:id:1000")
+      assert.are.equal("foot_focus|soles", p3.base_query)
+      assert.are.same({ { key = "id", dir = "desc", limit = 1000 } }, p3.stages)
+
+      -- Pipe inside quotes preserved
+      local p4 = local_query.parse_pipeline('local:"/path with | pipe" | sort:score:100')
+      assert.are.equal('local:"/path with | pipe"', p4.base_query)
+      assert.are.same({ { key = "score", dir = "desc", limit = 100 } }, p4.stages)
+    end)
+
+    it("preserves 'random' as base_query when not prefixed with pipe or sort/order/limit directive", function()
+      local p = local_query.parse_pipeline("random | sort:score:100")
+      assert.are.equal("random", p.base_query)
+      assert.are.equal(1, #p.stages)
+      assert.are.same({ key = "score", dir = "desc", limit = 100 }, p.stages[1])
+    end)
+
+    it("rejects malformed ghost stages such as sort:: returning original query with 0 stages", function()
+      local p = local_query.parse_pipeline("tag | sort::")
+      assert.are.equal("tag | sort::", p.base_query)
+      assert.are.equal(0, #p.stages)
+    end)
+  end)
+
+  describe("query.execute_pipeline", function()
+    it("pure limit:N stage without sort key slices array without reordering elements", function()
+      local posts = {
+        { id = "1", score = 10 },
+        { id = "2", score = 50 },
+        { id = "3", score = 20 },
+        { id = "4", score = 40 },
+        { id = "5", score = 30 },
+      }
+      local sliced = local_query.execute_pipeline(posts, { { limit = 3 } })
+      assert.are.equal(3, #sliced)
+      assert.are.equal("1", sliced[1].id)
+      assert.are.equal("2", sliced[2].id)
+      assert.are.equal("3", sliced[3].id)
+    end)
+    it("verifies 1500 posts -> sort:id:1000 -> sort:score:300 -> sort:random sequentially", function()
+      local posts = {}
+      for i = 1, 1500 do
+        posts[i] = {
+          id = tostring(i),
+          -- Older posts (1..500) have very high scores (1000+), but should be dropped by Stage 1 (sort:id:1000)
+          score = (i <= 500) and (1000 + i) or (i % 500),
+          file_url = string.format("/media/%d.jpg", i),
+        }
+      end
+
+      local stages = {
+        { key = "id", dir = "desc", limit = 1000 },
+        { key = "score", dir = "desc", limit = 300 },
+        { key = "random", dir = "asc" },
+      }
+
+      local result = local_query.execute_pipeline(posts, stages)
+
+      -- 1. Result count must be exactly 300
+      assert.are.equal(300, #result)
+
+      -- 2. Because Stage 1 kept only newest 1000 (IDs 501..1500), NONE of posts 1..500 should be present
+      for _, p in ipairs(result) do
+        local id_num = tonumber(p.id)
+        assert.is_true(id_num >= 501 and id_num <= 1500, "Post ID should be between 501 and 1500, got: " .. tostring(id_num))
+      end
+
+      -- 3. Verify that the 300 posts are the highest scored among the candidate pool (IDs 501..1500)
+      local pool_scores = {}
+      for i = 501, 1500 do
+        table.insert(pool_scores, i % 500)
+      end
+      table.sort(pool_scores, function(a, b) return a > b end)
+      local min_expected_score = pool_scores[300]
+
+      for _, p in ipairs(result) do
+        assert.is_true(tonumber(p.score) >= min_expected_score)
+      end
+
+      -- 4. Verify randomized presentation (not strictly sorted by score desc anymore)
+      local is_strictly_score_desc = true
+      for i = 1, #result - 1 do
+        if tonumber(result[i].score) < tonumber(result[i + 1].score) then
+          is_strictly_score_desc = false
+          break
+        end
+      end
+      assert.is_false(is_strictly_score_desc)
+    end)
+
+    it("verifies slicing limits, ascending/descending, and deterministic tie-breaking", function()
+      local p1 = { id = "10", score = 50, _mtime = 1000, file_url = "/b.jpg" }
+      local p2 = { id = "20", score = 100, _mtime = 3000, file_url = "/a.jpg" }
+      local p3 = { id = "30", score = 50, _mtime = 2000, file_url = "/c.jpg" }
+      local p4 = { id = "40", score = 25, _mtime = 500, file_url = "/d.jpg" }
+
+      -- Ascending score with limit 2
+      local r_asc = local_query.execute_pipeline({ p1, p2, p3, p4 }, {
+        { key = "score", dir = "asc", limit = 2 },
+      })
+      assert.are.equal(2, #r_asc)
+      assert.are.equal("40", r_asc[1].id) -- score 25
+      assert.is_true(r_asc[2].id == "30" or r_asc[2].id == "10") -- score 50
+
+      -- Descending ID with limit 3
+      local r_id_desc = local_query.execute_pipeline({ p1, p2, p3, p4 }, {
+        { key = "id", dir = "desc", limit = 3 },
+      })
+      assert.are.equal(3, #r_id_desc)
+      assert.are.equal("40", r_id_desc[1].id)
+      assert.are.equal("30", r_id_desc[2].id)
+      assert.are.equal("20", r_id_desc[3].id)
+
+      -- Limit larger than count preserves all
+      local r_large = local_query.execute_pipeline({ p1, p2 }, { { limit = 100 } })
+      assert.are.equal(2, #r_large)
+
+      -- Deterministic tie-breaking on equal scores: primary score desc, secondary tie-break by ID desc
+      local tie1 = { id = "10", score = 50, file_url = "/x.jpg" }
+      local tie2 = { id = "20", score = 50, file_url = "/y.jpg" }
+      local r_tie = local_query.execute_pipeline({ tie1, tie2 }, {
+        { key = "score", dir = "desc" },
+      })
+      assert.are.equal("20", r_tie[1].id)
+      assert.are.equal("10", r_tie[2].id)
+    end)
+
+    it("filter_posts automatically executes multi-stage pipeline when pipe syntax is passed", function()
+      local p1 = { id = "100", score = 10, tags = "miku solo", file_url = "/100.jpg" }
+      local p2 = { id = "200", score = 90, tags = "miku solo", file_url = "/200.jpg" }
+      local p3 = { id = "300", score = 50, tags = "miku solo", file_url = "/300.jpg" }
+      local p4 = { id = "400", score = 80, tags = "rin solo", file_url = "/400.jpg" }
+
+      -- Filter "miku" then pipe: sort:score:desc:2 -> top 2 scored miku posts
+      local filtered = local_query.filter_posts({ p1, p2, p3, p4 }, "miku | sort:score:desc:2")
+      assert.are.equal(2, #filtered)
+      assert.are.equal("200", filtered[1].id) -- score 90
+      assert.are.equal("300", filtered[2].id) -- score 50
     end)
   end)
 end)

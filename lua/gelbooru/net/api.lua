@@ -21,7 +21,14 @@ function M.fetch(direction)
   local UI = state.UI
   local ui = require("gelbooru.ui")
 
-  if not State.query or State.query:match("^local:") then
+  if not State.query or util.is_local_query(State.query) then
+    return
+  end
+
+  local query_mod = require("gelbooru.local.query")
+  local pipe = query_mod.parse_pipeline(State.query)
+  if pipe and pipe.stages and #pipe.stages > 0 then
+    ui.set_status("Pagination not supported on piped searches", 2000)
     return
   end
 
@@ -52,13 +59,23 @@ function M.fetch(direction)
   end
   State.loading = true
   ui.set_status("Fetching page " .. (State.page + 1) .. "…")
+  local nonce_param = ""
+  if State.query then
+    local q_lower = State.query:lower()
+    if q_lower:find("sort:random", 1, true) or q_lower:find("order:random", 1, true) then
+      local uv = vim.uv or vim.loop
+      local nonce = string.format("%d_%d", os.time(), (uv and uv.hrtime() or math.random(100000, 999999)) % 1000000)
+      nonce_param = "&_nonce=" .. nonce
+    end
+  end
   local url = string.format(
-    "%s&tags=%s&limit=%d&pid=%d%s",
+    "%s&tags=%s&limit=%d&pid=%d%s%s",
     config.options.api_base,
     util.url_encode(State.query),
     config.options.per_page,
     State.page,
-    util.auth_qs()
+    util.auth_qs(),
+    nonce_param
   )
   local epoch = State.search_epoch
   download.curl_async(url, function(body)
@@ -126,7 +143,7 @@ function M.execute_search(query)
     return
   end
 
-  if query and query:match("^local:") then
+  if query and util.is_local_query(query) then
     ui.open_local(query)
     return
   end
@@ -142,7 +159,33 @@ function M.execute_search(query)
       end
     end
   end
-  if query == State.query and #State.posts > 0 then
+  local is_random = false
+  if type(query) == "string" then
+    local q_lower = query:lower()
+    if q_lower:find("sort:random", 1, true) or q_lower:find("order:random", 1, true) then
+      is_random = true
+    else
+      for token in q_lower:gmatch("%S+") do
+        if token == "random" or token == "|random" or token == "random|" then
+          is_random = true
+          break
+        end
+      end
+      if not is_random then
+        local query_mod = require("gelbooru.local.query")
+        local p = query_mod.parse_pipeline(query)
+        if p and p.stages then
+          for _, st in ipairs(p.stages) do
+            if st.key == "random" then
+              is_random = true
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+  if not is_random and query == State.query and #State.posts > 0 then
     ui.render_list()
     return
   end
@@ -163,12 +206,21 @@ function M.execute_search(query)
   State.cur = 1
   State.cur_id = nil
   ui.render_list()
-  M.fetch(1)
+
+  local query_mod = require("gelbooru.local.query")
+  local pipe = query_mod.parse_pipeline(query)
+
+  if pipe and #pipe.stages > 0 then
+    M.execute_piped_search(query, pipe)
+  else
+    M.fetch(1)
+  end
 
   -- Auto-resolve any unknown query tags so they are saved to discovered.json
-  for word in (query or ""):gmatch("%S+") do
+  local tags_to_resolve = (pipe and pipe.base_query) or query or ""
+  for word in tags_to_resolve:gmatch("%S+") do
     local clean_word = word:gsub("^[-~]", ""):lower()
-    if clean_word ~= "" and not clean_word:find(":") and not State.tags_by_name[clean_word] then
+    if clean_word ~= "" and clean_word ~= "|" and not clean_word:find(":") and not State.tags_by_name[clean_word] then
       local url = string.format("%s&names=%s%s", config.options.tags_api, util.url_encode(clean_word), util.auth_qs())
       download.curl_async(url, function(body)
         if state.State.torn_down then
@@ -206,6 +258,184 @@ function M.execute_search(query)
       end)
     end
   end
+end
+
+function M.execute_piped_search(query, pipe)
+  local State = state.State
+  local ui = require("gelbooru.ui")
+  local query_mod = require("gelbooru.local.query")
+
+  local epoch = State.search_epoch
+  local stages = pipe.stages
+  local stage1 = stages[1]
+  local base_query = pipe.base_query or ""
+
+  -- Determine candidate pool target size:
+  -- If Stage 1 has a limit (e.g. 1000), target pool size is math.min(stage1.limit, 1000).
+  -- If no limit specified, default pool size is config.options.per_page.
+  local pool_target = config.options.per_page
+  if stage1 and stage1.limit and stage1.limit > 0 then
+    pool_target = math.min(stage1.limit, 1000)
+  end
+
+  -- If Stage 1 has a remote sort key (sort:id, sort:score, sort:random),
+  -- pass it in the remote tags parameter so Gelbooru server orders the initial stream.
+  local remote_tags = base_query
+  if stage1 and stage1.key then
+    local k = stage1.key:lower()
+    local remote_sort = nil
+    if k == "id" or k == "score" then
+      local dir_str = (stage1.dir and stage1.dir:lower() == "asc") and ":asc" or ":desc"
+      remote_sort = string.format("sort:%s%s", k, dir_str)
+    elseif k == "random" then
+      remote_sort = "sort:random"
+    end
+    if remote_sort then
+      if remote_tags ~= "" then
+        remote_tags = remote_tags .. " " .. remote_sort
+      else
+        remote_tags = remote_sort
+      end
+    end
+  end
+
+  local nonce_param = ""
+  if remote_tags:lower():find("sort:random", 1, true) or remote_tags:lower():find("order:random", 1, true) then
+    local uv = vim.uv or vim.loop
+    local nonce = string.format("%d_%d", os.time(), (uv and uv.hrtime() or math.random(100000, 999999)) % 1000000)
+    nonce_param = "&_nonce=" .. nonce
+  end
+
+  State.loading = true
+  local candidate_pool = {}
+  local pid = 0
+  local page_size = 100
+
+  local function finish_pipeline()
+    State.loading = false
+    if State.search_epoch ~= epoch or State.torn_down then
+      return
+    end
+
+    if #candidate_pool == 0 then
+      ui.set_status("No results" .. (query ~= "" and (" for: " .. query) or ""))
+      ui.render_list()
+      history.save_current_history()
+      util.set_lines(state.UI.bufs.img, { "  No posts found" })
+      util.set_lines(state.UI.bufs.meta, {})
+      return
+    end
+
+    -- Execute subsequent pipeline stages in memory:
+    -- Sort in-memory pool (e.g. by score desc), slice to intermediate limit, shuffle remaining posts.
+    local final_posts = query_mod.execute_pipeline(candidate_pool, stages)
+
+    State.posts = final_posts
+    State.page = pid + 1
+    State.cur = 1
+    State.cur_id = nil
+    history.save_current_history()
+    ui.set_status()
+    ui.render_list()
+    if #final_posts > 0 then
+      ui.render_preview(false)
+    else
+      util.set_lines(state.UI.bufs.img, { "  No posts found" })
+      util.set_lines(state.UI.bufs.meta, {})
+    end
+  end
+
+  local function fetch_batch()
+    if State.search_epoch ~= epoch or State.torn_down then
+      State.loading = false
+      return
+    end
+
+    local remaining = pool_target - #candidate_pool
+    if remaining <= 0 then
+      finish_pipeline()
+      return
+    end
+
+    local limit = math.min(page_size, remaining)
+    ui.set_status(string.format("Fetching candidate pool (%d/%d)…", #candidate_pool, pool_target))
+
+    local url = string.format(
+      "%s&tags=%s&limit=%d&pid=%d%s%s",
+      config.options.api_base,
+      util.url_encode(remote_tags),
+      limit,
+      pid,
+      util.auth_qs(),
+      nonce_param
+    )
+
+    download.curl_async(url, function(body)
+      if State.search_epoch ~= epoch then
+        return
+      end
+      if State.torn_down or not (state.UI.wins.frame and vim.api.nvim_win_is_valid(state.UI.wins.frame)) then
+        State.loading = false
+        return
+      end
+
+      if not body then
+        if #candidate_pool > 0 then
+          finish_pipeline()
+        else
+          State.loading = false
+          ui.set_status("Error: API request failed")
+          ui.render_list()
+          util.set_lines(state.UI.bufs.img, { "  Error: API request failed" })
+          util.set_lines(state.UI.bufs.meta, {})
+        end
+        return
+      end
+
+      local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
+      if not ok or not data or not data.post then
+        if #candidate_pool > 0 then
+          finish_pipeline()
+        else
+          State.loading = false
+          ui.set_status("No results" .. (query ~= "" and (" for: " .. query) or ""))
+          ui.render_list()
+          history.save_current_history()
+          util.set_lines(state.UI.bufs.img, { "  No posts found" })
+          util.set_lines(state.UI.bufs.meta, {})
+        end
+        return
+      end
+
+      local posts = ensure_array(data.post)
+      if #posts == 0 then
+        if #candidate_pool > 0 then
+          finish_pipeline()
+        else
+          State.loading = false
+          ui.set_status("No results" .. (query ~= "" and (" for: " .. query) or ""))
+          ui.render_list()
+          history.save_current_history()
+          util.set_lines(state.UI.bufs.img, { "  No posts found" })
+          util.set_lines(state.UI.bufs.meta, {})
+        end
+        return
+      end
+
+      for _, p in ipairs(posts) do
+        table.insert(candidate_pool, p)
+      end
+
+      if #posts < limit or #candidate_pool >= pool_target then
+        finish_pipeline()
+      else
+        pid = pid + 1
+        fetch_batch()
+      end
+    end)
+  end
+
+  fetch_batch()
 end
 
 function M.save_current(cb)

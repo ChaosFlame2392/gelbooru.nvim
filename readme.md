@@ -57,12 +57,17 @@ You can pass a table of options to `require("gelbooru").setup(opts)`. Both `snak
 * `:GelbooruLocal [dir]` — Open the local folder browser for saved images and videos (defaults to `save_dir`).
 * `:GelbooruTags` — Download and cache Gelbooru tags locally for instant autocomplete.
 
-Inside the search bar, you can also query local folders directly:
+Inside the search bar, you can also query local folders and compose multi-stage pipelines:
 * `local:/path/to/folder` — Browse a specific local directory.
-* `local:/path/to/folder tag1 tag2` — Search and filter local files by booru tags.
-* `local: tag1 tag2` — Search and filter files in your default `save_dir` by tags.
+* `local: tag1 tag2` — Search and filter files in your default `save_dir` by tags (e.g. `solo hatsune_miku local: sort:score`).
+* `local: ~tag1 ~tag2` — Local OR choices (e.g. `local: ~foot_focus ~soles ~foot_job` or `local: rating:q,e`).
+* `query | sort:id:1000 | sort:score:300 | sort:random` — Multi-stage piped sorting pipeline (works both online and offline):
+  - Fetches the newest 1,000 posts (`sort:id:1000`).
+  - Slices the top 300 highest-rated in memory (`sort:score:300`).
+  - Randomly shuffles the 300 for browsing (`sort:random`).
 
 ---
+
 
 ## Actionable Plan: Local Library, Metadata Caching, Lookahead & Media Engine
 
@@ -162,12 +167,14 @@ This roadmap outlines the architecture and implementation milestones for turning
    - Bind `u` to quick artist search.
    - Bind `<` / `>` to adjust explorer width ratio and `\` to toggle Zen Mode canvas expansion.
 
-### Milestone 7: Advanced Query Engine, Flexible Syntax & Pipeline Sorting
-* **Flexible `local:` Placement**: Support placing `local:` or `local:<dir>` anywhere in the search query (e.g. `tag1 tag2 local:` or `solo local: tag2`), normalizing tokens automatically so token ordering does not dictate engine mode.
-* **Online `sort:random` Reseeding & Cache Invalidation**: Ensure online `sort:random` queries fetch a fresh randomized assortment on each `<CR>` execution by bypassing identical-query deduplication and sending nonces / cache-busting headers.
+### Milestone 7: Advanced Query Engine, Flexible Syntax & Pipeline Sorting [COMPLETED]
+* **Flexible `local:` Placement**: Supported placing `local:` or `local:<dir>` anywhere in the search query (e.g. `tag1 tag2 local:` or `solo local: tag2`), normalizing tokens automatically so token ordering does not dictate engine mode.
+* **Native Booru Tilde (`~`) OR Syntax & Disjunctions**: Supported native choices in local mode (`local: ~foot_focus ~soles ~foot_job`, `local: rating:q,e`, `foot_focus|soles`).
+* **Online `sort:random` Reseeding & Cache Invalidation**: Bypasses identical-query deduplication on `<CR>` and appends nonces / cache-busting headers to continuously fetch fresh random batches.
 * **Multi-Stage Piped Sorting Pipeline (`sort:id:1000 | sort:score:500 | sort:random`)**:
-  - Unix-style composable query pipe syntax allowing chained operations.
-  - Example: Fetch the 1,000 most recent posts (`sort:id:1000`), sort those by score to keep the top 500 (`sort:score:500`), and randomly shuffle the remaining 500 (`sort:random`).
+  - Unix-style composable query pipe syntax allowing chained operations across online and local libraries.
+  - Example: Fetch the 1,000 most recent posts (`sort:id:1000`), sort those by score in memory to keep the top 500 (`sort:score:500`), and randomly shuffle the remaining 500 (`sort:random`).
+
 
 ### Milestone 8: Visual Rendering Polish, Eager Lookahead & Local Deletion
 * **Eager Lookahead Network Prefetch Pipeline**:
