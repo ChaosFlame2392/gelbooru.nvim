@@ -61,6 +61,9 @@ function M.open_local(query_or_dir)
   State.loading = false
   State.posts = filtered_posts
   State.query = new_query
+  State.local_folder_posts = posts
+  State.local_filter = parsed_filter
+  State.local_query_tag_str = tag_str
 
   local initial_cur = 1
   if target_file and #filtered_posts > 0 then
@@ -90,7 +93,7 @@ function M.open_local(query_or_dir)
 
   ui.render_list()
   ui.render_preview(false)
-  indexer.start_background_indexing(filtered_posts)
+  indexer.start_background_indexing(posts)
   if vim.fn.isdirectory(resolved_dir) == 0 then
     ui.set_status(string.format("Directory not found: %s", resolved_dir), 3000)
   elseif #posts == 0 then

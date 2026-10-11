@@ -1,5 +1,6 @@
 local log = require("gelbooru.core.log")
 local state = require("gelbooru.core.state")
+local util = require("gelbooru.core.util")
 
 local M = {}
 
@@ -61,7 +62,7 @@ local function clear_preview_buffers(posts_count)
   end
   local img_mod = require("gelbooru.ui.image")
   local msg = posts_count == 0 and "  No posts found" or "  Loading..."
-  if state.State.query and state.State.query:match("^local:") and posts_count == 0 then
+  if state.State.query and util.is_local_query(state.State.query) and posts_count == 0 then
     msg = "  No images found"
   end
   pcall(img_mod.reset_canvas, msg)
@@ -118,7 +119,7 @@ function M.restore_history(idx)
   local ui = require("gelbooru.ui")
   local api = require("gelbooru.net.api")
 
-  if #State.posts == 0 and State.query ~= "" and not State.query:match("^local:") then
+  if #State.posts == 0 and State.query ~= "" and not util.is_local_query(State.query) then
     ui.set_status(string.format("Fetching results for: %s…", State.query))
     ui.render_list()
     api.fetch(1)

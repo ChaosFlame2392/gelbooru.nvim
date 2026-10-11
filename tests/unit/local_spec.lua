@@ -2406,6 +2406,57 @@ describe("Multi-Stage Piped Sorting Pipeline (parse_pipeline & execute_pipeline)
       assert.are.equal("200", filtered[1].id) -- score 90
       assert.are.equal("300", filtered[2].id) -- score 50
     end)
+
+    it("QA H-1: skips explicit directory token when target_dir equals config.options.save_dir", function()
+      local cfg = require("gelbooru.core.config")
+      local dir, tag_str, f = local_query.parse_query("local: " .. cfg.options.save_dir .. " solo")
+      assert.are.equal(cfg.options.save_dir, dir)
+      assert.are.equal("solo", tag_str)
+      assert.are.same({ "solo" }, f.positive_tags)
+
+      local dir2, tag_str2, f2 = local_query.parse_query([[local: "]] .. cfg.options.save_dir .. [[" ~foot_focus]])
+      assert.are.equal(cfg.options.save_dir, dir2)
+      assert.are.equal("~foot_focus", tag_str2)
+      assert.are.same({ "foot_focus" }, f2.or_tags)
+      assert.are.same({}, f2.positive_tags)
+    end)
+
+    it("QA M-4: parses standalone sort:id:5 without pipe into pipeline stages with limit", function()
+      local p = local_query.parse_pipeline("sort:id:5")
+      assert.are.equal("", p.base_query)
+      assert.are.equal(1, #p.stages)
+      assert.are.equal("id", p.stages[1].key)
+      assert.are.equal("desc", p.stages[1].dir)
+      assert.are.equal(5, p.stages[1].limit)
+
+      -- With base query: solo sort:id:5
+      local p2 = local_query.parse_pipeline("solo sort:id:5")
+      assert.are.equal("solo", p2.base_query)
+      assert.are.equal(1, #p2.stages)
+      assert.are.equal("id", p2.stages[1].key)
+      assert.are.equal(5, p2.stages[1].limit)
+    end)
+
+    it("QA M-4: parses space-separated pipeline sort:id:1000 sort:score:300 sort:random without pipes", function()
+      local p = local_query.parse_pipeline("sort:id:1000 sort:score:300 sort:random")
+      assert.are.equal("", p.base_query)
+      assert.are.equal(3, #p.stages)
+      assert.are.equal("id", p.stages[1].key)
+      assert.are.equal(1000, p.stages[1].limit)
+      assert.are.equal("score", p.stages[2].key)
+      assert.are.equal(300, p.stages[2].limit)
+      assert.are.equal("random", p.stages[3].key)
+    end)
+
+    it("QA M-4: filter_posts with standalone sort:id:2 limits array to top 2 items", function()
+      local p1 = { id = "10", score = 10, file_url = "/10.jpg" }
+      local p2 = { id = "20", score = 20, file_url = "/20.jpg" }
+      local p3 = { id = "30", score = 30, file_url = "/30.jpg" }
+      local filtered = local_query.filter_posts({ p1, p2, p3 }, "sort:id:2")
+      assert.are.equal(2, #filtered)
+      assert.are.equal("30", filtered[1].id)
+      assert.are.equal("20", filtered[2].id)
+    end)
   end)
 end)
 

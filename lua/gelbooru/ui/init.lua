@@ -391,7 +391,7 @@ function M.render_list()
   end
   if #lines == 0 then
     local no_res_msg = "  No results"
-    if State.query and State.query:match("^local:") then
+    if State.query and util.is_local_query(State.query) then
       no_res_msg = "  No images found"
     end
     lines = { State.loading and "  Fetching…" or no_res_msg }
@@ -661,7 +661,7 @@ function M.render_preview(force_download)
   local UI = state.UI
   local p = State.posts[State.cur]
   if not p then
-    local no_img_msg = (State.query and State.query:match("^local:")) and "  No images found"
+    local no_img_msg = (State.query and util.is_local_query(State.query)) and "  No images found"
       or (#State.posts == 0 and "  No posts found" or "  No post selected")
     image.reset_canvas(no_img_msg)
     return
@@ -1050,7 +1050,7 @@ function M.ensure_ui()
         _syncing_cursor = false
         M.render_preview(false)
         if State.cur >= #State.posts - 5 then
-          api.fetch(1)
+          api.fetch(1, false)
         end
       end
     end,
@@ -1064,10 +1064,10 @@ function M.ensure_ui()
   lm("<Esc>", M.teardown)
   lm("<CR>", api.save_current)
   lm("<Tab>", function()
-    api.fetch(1)
+    api.fetch(1, true)
   end)
   lm("<S-Tab>", function()
-    api.fetch(-1)
+    api.fetch(-1, true)
   end)
   local function force_refresh()
     local p = State.posts[State.cur]
@@ -1107,7 +1107,7 @@ function M.ensure_ui()
     M.render_list()
     M.render_preview(false)
     if State.cur >= #State.posts - 5 then
-      api.fetch(1)
+      api.fetch(1, false)
     end
   end
   M.on_cursor_change = on_cursor_change

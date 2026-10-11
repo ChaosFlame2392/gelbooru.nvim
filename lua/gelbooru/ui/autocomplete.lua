@@ -34,7 +34,7 @@ function M.update_autocomplete(query)
   end
 
   local line = full or ""
-  local is_local = line:match("^[Ll][Oo][Cc][Aa][Ll]:") ~= nil
+  local is_local = util.is_local_query(line)
 
   local search_target = query_part:gsub("^[-~]", ""):lower()
   local target_norm = util.normalize_str(search_target)

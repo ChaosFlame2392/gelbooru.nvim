@@ -142,14 +142,39 @@ function M.process_next_batch()
       local State = state.State
       local UI = state.UI
       if UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame) then
-        local cur_post = State.posts[State.cur]
-        if is_same_post(cur_post, updated_p) then
-          local ui = require("gelbooru.ui")
-          ui.render_metadata(updated_p)
-          ui.render_list()
+        if State.local_filter and State.local_folder_posts then
+          local query_mod = require("gelbooru.local.query")
+          local new_filtered = query_mod.filter_posts(State.local_folder_posts, State.local_filter)
+          if #new_filtered ~= #State.posts then
+            local prev_count = #State.posts
+            State.posts = new_filtered
+            local ui = require("gelbooru.ui")
+            ui.render_list()
+            if prev_count == 0 and #State.posts > 0 then
+              State.cur = 1
+              ui.render_preview(false)
+            end
+            if State.local_query_tag_str and State.local_query_tag_str ~= "" then
+              ui.set_status(string.format("Found %d local posts matching '%s'", #new_filtered, State.local_query_tag_str), 2500)
+            end
+          else
+            local cur_post = State.posts[State.cur]
+            if is_same_post(cur_post, updated_p) then
+              local ui = require("gelbooru.ui")
+              ui.render_metadata(updated_p)
+              ui.render_list()
+            end
+          end
         else
-          local ui = require("gelbooru.ui")
-          ui.render_list()
+          local cur_post = State.posts[State.cur]
+          if is_same_post(cur_post, updated_p) then
+            local ui = require("gelbooru.ui")
+            ui.render_metadata(updated_p)
+            ui.render_list()
+          else
+            local ui = require("gelbooru.ui")
+            ui.render_list()
+          end
         end
       end
     end

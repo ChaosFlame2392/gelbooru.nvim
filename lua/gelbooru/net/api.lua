@@ -15,7 +15,7 @@ end
 
 local M = {}
 
-function M.fetch(direction)
+function M.fetch(direction, is_explicit)
   direction = direction or 1
   local State = state.State
   local UI = state.UI
@@ -28,7 +28,9 @@ function M.fetch(direction)
   local query_mod = require("gelbooru.local.query")
   local pipe = query_mod.parse_pipeline(State.query)
   if pipe and pipe.stages and #pipe.stages > 0 then
-    ui.set_status("Pagination not supported on piped searches", 2000)
+    if is_explicit ~= false then
+      ui.set_status("Pagination not supported on piped searches", 2000)
+    end
     return
   end
 
@@ -312,10 +314,10 @@ function M.execute_piped_search(query, pipe)
   local page_size = 100
 
   local function finish_pipeline()
-    State.loading = false
     if State.search_epoch ~= epoch or State.torn_down then
       return
     end
+    State.loading = false
 
     if #candidate_pool == 0 then
       ui.set_status("No results" .. (query ~= "" and (" for: " .. query) or ""))
@@ -347,7 +349,6 @@ function M.execute_piped_search(query, pipe)
 
   local function fetch_batch()
     if State.search_epoch ~= epoch or State.torn_down then
-      State.loading = false
       return
     end
 

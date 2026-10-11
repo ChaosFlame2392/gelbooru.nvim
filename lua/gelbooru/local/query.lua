@@ -112,6 +112,7 @@ function M.parse_query(query_str)
 
   local target_dir = nil
   local local_idx = nil
+  local consumed_dir_idx = nil
   local has_local_prefix = false
 
   -- Look for local: token or local:<dir> token anywhere in the token stream
@@ -128,6 +129,7 @@ function M.parse_query(query_str)
       local next_t = tokens[idx + 1]
       if next_t and is_dir_token(next_t.text) then
         target_dir = next_t.text
+        consumed_dir_idx = idx + 1
       else
         target_dir = config.options.save_dir
       end
@@ -151,11 +153,10 @@ function M.parse_query(query_str)
 
   local remaining_tokens = {}
   if has_local_prefix then
-    local skip_next = (target_dir ~= nil and target_dir ~= config.options.save_dir and local_idx and tokens[local_idx] and tokens[local_idx].text:lower() == "local:")
     for idx, t in ipairs(tokens) do
       if idx == local_idx then
         -- Skip the local: or local:"..." token
-      elseif skip_next and idx == local_idx + 1 then
+      elseif consumed_dir_idx and idx == consumed_dir_idx then
         -- Skip the consumed directory token
       else
         table.insert(remaining_tokens, t)
@@ -391,48 +392,96 @@ function M.parse_pipeline(query_or_tags)
   end
 
   local parts = split_by_pipeline_pipe(s)
-  if #parts <= 1 then
-    return { base_query = s, stages = {} }
-  end
+  if #parts > 1 then
+    local first_str = vim.trim(parts[1] or "")
+    local first_lower = first_str:lower()
+    local has_explicit_stage_prefix = first_lower:match("^sort:") ~= nil
+      or first_lower:match("^order:") ~= nil
+      or first_lower:match("^limit:") ~= nil
 
-  local first_str = vim.trim(parts[1] or "")
-  local first_lower = first_str:lower()
-  local has_explicit_stage_prefix = first_lower:match("^sort:") ~= nil
-    or first_lower:match("^order:") ~= nil
-    or first_lower:match("^limit:") ~= nil
+    local base_query = ""
+    local start_stage_idx = 2
+    local stages = {}
 
-  local base_query = ""
-  local start_stage_idx = 2
-  local stages = {}
-
-  if has_explicit_stage_prefix and not first_lower:find("^local:") then
-    local stage1 = parse_stage(first_str)
-    if stage1 then
-      base_query = ""
-      table.insert(stages, stage1)
-      start_stage_idx = 2
+    if has_explicit_stage_prefix then
+      local stage1 = parse_stage(first_str)
+      if stage1 then
+        base_query = ""
+        table.insert(stages, stage1)
+        start_stage_idx = 2
+      else
+        base_query = first_str
+        start_stage_idx = 2
+      end
     else
       base_query = first_str
       start_stage_idx = 2
     end
-  else
-    base_query = first_str
-    start_stage_idx = 2
+
+    for i = start_stage_idx, #parts do
+      local part_str = vim.trim(parts[i])
+      if part_str ~= "" then
+        local stage = parse_stage(part_str)
+        if stage then
+          table.insert(stages, stage)
+        else
+          return { base_query = s, stages = {} }
+        end
+      end
+    end
+
+    return { base_query = base_query, stages = stages }
   end
 
-  for i = start_stage_idx, #parts do
-    local part_str = vim.trim(parts[i])
-    if part_str ~= "" then
-      local stage = parse_stage(part_str)
-      if stage then
-        table.insert(stages, stage)
+  -- No pipe '|' present: check if query contains standalone sort stages with limits
+  -- (e.g. "sort:id:5" or "solo sort:id:5") or multiple space-separated stages
+  -- (e.g. "sort:id:1000 sort:score:300 sort:random")
+  local tokens = {}
+  for w in s:gmatch("%S+") do
+    table.insert(tokens, w)
+  end
+
+  local stages = {}
+  local non_stage_tokens = {}
+  local has_any_stage = false
+  for _, tok in ipairs(tokens) do
+    local tok_lower = tok:lower()
+    local is_stage_tok = tok_lower:match("^sort:") ~= nil
+      or tok_lower:match("^order:") ~= nil
+      or tok_lower:match("^limit:") ~= nil
+      or (has_any_stage and (tok_lower == "random" or tok_lower == "asc" or tok_lower == "desc"))
+
+    if is_stage_tok then
+      local parsed = parse_stage(tok)
+      if parsed then
+        has_any_stage = true
+        table.insert(stages, parsed)
       else
-        return { base_query = s, stages = {} }
+        table.insert(non_stage_tokens, tok)
       end
+    else
+      table.insert(non_stage_tokens, tok)
     end
   end
 
-  return { base_query = base_query, stages = stages }
+  -- Only treat as pipeline if:
+  -- 1) Multiple stages exist (e.g. sort:id:1000 sort:score:300 sort:random), OR
+  -- 2) Any stage has an explicit limit (e.g. sort:id:5 or limit:10)
+  local is_pipeline = (#stages > 1)
+  if not is_pipeline and #stages == 1 then
+    if stages[1].limit and stages[1].limit > 0 then
+      is_pipeline = true
+    end
+  end
+
+  if is_pipeline then
+    return {
+      base_query = table.concat(non_stage_tokens, " "),
+      stages = stages,
+    }
+  end
+
+  return { base_query = s, stages = {} }
 end
 
 local function _parse_tags_internal(tag_str)
@@ -476,14 +525,25 @@ local function _parse_tags_internal(tag_str)
     table.insert(filter.or_tags, tag)
   end
 
-  local function add_sort_stage(key, dir)
+  local function add_sort_stage(key, dir, limit)
+    local stage = { key = key, dir = dir or "desc", limit = limit }
     if not filter.sort then
-      filter.sort = { key = key, dir = dir }
-      table.insert(filter.sort, { key = key, dir = dir })
+      filter.sort = { key = key, dir = dir or "desc", limit = limit }
+      table.insert(filter.sort, stage)
     else
-      table.insert(filter.sort, { key = key, dir = dir })
+      table.insert(filter.sort, stage)
       filter.sort.key = filter.sort[1].key
       filter.sort.dir = filter.sort[1].dir
+    end
+    if limit or (filter.pipeline_stages and #filter.pipeline_stages > 0) or #filter.sort > 1 then
+      if not filter.pipeline_stages then
+        filter.pipeline_stages = {}
+        for _, s in ipairs(filter.sort) do
+          table.insert(filter.pipeline_stages, s)
+        end
+      else
+        table.insert(filter.pipeline_stages, stage)
+      end
     end
   end
 
@@ -498,38 +558,57 @@ local function _parse_tags_internal(tag_str)
       -- 1. Sort and Order directives (including piped |sort: and comma-separated sort:score:desc,date:desc)
       local sort_expr = token:match("^%|?sort:(.+)$")
       local order_val = token:match("^%|?order:(.+)$")
+      local limit_val = token:match("^limit:(%d+)$")
       if sort_expr then
         for part in sort_expr:gmatch("[^,]+") do
-          local p_key, p_dir = part:match("^([%w_]+):?([%w_]*)$")
-          if p_key then
-            if p_key:lower() == "random" then
-              add_sort_stage("random", "asc")
-            else
-              local k = p_key:lower()
-              local d = (p_dir:lower() == "asc") and "asc" or "desc"
-              add_sort_stage(k, d)
+          local st = parse_stage("sort:" .. part)
+          if st then
+            add_sort_stage(st.key, st.dir, st.limit)
+          else
+            local p_key, p_dir = part:match("^([%w_]+):?([%w_]*)$")
+            if p_key then
+              if p_key:lower() == "random" then
+                add_sort_stage("random", "asc")
+              else
+                local k = p_key:lower()
+                local d = (p_dir:lower() == "asc") and "asc" or "desc"
+                add_sort_stage(k, d)
+              end
             end
           end
         end
       elseif order_val then
-        local oval = order_val:lower()
-        if oval == "asc" or oval == "desc" then
-          if filter.sort and #filter.sort > 0 then
-            filter.sort[#filter.sort].dir = oval
-            if #filter.sort == 1 then
-              filter.sort.dir = oval
+        local st = parse_stage("order:" .. order_val)
+        if st then
+          add_sort_stage(st.key, st.dir, st.limit)
+        else
+          local oval = order_val:lower()
+          if oval == "asc" or oval == "desc" then
+            if filter.sort and #filter.sort > 0 then
+              filter.sort[#filter.sort].dir = oval
+              if #filter.sort == 1 then
+                filter.sort.dir = oval
+              end
+            else
+              add_sort_stage("date", oval)
             end
           else
-            add_sort_stage("date", oval)
+            local o_key, o_dir = oval:match("^([%w]+)_([%w]+)$")
+            if o_key and (o_dir == "asc" or o_dir == "desc") then
+              add_sort_stage(o_key, o_dir)
+            else
+              local d = (filter.sort and filter.sort.dir) or "desc"
+              add_sort_stage(oval, d)
+            end
           end
-        else
-          local o_key, o_dir = oval:match("^([%w]+)_([%w]+)$")
-          if o_key and (o_dir == "asc" or o_dir == "desc") then
-            add_sort_stage(o_key, o_dir)
-          else
-            local d = (filter.sort and filter.sort.dir) or "desc"
-            add_sort_stage(oval, d)
+        end
+      elseif limit_val then
+        local lim = tonumber(limit_val)
+        if lim and lim > 0 then
+          if not filter.pipeline_stages then
+            filter.pipeline_stages = {}
           end
+          table.insert(filter.pipeline_stages, { limit = lim })
         end
       elseif token:lower() == "random" or token:lower() == "|random" then
         add_sort_stage("random", "asc")
@@ -936,6 +1015,7 @@ local function get_post_score(p)
       end
     end
   end
+  p.score = 0
   return 0
 end
 

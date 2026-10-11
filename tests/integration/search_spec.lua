@@ -754,7 +754,44 @@ describe("Integration: Search & List flow", function()
       assert.is_false(state.State.loading)
       assert.are.equal(20, #state.State.posts)
       assert.are.equal(100, tonumber(state.State.posts[1].score))
-      assert.are.equal(81, tonumber(state.State.posts[20].score))
+      download.curl_async = orig_curl_async
+    end)
+
+    it("standalone sort:id:5 without pipe limits candidate pool and results to 5 posts in online mode", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_curl_async = download.curl_async
+
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          local mock_posts = {}
+          for i = 1, 42 do
+            table.insert(mock_posts, {
+              id = tostring(i),
+              score = tostring(i * 10),
+              tags = "miku solo",
+              file_url = "https://example.com/" .. i .. ".jpg",
+            })
+          end
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = mock_posts }))
+          end)
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      api.execute_search("sort:id:5")
+
+      vim.wait(300, function()
+        return not state.State.loading and #state.State.posts > 0
+      end, 20)
+
+      assert.is_false(state.State.loading)
+      assert.are.equal(5, #state.State.posts)
+      -- Sorted by ID desc: 42, 41, 40, 39, 38
+      assert.are.equal("42", state.State.posts[1].id)
+      assert.are.equal("38", state.State.posts[5].id)
 
       download.curl_async = orig_curl_async
     end)

@@ -3,9 +3,10 @@ if vim.g.loaded_gelbooru == 1 then
 end
 vim.g.loaded_gelbooru = 1
 
-vim.api.nvim_create_user_command("Gelbooru", function()
-  require("gelbooru").open()
-end, { desc = "Browse Gelbooru: tag picker → image browser" })
+vim.api.nvim_create_user_command("Gelbooru", function(opts)
+  local arg = opts.args and vim.trim(opts.args)
+  require("gelbooru").open((arg and arg ~= "") and arg or nil)
+end, { nargs = "*", desc = "Browse Gelbooru: tag picker → image browser" })
 
 vim.api.nvim_create_user_command("GelbooruTags", function()
   require("gelbooru").update_tags()
