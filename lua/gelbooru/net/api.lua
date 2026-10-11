@@ -57,6 +57,8 @@ function M.normalize_remote_tags(tags_str)
   s = s:gsub("~rating:([%w_]+)", "rating:%1")
   s = s:gsub("~score:(%S+)", "score:%1")
   s = s:gsub("~id:(%S+)", "id:%1")
+  s = s:gsub("~sort:(%S+)", "sort:%1")
+  s = s:gsub("~order:(%S+)", "order:%1")
   return s
 end
 
@@ -262,7 +264,7 @@ function M.execute_search(query, opts)
     return
   end
 
-  download.cancel_prefetch_timers()
+  download.cancel_prefetch_timers(true)
   pcall(function()
     require("gelbooru.local.indexer").stop()
   end)
@@ -360,7 +362,10 @@ function M.execute_piped_search(query, pipe)
   -- ensure pool_target = math.min(2000, math.max(max_stage_limit, config.options.per_page)).
   local pool_target
   if stage1 and stage1.offset and not stage1.limit then
-    pool_target = math.min(stage1.offset + config.options.per_page, 2000)
+    local base_offset = start_pid * page_size
+    local rel_start = stage1.offset - base_offset
+    local needed = rel_start + config.options.per_page
+    pool_target = math.min(needed, 2000)
   elseif stage1 and stage1.offset and stage1.offset > 0 then
     local base_offset = start_pid * page_size
     local rel_start = stage1.offset - base_offset
@@ -576,7 +581,41 @@ function M.save_current(cb)
   local State = state.State
   local ui = require("gelbooru.ui")
   local p = State.posts[State.cur]
-  if not p or not p.file_url then
+  if not p then
+    ui.set_status("No file URL for this post", 2000)
+    if cb then cb(false, nil) end
+    return
+  end
+
+  local del_key = tostring(p.id or (p._local_file_path or ""))
+  if p._pending_delete or (State.pending_deletions and State.pending_deletions[del_key]) then
+    local pending = State.pending_deletions and State.pending_deletions[del_key]
+    local path = (pending and pending.path) or p._local_file_path
+    if State.pending_deletions then
+      State.pending_deletions[del_key] = nil
+    end
+    p._pending_delete = nil
+    local id_num = p.id and tonumber(p.id)
+    local ext = util.file_ext(path or p.file_url or "jpg")
+    if ext == "" then ext = "jpg" end
+    if id_num then
+      local local_index = require("gelbooru.local.index")
+      local_index.mark_saved(id_num, ext)
+      if State.saved_index then
+        State.saved_index[id_num] = ext
+      end
+    end
+    if path and vim.fn.filereadable(path) == 1 then
+      p.is_local = true
+      p.file_url = path
+      ui.render_list()
+      ui.set_status("Restored file: " .. vim.fn.fnamemodify(path, ":t"), 2500)
+      if cb then cb(true, path) end
+      return
+    end
+  end
+
+  if not p.file_url then
     ui.set_status("No file URL for this post", 2000)
     if cb then cb(false, nil) end
     return

@@ -283,7 +283,7 @@ function M.cancel_pending_resumes()
   M.pending_resumes = {}
 end
 
-function M.cancel_prefetch_timers()
+function M.cancel_prefetch_timers(abort_active)
   M.cancel_pending_resumes()
   local UI = state.UI
   for _, timer in pairs(UI.prefetch_timers or {}) do
@@ -295,6 +295,19 @@ function M.cancel_prefetch_timers()
   UI.prefetch_timers = {}
   M.queued_prefetch_dests = {}
   M.last_prefetch_dir = nil
+  if abort_active then
+    for dest, handle in pairs(M.active_prefetch_handles or {}) do
+      M.interrupted_dests[dest] = true
+      if handle and handle.kill then
+        pcall(handle.kill, handle, 9)
+      end
+      if M.active_downloads[dest] then
+        M.active_downloads[dest] = nil
+      end
+      M.active_handles[dest] = nil
+    end
+    M.active_prefetch_handles = {}
+  end
 end
 
 function M.prefetch_around(idx, scroll_dir)
@@ -319,17 +332,7 @@ function M.prefetch_around(idx, scroll_dir)
   -- Do not cancel in-flight prefetch downloads if moving in the same direction (`scroll_dir`).
   -- If scroll direction has reversed, cancel old prefetch timers and abort opposite in-flight prefetch downloads.
   if M.last_prefetch_dir ~= nil and M.last_prefetch_dir ~= dir then
-    M.cancel_prefetch_timers()
-    for dest, handle in pairs(M.active_prefetch_handles or {}) do
-      if handle and handle.kill then
-        pcall(handle.kill, handle, 9)
-      end
-      if M.active_downloads[dest] then
-        M.active_downloads[dest] = nil
-      end
-      M.active_handles[dest] = nil
-    end
-    M.active_prefetch_handles = {}
+    M.cancel_prefetch_timers(true)
   end
   M.last_prefetch_dir = dir
 

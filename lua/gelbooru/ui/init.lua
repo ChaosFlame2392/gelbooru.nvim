@@ -49,13 +49,45 @@ function M.teardown()
     require("gelbooru.local.indexer").stop()
   end)
 
-  download.cancel_prefetch_timers()
+  download.cancel_prefetch_timers(true)
   -- Drop pending download callbacks so their closures are freed immediately.
   download.active_downloads = {}
   pcall(download.abort_all)
   download.pending_resumes = {}
   pcall(image.abort_all_ffmpeg)
   pcall(image.close_current_placement)
+
+  -- Execute deferred deletions on disk now that Gelbooru UI is tearing down.
+  if State.pending_deletions then
+    local uv = vim.uv or vim.loop
+    for _, item in pairs(State.pending_deletions) do
+      if item and item.path then
+        if uv and uv.fs_unlink then
+          pcall(uv.fs_unlink, item.path)
+        end
+        if vim.fn.filereadable(item.path) == 1 then
+          pcall(os.remove, item.path)
+          pcall(vim.fn.delete, item.path)
+        end
+        if item.id then
+          local meta_path = util.meta_cache_path(item.id)
+          if meta_path and vim.fn.filereadable(meta_path) == 1 then
+            pcall(vim.fn.delete, meta_path)
+          end
+          local vthumb = image.get_video_thumbnail_path(item.path, item.id)
+          if vthumb and vim.fn.filereadable(vthumb) == 1 then
+            pcall(vim.fn.delete, vthumb)
+          end
+          local direct_vthumb = string.format("%s/vthumb_%s.jpg", config.options.cache_dir, tostring(item.id))
+          if vim.fn.filereadable(direct_vthumb) == 1 then
+            pcall(vim.fn.delete, direct_vthumb)
+          end
+          image.clear_snacks_cache_for(item.id)
+        end
+      end
+    end
+    State.pending_deletions = {}
+  end
 
   local State = state.State
   if State.prev_mouse ~= nil then
@@ -231,33 +263,57 @@ function M.apply_layout(l)
   upd(UI.wins.input, l.input)
   upd(UI.wins.div, l.div)
 
+  local supports_hide = (vim.fn.has("nvim-0.10") == 1)
+
   if State.zen_mode then
     if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
-      vim.api.nvim_win_set_config(UI.wins.list, { hide = true })
+      if supports_hide then
+        vim.api.nvim_win_set_config(UI.wins.list, { hide = true })
+      else
+        vim.api.nvim_win_set_config(UI.wins.list, {
+          relative = "editor",
+          row = l.list.row,
+          col = l.list.col,
+          width = 1,
+          height = l.list.height,
+        })
+      end
     end
     if UI.wins.vdiv and vim.api.nvim_win_is_valid(UI.wins.vdiv) then
-      vim.api.nvim_win_set_config(UI.wins.vdiv, { hide = true })
+      if supports_hide then
+        vim.api.nvim_win_set_config(UI.wins.vdiv, { hide = true })
+      else
+        vim.api.nvim_win_set_config(UI.wins.vdiv, {
+          relative = "editor",
+          row = l.vdiv.row,
+          col = l.vdiv.col,
+          width = 1,
+          height = l.vdiv.height,
+        })
+      end
     end
   else
     if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
-      vim.api.nvim_win_set_config(UI.wins.list, {
-        hide = false,
+      local cfg = {
         relative = "editor",
         row = l.list.row,
         col = l.list.col,
         width = l.list.width,
         height = l.list.height,
-      })
+      }
+      if supports_hide then cfg.hide = false end
+      vim.api.nvim_win_set_config(UI.wins.list, cfg)
     end
     if UI.wins.vdiv and vim.api.nvim_win_is_valid(UI.wins.vdiv) then
-      vim.api.nvim_win_set_config(UI.wins.vdiv, {
-        hide = false,
+      local cfg = {
         relative = "editor",
         row = l.vdiv.row,
         col = l.vdiv.col,
         width = l.vdiv.width,
         height = l.vdiv.height,
-      })
+      }
+      if supports_hide then cfg.hide = false end
+      vim.api.nvim_win_set_config(UI.wins.vdiv, cfg)
     end
   end
 
@@ -290,11 +346,25 @@ function M.apply_layout(l)
 
   if State.input_focused then
     if UI.wins.ac and vim.api.nvim_win_is_valid(UI.wins.ac) then
-      vim.api.nvim_win_set_config(UI.wins.ac, { hide = false })
+      if supports_hide then
+        vim.api.nvim_win_set_config(UI.wins.ac, { hide = false })
+      else
+        upd(UI.wins.ac, l.ac)
+      end
     end
   else
     if UI.wins.ac and vim.api.nvim_win_is_valid(UI.wins.ac) then
-      vim.api.nvim_win_set_config(UI.wins.ac, { hide = true })
+      if supports_hide then
+        vim.api.nvim_win_set_config(UI.wins.ac, { hide = true })
+      else
+        vim.api.nvim_win_set_config(UI.wins.ac, {
+          relative = "editor",
+          row = 9999,
+          col = 9999,
+          width = 1,
+          height = 1,
+        })
+      end
     end
   end
 end
@@ -331,7 +401,8 @@ function M.render_list()
     local r = (p.rating or "?"):sub(1, 1):upper()
     local score = tostring(p.score or 0)
     local is_vid = image.is_video_post(p)
-    local is_saved = (not p.is_local) and p.id and (local_index.is_saved(p.id) or (State.saved_index and State.saved_index[tonumber(p.id)] ~= nil))
+    local is_pending = p._pending_delete or (p.id and State.pending_deletions and State.pending_deletions[tostring(p.id)] ~= nil)
+    local is_saved = (not p.is_local) and (not is_pending) and p.id and (local_index.is_saved(p.id) or (State.saved_index and State.saved_index[tonumber(p.id)] ~= nil))
     local saved_badge = is_saved and " [SAVED]" or ""
     local dims = string.format("%dx%d%s%s", p.width or 0, p.height or 0, is_vid and " [VIDEO]" or "", saved_badge)
     local tags_s = config.options.show_tags_in_list and (" " .. (p.tags or ""):sub(1, math.max(0, LW - 22))) or ""
@@ -788,10 +859,13 @@ function M.close_tag_modal()
     pcall(vim.api.nvim_buf_delete, UI.bufs.tag_modal, { force = true })
   end
   UI.bufs.tag_modal = nil
-  if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+  if UI.tag_modal_prev_win and vim.api.nvim_win_is_valid(UI.tag_modal_prev_win) then
+    pcall(vim.api.nvim_set_current_win, UI.tag_modal_prev_win)
+  elseif UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
     pcall(vim.api.nvim_set_current_win, UI.wins.list)
-    M.set_status()
   end
+  UI.tag_modal_prev_win = nil
+  M.set_status()
 end
 
 function M.open_tag_modal()
@@ -802,6 +876,8 @@ function M.open_tag_modal()
     M.set_status("No tags available for this post", 2000)
     return
   end
+
+  UI.tag_modal_prev_win = vim.api.nvim_get_current_win()
 
   local seen = {}
   local items = {}
@@ -860,7 +936,8 @@ function M.open_tag_modal()
     end
   end
 
-  local modal_w = math.max(40, math.min(vim.o.columns - 4, max_len + 6))
+  local max_avail_w = math.max(10, vim.o.columns - 4)
+  local modal_w = math.min(max_avail_w, math.max(20, math.min(max_avail_w, max_len + 6)))
   local modal_h = math.max(3, math.min(#items, math.floor(vim.o.lines * 0.7)))
   local modal_row = math.max(1, math.floor((vim.o.lines - modal_h) / 2))
   local modal_col = math.max(1, math.floor((vim.o.columns - modal_w) / 2))
@@ -1030,18 +1107,24 @@ function M.delete_current()
     return
   end
 
+  local del_key = tostring(p.id or local_path)
+  if p._pending_delete or (State.pending_deletions and State.pending_deletions[del_key]) then
+    M.set_status("Deletion already scheduled (deferred until exit; press <CR> to restore)", 2500)
+    return
+  end
+
   local filename = vim.fn.fnamemodify(local_path, ":t")
   local prompt_msg = "Delete local file: " .. filename .. "?"
 
   local function do_delete()
-    local uv = vim.uv or vim.loop
-    if uv and uv.fs_unlink then
-      pcall(uv.fs_unlink, local_path)
-    end
-    if vim.fn.filereadable(local_path) == 1 then
-      pcall(os.remove, local_path)
-      pcall(vim.fn.delete, local_path)
-    end
+    State.pending_deletions = State.pending_deletions or {}
+    State.pending_deletions[del_key] = {
+      path = local_path,
+      id = p.id,
+      p = p,
+    }
+    p._pending_delete = true
+    p._local_file_path = local_path
 
     local id_num = p.id and tonumber(p.id)
     if id_num then
@@ -1050,54 +1133,12 @@ function M.delete_current()
       if State.saved_index then
         State.saved_index[id_num] = nil
       end
-      local meta_path = util.meta_cache_path(p.id)
-      if meta_path and vim.fn.filereadable(meta_path) == 1 then
-        local cached = util.read_json(meta_path)
-        if cached then
-          if cached.file_url and not p._remote_file_url then
-            p._remote_file_url = cached.file_url
-          end
-          if cached.preview_url and not p._remote_preview_url then
-            p._remote_preview_url = cached.preview_url
-          end
-        end
-        pcall(vim.fn.delete, meta_path)
-      end
-      local vthumb = image.get_video_thumbnail_path(local_path, p.id)
-      if vthumb and vim.fn.filereadable(vthumb) == 1 then
-        pcall(vim.fn.delete, vthumb)
-      end
-      local direct_vthumb = string.format("%s/vthumb_%s.jpg", config.options.cache_dir, tostring(p.id))
-      if vim.fn.filereadable(direct_vthumb) == 1 then
-        pcall(vim.fn.delete, direct_vthumb)
-      end
-      image.clear_snacks_cache_for(p.id)
     end
 
-    if p.id then
-      p.is_local = false
-      if p._remote_file_url and p._remote_file_url ~= "" then
-        p.file_url = p._remote_file_url
-      end
-      if p._remote_preview_url and p._remote_preview_url ~= "" then
-        p.preview_url = p._remote_preview_url
-      end
-      if not p.file_url or not p.file_url:match("^https?://") then
-        api.fetch_post_by_id(p.id, function(d)
-          if d then
-            if d.file_url then p.file_url = d.file_url end
-            if d.preview_url then p.preview_url = d.preview_url end
-            if d.sample_url then p.sample_url = d.sample_url end
-          end
-        end)
-      end
-    end
-
-    State.cur_id = nil
     M.render_list()
     M.render_preview(false)
     M.render_metadata(p)
-    M.set_status(string.format("Deleted local file: %s (press <CR> to re-download)", filename), 3000)
+    M.set_status(string.format("Deleted local file: %s (deferred until exit; press <CR> to restore)", filename), 3000)
   end
 
   if vim.ui and vim.ui.select then
@@ -1658,19 +1699,19 @@ function M.ensure_ui()
     local line = vim.api.nvim_buf_get_lines(UI.bufs.input, 0, 1, false)[1] or ""
     local cursor = vim.api.nvim_win_get_cursor(UI.wins.input)
     local col = cursor[2]
-    if #line > 0 then
-      if col >= #line - 1 then
-        local new_line = line:sub(1, -2)
+    local total_chars = vim.fn.strchars(line)
+    if total_chars > 0 then
+      local char_idx = vim.fn.charidx(line, col)
+      if char_idx < 0 or char_idx >= total_chars then
+        char_idx = total_chars
+      end
+      if char_idx > 0 then
+        local before = vim.fn.strcharpart(line, 0, char_idx - 1)
+        local after = vim.fn.strcharpart(line, char_idx)
+        local new_line = before .. after
         vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_line })
-        pcall(vim.api.nvim_win_set_cursor, UI.wins.input, { 1, #new_line })
-      elseif col > 0 then
-        local new_line = line:sub(1, col - 1) .. line:sub(col + 1)
-        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_line })
-        pcall(vim.api.nvim_win_set_cursor, UI.wins.input, { 1, math.max(0, col - 1) })
-      else
-        local new_line = line:sub(2)
-        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_line })
-        pcall(vim.api.nvim_win_set_cursor, UI.wins.input, { 1, 0 })
+        local new_byte_col = #before
+        pcall(vim.api.nvim_win_set_cursor, UI.wins.input, { 1, new_byte_col })
       end
     end
     vim.cmd("startinsert!")

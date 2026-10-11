@@ -1281,43 +1281,64 @@ describe("Integration: Local Folder Browser Mode", function()
       local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
       d_cb()
 
-      -- 1. File removed from disk
-      assert.are.equal(0, vim.fn.filereadable(target_file))
-      -- 2. Metadata cache removed
-      assert.are.equal(0, vim.fn.filereadable(meta_path))
-      -- 3. Video thumbnail removed
-      assert.are.equal(0, vim.fn.filereadable(vthumb_path))
-      -- 4. Unmarked from saved_index
+      -- 1. File remains readable on disk until UI teardown
+      assert.are.equal(1, vim.fn.filereadable(target_file))
+      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+      -- 2. Metadata cache and video thumbnail remain intact for inspection
+      assert.are.equal(1, vim.fn.filereadable(meta_path))
+      assert.are.equal(1, vim.fn.filereadable(vthumb_path))
+      -- 3. Unmarked from saved_index immediately
       assert.is_false(local_index.is_saved(1001))
-      -- 5. User remains focused on the EXACT same post
+      -- 4. User remains focused on the EXACT same post
       assert.are.equal(initial_count, #state.State.posts)
       assert.are.equal(1, state.State.cur)
       local current_post = state.State.posts[state.State.cur]
       assert.are.equal("1001", tostring(current_post.id))
-      -- 6. is_local switched to false and remote URLs preserved
-      assert.is_false(current_post.is_local)
-      assert.are.equal("https://example.com/1001.jpg", current_post.file_url)
-      -- 7. Post list display updated (no [SAVED] marker)
+      -- 5. Post list display updated (no [SAVED] marker)
       local list_lines = harness.get_buf_lines(state.UI.bufs.list)
       assert.is_nil(list_lines[1]:find("%[SAVED%]"))
-      -- 8. Status notice displayed
+      -- 6. Status notice displayed indicating deferred deletion
       local status_lines = harness.get_buf_lines(state.UI.bufs.status)
-      assert.is_truthy(status_lines[1]:find("Deleted local file: 1001.jpg %(press <CR> to re%-download%)"))
+      assert.is_truthy(status_lines[1]:find("deferred until exit"))
+
+      -- 7. Actual physical unlinking happens on teardown
+      ui.teardown()
+      assert.are.equal(0, vim.fn.filereadable(target_file))
+      assert.are.equal(0, vim.fn.filereadable(meta_path))
+      assert.are.equal(0, vim.fn.filereadable(vthumb_path))
 
       vim.ui.select = orig_select
     end)
 
-    it("allows immediate re-download via <CR> after deleting local file", function()
+    it("allows cancelling confirmation dialog with no changes", function()
       local local_index = require("gelbooru.local.index")
       local target_file = tmp_dir .. "/1001.jpg"
 
-      -- Seed cached metadata with online URLs
-      local meta_path = util.meta_cache_path("1001")
-      util.write_json(meta_path, {
-        id = "1001",
-        file_url = "https://example.com/1001.jpg",
-        tags = "hatsune_miku",
-      })
+      ui.open_local(tmp_dir)
+      -- Mark saved AFTER open_local so the saved_index survives the directory rescan
+      local_index.mark_saved(1001, "jpg")
+      assert.is_true(local_index.is_saved(1001))
+
+      local orig_select = vim.ui.select
+      vim.ui.select = function(items, opts, on_choice)
+        on_choice("Cancel")
+      end
+
+      local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
+      d_cb()
+
+      assert.are.equal(1, vim.fn.filereadable(target_file))
+      assert.is_nil(state.State.pending_deletions["1001"])
+      -- Cancel means no pending deletion, so is_saved is still true
+      assert.is_true(local_index.is_saved(1001))
+
+      vim.ui.select = orig_select
+    end)
+
+    it("allows restoring pending deletion via <CR> without network re-download", function()
+      local local_index = require("gelbooru.local.index")
+      local target_file = tmp_dir .. "/1001.jpg"
+      local_index.mark_saved(1001, "jpg")
 
       ui.open_local(tmp_dir)
 
@@ -1329,28 +1350,29 @@ describe("Integration: Local Folder Browser Mode", function()
       local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
       d_cb()
 
-      assert.are.equal(0, vim.fn.filereadable(target_file))
+      assert.are.equal(1, vim.fn.filereadable(target_file))
       assert.is_false(local_index.is_saved(1001))
+      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
 
-      -- Now press <CR> to re-download the post
-      local save_done = false
+      -- Press <CR> to restore before exit
+      local restore_done = false
       api.save_current(function(saved, dest)
-        save_done = true
+        restore_done = true
         assert.is_true(saved)
-        assert.is_truthy(dest:find("1001"))
       end)
 
-      vim.wait(300, function() return save_done end, 10)
-      assert.is_true(save_done)
+      assert.is_true(restore_done)
       assert.is_true(local_index.is_saved(1001))
+      assert.is_nil(state.State.pending_deletions["1001"])
 
-      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
-      assert.is_truthy(list_lines[1]:find("%[SAVED%]"))
+      -- On teardown, the file is NOT unlinked because deletion was aborted!
+      ui.teardown()
+      assert.are.equal(1, vim.fn.filereadable(target_file))
 
       vim.ui.select = orig_select
     end)
 
-    it("keymap 'D' and keymap 'd' from meta buffer work identically", function()
+    it("keymap 'D' and keymap 'd' from meta buffer schedule deferred deletion", function()
       local target_file = tmp_dir .. "/1001.jpg"
       ui.open_local(tmp_dir)
 
@@ -1371,16 +1393,18 @@ describe("Integration: Local Folder Browser Mode", function()
 
       meta_d_cb()
 
-      assert.are.equal(0, vim.fn.filereadable(target_file))
+      assert.are.equal(1, vim.fn.filereadable(target_file))
       local status_lines = harness.get_buf_lines(state.UI.bufs.status)
-      assert.is_truthy(status_lines[1]:find("Deleted local file: 1001.jpg"))
+      assert.is_truthy(status_lines[1]:find("deferred until exit"))
+
+      ui.teardown()
+      assert.are.equal(0, vim.fn.filereadable(target_file))
 
       vim.ui.select = orig_select
     end)
 
-    it("deletes a downloaded online post in config.options.save_dir", function()
+    it("deletes a downloaded online post on teardown and removes [SAVED] immediately", function()
       local local_index = require("gelbooru.local.index")
-      -- Create downloaded post in save_dir
       local saved_file = config.options.save_dir .. "/1001.jpg"
       local f = io.open(saved_file, "wb")
       if f then f:write(string.rep("Z", 2048)) f:close() end
@@ -1405,13 +1429,19 @@ describe("Integration: Local Folder Browser Mode", function()
       local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
       d_cb()
 
-      assert.are.equal(0, vim.fn.filereadable(saved_file))
+      -- File remains on disk until teardown
+      assert.are.equal(1, vim.fn.filereadable(saved_file))
       assert.is_false(local_index.is_saved(1001))
       assert.are.equal(1, state.State.cur)
       assert.are.equal(1, #state.State.posts)
 
+      -- [SAVED] badge immediately removed from post list
       local list_lines_after = harness.get_buf_lines(state.UI.bufs.list)
       assert.is_nil(list_lines_after[1]:find("%[SAVED%]"))
+
+      -- Physical unlink occurs on teardown
+      ui.teardown()
+      assert.are.equal(0, vim.fn.filereadable(saved_file))
 
       vim.ui.select = orig_select
     end)

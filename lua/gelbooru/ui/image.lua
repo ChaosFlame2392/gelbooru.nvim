@@ -370,6 +370,9 @@ function M.extract_video_thumbnail(video_path, post_id, cb)
         M.active_ffmpeg_handles[handle] = nil
       end
       vim.schedule(function()
+        if state.State.torn_down then
+          return
+        end
         if handle then
           M.active_ffmpeg_handles[handle] = nil
         end

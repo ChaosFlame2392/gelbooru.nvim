@@ -63,7 +63,8 @@ function M.update_saved_index(dir_override)
         local id_str = scan.extract_post_id(name)
         if id_str then
           local num_id = tonumber(id_str)
-          if num_id then
+          local del_key = tostring(num_id)
+          if num_id and not (State.pending_deletions and State.pending_deletions[del_key]) then
             new_index[num_id] = ext:lower()
           end
         end
@@ -99,17 +100,14 @@ function M.mark_saved(id, ext)
   end
   State.saved_index[num_id] = clean_ext
 
-  -- Refresh mtime to prevent redundant rescan
+  -- Refresh mtime if already scanned to prevent redundant rescan
   local uv = vim.uv or vim.loop
   local target_dir = normalize_dir(config.options.save_dir)
-  if target_dir then
+  if target_dir and _has_scanned and _last_dir == target_dir then
     local stat = uv.fs_stat(target_dir)
     if stat and stat.mtime then
       _last_mtime = stat.mtime.sec or stat.mtime
-      _last_dir = target_dir
-      _has_scanned = true
       M._last_mtime = _last_mtime
-      M._scanned_dir = _last_dir
     end
   end
 end
@@ -123,10 +121,13 @@ function M.is_saved(id)
     return false
   end
   local State = state.State
+  if State.pending_deletions and State.pending_deletions[tostring(num_id)] then
+    return false
+  end
   return (State.saved_index and State.saved_index[num_id] ~= nil) or false
 end
 
-function M.unmark_saved(id)
+function M.unmark_saved(id, dir_override)
   if not id then
     return
   end
@@ -140,15 +141,12 @@ function M.unmark_saved(id)
   end
 
   local uv = vim.uv or vim.loop
-  local target_dir = normalize_dir(config.options.save_dir)
-  if target_dir then
+  local target_dir = normalize_dir(dir_override or config.options.save_dir)
+  if target_dir and _has_scanned and _last_dir == target_dir then
     local stat = uv.fs_stat(target_dir)
     if stat and stat.mtime then
       _last_mtime = stat.mtime.sec or stat.mtime
-      _last_dir = target_dir
-      _has_scanned = true
       M._last_mtime = _last_mtime
-      M._scanned_dir = _last_dir
     end
   end
 end

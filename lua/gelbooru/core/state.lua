@@ -37,6 +37,7 @@ M.State = {
   zen_mode = false,
   saved_index = {},
   session_cache = {},
+  pending_deletions = {},
   local_folder_posts = nil,
   local_filter = nil,
   local_query_tag_str = nil,
