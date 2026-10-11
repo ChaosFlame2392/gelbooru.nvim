@@ -54,9 +54,8 @@ function M.normalize_remote_tags(tags_str)
     return ""
   end
   local s = tags_str
-  s = s:gsub("~rating:([%w_]+)", "rating:%1")
-  s = s:gsub("~score:(%S+)", "score:%1")
-  s = s:gsub("~id:(%S+)", "id:%1")
+  -- ~rating:X, ~score:X, ~id:X are valid Gelbooru OR-syntax and must be sent as-is.
+  -- Only ~sort: and ~order: are sorting directives (not filterable tags) and need ~ stripped.
   s = s:gsub("~sort:(%S+)", "sort:%1")
   s = s:gsub("~order:(%S+)", "order:%1")
   return s

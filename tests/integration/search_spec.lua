@@ -1014,20 +1014,31 @@ describe("Integration: Search & List flow", function()
       assert.are.equal("-hatsune_miku ", committed_line)
     end)
 
-    it("Issue 6: normalizes ~rating:, ~score:, ~id: while preserving native booru tags", function()
-      -- Direct normalize_remote_tags verification
-      assert.are.equal("rating:general", api.normalize_remote_tags("~rating:general"))
-      assert.are.equal("rating:explicit", api.normalize_remote_tags("~rating:explicit"))
-      assert.are.equal("score:100", api.normalize_remote_tags("~score:100"))
-      assert.are.equal("score:>=50", api.normalize_remote_tags("~score:>=50"))
-      assert.are.equal("id:12345", api.normalize_remote_tags("~id:12345"))
-      assert.are.equal("~hatsune_miku ~megurine_luka", api.normalize_remote_tags("~hatsune_miku ~megurine_luka"))
+    it("Issue 6: ~sort:/~order: are stripped; ~rating:/~score:/~id: are preserved as valid OR syntax", function()
+      -- ~rating:, ~score:, ~id: are valid Gelbooru OR-syntax — must be sent as-is
+      assert.are.equal("~rating:general", api.normalize_remote_tags("~rating:general"))
+      assert.are.equal("~rating:explicit", api.normalize_remote_tags("~rating:explicit"))
+      assert.are.equal("~score:100", api.normalize_remote_tags("~score:100"))
+      assert.are.equal("~score:>=50", api.normalize_remote_tags("~score:>=50"))
+      assert.are.equal("~id:12345", api.normalize_remote_tags("~id:12345"))
+      -- Multiple ~rating: is valid OR syntax (e.g. explicit OR questionable)
       assert.are.equal(
-        "~hatsune_miku rating:general score:>=100 id:555",
+        "~rating:explicit ~rating:questionable",
+        api.normalize_remote_tags("~rating:explicit ~rating:questionable")
+      )
+      -- Plain tag tildes (booru OR for regular tags) always preserved
+      assert.are.equal("~hatsune_miku ~megurine_luka", api.normalize_remote_tags("~hatsune_miku ~megurine_luka"))
+      -- Mixed: all OR-syntax preserved as-is
+      assert.are.equal(
+        "~hatsune_miku ~rating:general ~score:>=100 ~id:555",
         api.normalize_remote_tags("~hatsune_miku ~rating:general ~score:>=100 ~id:555")
       )
+      -- Only ~sort: and ~order: (sorting directives, not filterable tags) get ~ stripped
+      assert.are.equal("sort:score", api.normalize_remote_tags("~sort:score"))
+      assert.are.equal("sort:id:desc", api.normalize_remote_tags("~sort:id:desc"))
+      assert.are.equal("order:id:desc", api.normalize_remote_tags("~order:id:desc"))
 
-      -- Integration: verify remote curl query sends normalized tags
+      -- Integration: verify remote curl query sends ~rating: and ~score: as-is
       ui.open()
       local download = require("gelbooru.net.download")
       local orig_curl_async = download.curl_async
@@ -1047,34 +1058,33 @@ describe("Integration: Search & List flow", function()
         end
       end
 
-      -- 1. Standard search query with ~rating:, ~score:, and native ~tag
-      api.execute_search("~hatsune_miku ~rating:general ~score:>=100")
+      -- zenless_zone_zero ~rating:explicit ~rating:questionable — all three tags sent as-is
+      api.execute_search("zenless_zone_zero ~rating:explicit ~rating:questionable")
       vim.wait(200, function()
         return not state.State.loading and #state.State.posts > 0
       end, 20)
 
       assert.is_true(#captured_urls > 0)
       local req_url = captured_urls[1]
-      -- Native tag must keep ~
-      assert.is_truthy(req_url:find("~hatsune_miku"))
-      -- Modifiers must NOT have ~
-      assert.is_falsy(req_url:find("~rating"))
-      assert.is_falsy(req_url:find("~score"))
-      assert.is_truthy(req_url:find("rating%%3Ageneral"))
-      assert.is_truthy(req_url:find("score%%3A"))
+      -- ~rating: must be preserved in the outgoing URL (URL-encoded as %7Erating%3A or ~rating%3A)
+      assert.is_truthy(
+        req_url:find("%%7Erating") or req_url:find("~rating") or req_url:find("%%7erating"),
+        "~rating: must be preserved in outgoing API URL, got: " .. req_url
+      )
 
-      -- 2. Piped search query with ~rating:
+      -- ~sort: IS stripped — verify
       captured_urls = {}
-      api.execute_search("~hatsune_miku ~rating:sensitive | sort:score:10")
+      api.execute_search("hatsune_miku ~sort:score")
       vim.wait(200, function()
         return not state.State.loading and #state.State.posts > 0
       end, 20)
-
       assert.is_true(#captured_urls > 0)
-      local pipe_url = captured_urls[1]
-      assert.is_truthy(pipe_url:find("~hatsune_miku"))
-      assert.is_falsy(pipe_url:find("~rating"))
-      assert.is_truthy(pipe_url:find("rating%%3Asensitive"))
+      local sort_url = captured_urls[1]
+      -- ~sort: stripped to sort:, so ~sort should not appear
+      assert.is_falsy(
+        sort_url:find("%%7Esort") or sort_url:find("~sort"),
+        "~sort: must be stripped from outgoing URL"
+      )
 
       download.curl_async = orig_curl_async
     end)
