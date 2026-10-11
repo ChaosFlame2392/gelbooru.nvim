@@ -1,12 +1,13 @@
 local config = require("gelbooru.core.config")
 local log = require("gelbooru.core.log")
 local state = require("gelbooru.core.state")
+local util = require("gelbooru.core.util")
 
 local M = {}
 
 function M.file_ext_from_url(url)
-  local clean = (url or ""):match("^[^%?]+") or ""
-  return (clean:match("%.([%w]+)$") or "jpg"):lower()
+  local ext = util.file_ext(url)
+  return ext ~= "" and ext or "jpg"
 end
 
 function M.is_video_post(p)

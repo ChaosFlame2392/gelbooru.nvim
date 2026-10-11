@@ -137,7 +137,7 @@ local function clear_preview_loading()
   end)
 end
 
-function M.execute_search(query)
+function M.execute_search(query, opts)
   local State = state.State
   local ui = require("gelbooru.ui")
 
@@ -201,7 +201,9 @@ function M.execute_search(query)
 
   State.search_epoch = (State.search_epoch or 0) + 1
   State.loading = false  -- Must reset so in-flight fetch doesn't lock out new search!
-  history.push_history(query)
+  if not (opts and opts.skip_history) and not State.restoring_history then
+    history.push_history(query)
+  end
   State.query = query
   State.posts = {}
   State.page = 0
@@ -272,12 +274,40 @@ function M.execute_piped_search(query, pipe)
   local stage1 = stages[1]
   local base_query = pipe.base_query or ""
 
+  local page_size = 100
+  local pid = 0
+  local start_pid = 0
+  if stage1 and stage1.offset and stage1.offset > 0 then
+    start_pid = math.floor(stage1.offset / page_size)
+    pid = start_pid
+  end
+
   -- Determine candidate pool target size:
-  -- If Stage 1 has a limit (e.g. 1000), target pool size is math.min(stage1.limit, 1000).
-  -- If no limit specified, default pool size is config.options.per_page.
-  local pool_target = config.options.per_page
-  if stage1 and stage1.limit and stage1.limit > 0 then
-    pool_target = math.min(stage1.limit, 1000)
+  -- If stage1 has a range/offset (e.g. sort:id:1000..1200 or offset:1000), fetch needed window.
+  -- If stage1 has a limit (e.g. sort:id:1000), pool_target = math.min(stage1.limit, 2000).
+  -- If stage1 has no limit, but any downstream stage has a limit (e.g. tag | sort:score:200 | sort:random),
+  -- ensure pool_target = math.min(2000, math.max(max_stage_limit, config.options.per_page)).
+  local pool_target
+  if stage1 and stage1.offset and stage1.offset > 0 then
+    local base_offset = start_pid * page_size
+    local rel_start = stage1.offset - base_offset
+    local count = (stage1.limit and stage1.limit > stage1.offset) and (stage1.limit - stage1.offset) or config.options.per_page
+    local needed = rel_start + count
+    pool_target = math.min(needed, 2000)
+  elseif stage1 and stage1.limit and stage1.limit > 0 then
+    pool_target = math.min(stage1.limit, 2000)
+  else
+    local max_stage_limit = 0
+    for _, st in ipairs(stages) do
+      if st.limit and st.limit > max_stage_limit then
+        max_stage_limit = st.limit
+      end
+    end
+    if max_stage_limit > 0 then
+      pool_target = math.min(2000, math.max(max_stage_limit, config.options.per_page))
+    else
+      pool_target = config.options.per_page
+    end
   end
 
   -- If Stage 1 has a remote sort key (sort:id, sort:score, sort:random),
@@ -310,8 +340,6 @@ function M.execute_piped_search(query, pipe)
 
   State.loading = true
   local candidate_pool = {}
-  local pid = 0
-  local page_size = 100
 
   local function finish_pipeline()
     if State.search_epoch ~= epoch or State.torn_down then
@@ -329,8 +357,34 @@ function M.execute_piped_search(query, pipe)
     end
 
     -- Execute subsequent pipeline stages in memory:
-    -- Sort in-memory pool (e.g. by score desc), slice to intermediate limit, shuffle remaining posts.
-    local final_posts = query_mod.execute_pipeline(candidate_pool, stages)
+    -- If stage1 had an offset, cleanly slice in-memory array to requested window,
+    -- then run downstream pipeline stages on the window.
+    local final_posts
+    if stage1 and stage1.offset and stage1.offset > 0 then
+      local base_offset = start_pid * page_size
+      local rel_start = math.max(1, (stage1.offset - base_offset) + 1)
+      local rel_end = (stage1.limit and stage1.limit > 0) and (stage1.limit - base_offset) or #candidate_pool
+      rel_end = math.min(#candidate_pool, rel_end)
+
+      local window_posts = {}
+      if rel_start <= #candidate_pool then
+        for i = rel_start, rel_end do
+          table.insert(window_posts, candidate_pool[i])
+        end
+      end
+
+      if #stages > 1 then
+        local downstream_stages = {}
+        for s_idx = 2, #stages do
+          table.insert(downstream_stages, stages[s_idx])
+        end
+        final_posts = query_mod.execute_pipeline(window_posts, downstream_stages)
+      else
+        final_posts = window_posts
+      end
+    else
+      final_posts = query_mod.execute_pipeline(candidate_pool, stages)
+    end
 
     State.posts = final_posts
     State.page = pid + 1
@@ -458,7 +512,10 @@ function M.save_current(cb)
     if cb then cb(false, nil) end
     return
   end
-  local ext = p.file_url:match("%.(%w+)$") or "jpg"
+  local ext = util.file_ext(p.file_url)
+  if ext == "" then
+    ext = "jpg"
+  end
   local dest = string.format("%s/%s.%s", config.options.save_dir, p.id, ext)
   if vim.fn.filereadable(dest) == 1 then
     local local_index = require("gelbooru.local.index")

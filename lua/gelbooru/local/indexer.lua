@@ -13,19 +13,6 @@ local active_workers = 0
 local timer = nil
 local timer_running = false
 
-local function is_same_post(p1, p2)
-  if not p1 or not p2 then
-    return false
-  end
-  if p1 == p2 then
-    return true
-  end
-  if p1.is_local or p2.is_local then
-    return p1.file_url ~= nil and p1.file_url == p2.file_url
-  end
-  return p1.id ~= nil and p2.id ~= nil and tostring(p1.id) == tostring(p2.id)
-end
-
 function M.cursor_rush_prefetch(cur_idx, scroll_dir)
   if state.State.torn_down then
     return
@@ -58,7 +45,7 @@ function M.cursor_rush_prefetch(cur_idx, scroll_dir)
           if UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame) then
             local State = state.State
             local cur_p = State.posts[State.cur]
-            if is_same_post(cur_p, updated_p) then
+            if util.is_same_post(cur_p, updated_p) then
               local ui = require("gelbooru.ui")
               ui.render_metadata(updated_p)
               ui.render_list()
@@ -145,7 +132,9 @@ function M.process_next_batch()
         if State.local_filter and State.local_folder_posts then
           local query_mod = require("gelbooru.local.query")
           local new_filtered = query_mod.filter_posts(State.local_folder_posts, State.local_filter)
-          if #new_filtered ~= #State.posts then
+          local has_sort = (State.local_filter.sort ~= nil)
+            or (State.local_filter.pipeline_stages and #State.local_filter.pipeline_stages > 0)
+          if #new_filtered ~= #State.posts or has_sort then
             local prev_count = #State.posts
             State.posts = new_filtered
             local ui = require("gelbooru.ui")
@@ -153,13 +142,18 @@ function M.process_next_batch()
             if prev_count == 0 and #State.posts > 0 then
               State.cur = 1
               ui.render_preview(false)
+            else
+              local cur_post = State.posts[State.cur]
+              if util.is_same_post(cur_post, updated_p) then
+                ui.render_metadata(updated_p)
+              end
             end
-            if State.local_query_tag_str and State.local_query_tag_str ~= "" then
+            if State.local_query_tag_str and State.local_query_tag_str ~= "" and #new_filtered ~= prev_count then
               ui.set_status(string.format("Found %d local posts matching '%s'", #new_filtered, State.local_query_tag_str), 2500)
             end
           else
             local cur_post = State.posts[State.cur]
-            if is_same_post(cur_post, updated_p) then
+            if util.is_same_post(cur_post, updated_p) then
               local ui = require("gelbooru.ui")
               ui.render_metadata(updated_p)
               ui.render_list()
@@ -167,7 +161,7 @@ function M.process_next_batch()
           end
         else
           local cur_post = State.posts[State.cur]
-          if is_same_post(cur_post, updated_p) then
+          if util.is_same_post(cur_post, updated_p) then
             local ui = require("gelbooru.ui")
             ui.render_metadata(updated_p)
             ui.render_list()

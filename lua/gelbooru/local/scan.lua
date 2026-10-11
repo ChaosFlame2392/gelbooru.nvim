@@ -61,16 +61,6 @@ function M.scan_local_folder(dir)
     return {}, target_dir, target_file
   end
 
-  local valid_exts = {
-    jpg = true,
-    jpeg = true,
-    png = true,
-    webp = true,
-    gif = true,
-    mp4 = true,
-    webm = true,
-  }
-
   local uv = vim.uv or vim.loop
   local files = {}
   local handle = uv.fs_scandir(target_dir)
@@ -96,8 +86,8 @@ function M.scan_local_folder(dir)
 
   local posts = {}
   for _, file_path in ipairs(files) do
-    local ext = file_path:match("%.([^%.]+)$")
-    if ext and valid_exts[ext:lower()] then
+    local ext = util.file_ext(file_path)
+    if config.VALID_MEDIA_EXTS[ext] then
       local post_id = M.extract_post_id(file_path)
       local post = {
         id = post_id,

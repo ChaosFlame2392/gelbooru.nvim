@@ -334,3 +334,108 @@ describe("util.open_url and util.open_media", function()
     vim.ui.open = orig_open
   end)
 end)
+
+describe("util.close_timer", function()
+  it("stops and closes an active uv timer", function()
+    local uv = vim.uv or vim.loop
+    local timer = uv.new_timer()
+    timer:start(1000, 0, function() end)
+    assert.is_true(timer:is_active())
+
+    local res = util.close_timer(timer)
+    assert.is_nil(res)
+    assert.is_true(timer:is_closing())
+  end)
+
+  it("handles nil gracefully without error", function()
+    local res = util.close_timer(nil)
+    assert.is_nil(res)
+  end)
+
+  it("handles already-closed timer without crashing", function()
+    local uv = vim.uv or vim.loop
+    local timer = uv.new_timer()
+    timer:close()
+    local res = util.close_timer(timer)
+    assert.is_nil(res)
+  end)
+end)
+
+describe("util.file_ext", function()
+  it("extracts extension from simple filename", function()
+    assert.are.equal("png", util.file_ext("image.png"))
+    assert.are.equal("jpg", util.file_ext("photo.jpg"))
+  end)
+
+  it("extracts extension from path", function()
+    assert.are.equal("jpeg", util.file_ext("/path/to/archive/file.jpeg"))
+    assert.are.equal("webp", util.file_ext("C:\\Users\\Media\\image.webp"))
+  end)
+
+  it("strips query params and fragments before extracting extension", function()
+    assert.are.equal("png", util.file_ext("https://example.com/cdn/sample.png?width=800&key=val#preview"))
+  end)
+
+  it("does not treat directory dots as file extensions when filename has no extension", function()
+    assert.are.equal("", util.file_ext("https://example.com/img/noext"))
+    assert.are.equal("", util.file_ext("/var/data.d/file_without_ext"))
+  end)
+
+  it("lowercases extension", function()
+    assert.are.equal("gif", util.file_ext("ANIMATION.GIF"))
+  end)
+
+  it("returns empty string for nil or non-string", function()
+    assert.are.equal("", util.file_ext(nil))
+    assert.are.equal("", util.file_ext(123))
+  end)
+end)
+
+describe("util.is_same_post", function()
+  it("returns true for identical table reference", function()
+    local p = { id = "1", file_url = "/a.jpg" }
+    assert.is_true(util.is_same_post(p, p))
+  end)
+
+  it("returns false if either post is nil", function()
+    assert.is_false(util.is_same_post({ id = "1" }, nil))
+    assert.is_false(util.is_same_post(nil, { id = "1" }))
+  end)
+
+  it("compares local posts by file_url", function()
+    local p1 = { is_local = true, file_url = "/path/1.jpg" }
+    local p2 = { is_local = true, file_url = "/path/1.jpg" }
+    local p3 = { is_local = true, file_url = "/path/2.jpg" }
+    assert.is_true(util.is_same_post(p1, p2))
+    assert.is_false(util.is_same_post(p1, p3))
+  end)
+
+  it("compares remote posts by numeric id string match", function()
+    local p1 = { id = 12345, file_url = "https://example.com/12345.jpg" }
+    local p2 = { id = "12345", file_url = "https://other.com/sample.jpg" }
+    local p3 = { id = "99999", file_url = "https://example.com/99999.jpg" }
+    assert.is_true(util.is_same_post(p1, p2))
+    assert.is_false(util.is_same_post(p1, p3))
+  end)
+end)
+
+describe("util.shuffle", function()
+  it("handles nil and single element lists without error", function()
+    assert.are.same({}, util.shuffle(nil))
+    assert.are.same({ 1 }, util.shuffle({ 1 }))
+  end)
+
+  it("shuffles array and preserves all elements", function()
+    local list = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }
+    local shuffled = util.shuffle(list)
+    assert.are.equal(10, #shuffled)
+
+    local counts = {}
+    for _, v in ipairs(shuffled) do
+      counts[v] = (counts[v] or 0) + 1
+    end
+    for i = 1, 10 do
+      assert.are.equal(1, counts[i])
+    end
+  end)
+end)

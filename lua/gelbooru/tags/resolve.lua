@@ -15,15 +15,7 @@ local json_decode = vim.json and vim.json.decode or vim.fn.json_decode
 function M.save_discovered_now()
   local State = state.State
   local UI = state.UI
-  if UI.save_discovered_timer then
-    pcall(function()
-      UI.save_discovered_timer:stop()
-      if not UI.save_discovered_timer:is_closing() then
-        UI.save_discovered_timer:close()
-      end
-    end)
-    UI.save_discovered_timer = nil
-  end
+  UI.save_discovered_timer = util.close_timer(UI.save_discovered_timer)
 
   if #State.discovered == 0 then
     return
@@ -213,15 +205,7 @@ function M.fetch_api_tags(query)
   local UI = state.UI
   local State = state.State
 
-  if UI.api_tag_timer then
-    pcall(function()
-      UI.api_tag_timer:stop()
-      if not UI.api_tag_timer:is_closing() then
-        UI.api_tag_timer:close()
-      end
-    end)
-    UI.api_tag_timer = nil
-  end
+  UI.api_tag_timer = util.close_timer(UI.api_tag_timer)
 
   local timer = vim.loop.new_timer()
   UI.api_tag_timer = timer
@@ -229,9 +213,7 @@ function M.fetch_api_tags(query)
     300,
     0,
     vim.schedule_wrap(function()
-      if not timer:is_closing() then
-        timer:close()
-      end
+      timer = util.close_timer(timer)
       if UI.api_tag_timer == timer then
         UI.api_tag_timer = nil
       end

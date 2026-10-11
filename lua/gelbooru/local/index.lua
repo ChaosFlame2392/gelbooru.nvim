@@ -12,16 +12,6 @@ local _last_mtime = 0
 local _last_dir = nil
 local _has_scanned = false
 
-local VALID_EXTS = {
-  jpg = true,
-  jpeg = true,
-  png = true,
-  gif = true,
-  webp = true,
-  mp4 = true,
-  webm = true,
-}
-
 local function normalize_dir(raw_dir)
   if not raw_dir or raw_dir == "" then
     return nil
@@ -68,8 +58,8 @@ function M.update_saved_index(dir_override)
       break
     end
     if ftype == "file" or ftype == "link" or not ftype then
-      local ext = name:match("%.([^%.]+)$")
-      if ext and VALID_EXTS[ext:lower()] and not name:match("%.part$") then
+      local ext = util.file_ext(name)
+      if config.VALID_MEDIA_EXTS[ext] and not name:match("%.part$") then
         local id_str = scan.extract_post_id(name)
         if id_str then
           local num_id = tonumber(id_str)

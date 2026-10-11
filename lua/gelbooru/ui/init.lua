@@ -35,56 +35,12 @@ function M.teardown()
   local State = state.State
   State.torn_down = true
   log("INFO", "LIFECYCLE", "Teardown Gelbooru UI")
-  if UI.scroll_timer then
-    UI.scroll_timer:stop()
-    if not UI.scroll_timer:is_closing() then
-      UI.scroll_timer:close()
-    end
-    UI.scroll_timer = nil
-  end
-  if UI.status_timer then
-    UI.status_timer:stop()
-    if not UI.status_timer:is_closing() then
-      UI.status_timer:close()
-    end
-    UI.status_timer = nil
-  end
-  if UI.api_tag_timer then
-    pcall(function()
-      UI.api_tag_timer:stop()
-      if not UI.api_tag_timer:is_closing() then
-        UI.api_tag_timer:close()
-      end
-    end)
-    UI.api_tag_timer = nil
-  end
-  if UI.ac_debounce_timer then
-    pcall(function()
-      UI.ac_debounce_timer:stop()
-      if not UI.ac_debounce_timer:is_closing() then
-        UI.ac_debounce_timer:close()
-      end
-    end)
-    UI.ac_debounce_timer = nil
-  end
-  if UI.resize_timer then
-    pcall(function()
-      UI.resize_timer:stop()
-      if not UI.resize_timer:is_closing() then
-        UI.resize_timer:close()
-      end
-    end)
-    UI.resize_timer = nil
-  end
-  if UI.resume_timer then
-    pcall(function()
-      UI.resume_timer:stop()
-      if not UI.resume_timer:is_closing() then
-        UI.resume_timer:close()
-      end
-    end)
-    UI.resume_timer = nil
-  end
+  UI.scroll_timer = util.close_timer(UI.scroll_timer)
+  UI.status_timer = util.close_timer(UI.status_timer)
+  UI.api_tag_timer = util.close_timer(UI.api_tag_timer)
+  UI.ac_debounce_timer = util.close_timer(UI.ac_debounce_timer)
+  UI.resize_timer = util.close_timer(UI.resize_timer)
+  UI.resume_timer = util.close_timer(UI.resume_timer)
   if UI.save_discovered_timer or #State.discovered > 0 then
     pcall(tags.save_discovered_now)
   end
@@ -140,13 +96,7 @@ function M.set_status(msg, reset_ms)
   if not UI.bufs.status then
     return
   end
-  if UI.status_timer then
-    UI.status_timer:stop()
-    if not UI.status_timer:is_closing() then
-      UI.status_timer:close()
-    end
-    UI.status_timer = nil
-  end
+  UI.status_timer = util.close_timer(UI.status_timer)
   local help =
     "  j/k: nav  u: artist  < / >: width  \\: zen  o: web  O: open  <CR>: save  m: meta  /: search  q: quit"
   util.set_lines(UI.bufs.status, { msg and ("  " .. msg) or help })
@@ -156,10 +106,7 @@ function M.set_status(msg, reset_ms)
       reset_ms,
       0,
       vim.schedule_wrap(function()
-        if UI.status_timer and not UI.status_timer:is_closing() then
-          UI.status_timer:close()
-        end
-        UI.status_timer = nil
+        UI.status_timer = util.close_timer(UI.status_timer)
         M.set_status()
       end)
     )
@@ -404,18 +351,7 @@ function M.render_list()
   _syncing_cursor = false
 end
 
-local function is_same_post(p1, p2)
-  if not p1 or not p2 then
-    return false
-  end
-  if p1 == p2 then
-    return true
-  end
-  if p1.is_local or p2.is_local then
-    return p1.file_url ~= nil and p1.file_url == p2.file_url
-  end
-  return p1.id ~= nil and p2.id ~= nil and tostring(p1.id) == tostring(p2.id)
-end
+local is_same_post = util.is_same_post
 
 local function load_and_render_image(p, url_idx, retry_count, force_download)
   local UI = state.UI
@@ -741,12 +677,7 @@ function M.render_preview(force_download)
     M.set_status()
   end
 
-  if UI.scroll_timer then
-    UI.scroll_timer:stop()
-    if not UI.scroll_timer:is_closing() then
-      UI.scroll_timer:close()
-    end
-  end
+  UI.scroll_timer = util.close_timer(UI.scroll_timer)
 
   local delay = is_cached and 30 or UI.PREVIEW_COOLDOWN_MS
 
@@ -755,10 +686,7 @@ function M.render_preview(force_download)
     delay,
     0,
     vim.schedule_wrap(function()
-      if UI.scroll_timer and not UI.scroll_timer:is_closing() then
-        UI.scroll_timer:close()
-      end
-      UI.scroll_timer = nil
+      UI.scroll_timer = util.close_timer(UI.scroll_timer)
       if state.State.torn_down then
         return
       end
@@ -1313,7 +1241,7 @@ function M.ensure_ui()
       if t then
         local last_word = full:match("(%S*)$") or ""
         local prefix = full:sub(1, #full - #last_word)
-        local sign = last_word:match("^([-~])") or ""
+        local sign = last_word:match("^([|%-~]+)") or ""
         full = prefix .. sign .. t.n
         vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { full })
         State.autocomplete_cur = 0
@@ -1391,7 +1319,7 @@ function M.ensure_ui()
       local t = State.autocomplete_filtered[State.autocomplete_cur]
       if t then
         local prefix = full:sub(1, #full - #last_word)
-        local sign = last_word:match("^([-~])") or ""
+        local sign = last_word:match("^([|%-~]+)") or ""
         local new_text = prefix .. sign .. t.n .. " "
         vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_text })
         vim.api.nvim_win_set_cursor(UI.wins.input, { 1, #new_text })
@@ -1414,7 +1342,7 @@ function M.ensure_ui()
       return
     end
 
-    local search_target = last_word:gsub("^[-~]", ""):lower()
+    local search_target = last_word:gsub("^[|%-~]+", ""):lower()
     local target_norm = util.normalize_str(search_target)
     local t_norm = util.normalize_str(t.n)
 
@@ -1424,7 +1352,7 @@ function M.ensure_ui()
     end
 
     local prefix = full:sub(1, #full - #last_word)
-    local sign = last_word:match("^([-~])") or ""
+    local sign = last_word:match("^([|%-~]+)") or ""
     local new_text = prefix .. sign .. t.n .. " "
     vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { new_text })
     vim.api.nvim_win_set_cursor(UI.wins.input, { 1, #new_text })

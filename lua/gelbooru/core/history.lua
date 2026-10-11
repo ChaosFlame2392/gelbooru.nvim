@@ -29,6 +29,9 @@ local MAX_HISTORY = 30
 
 function M.push_history(query)
   local State = state.State
+  if State.restoring_history then
+    return
+  end
   M.save_current_history()
   if State.history_idx < #State.history then
     for i = #State.history, State.history_idx + 1, -1 do
@@ -122,7 +125,13 @@ function M.restore_history(idx)
   if #State.posts == 0 and State.query ~= "" and not util.is_local_query(State.query) then
     ui.set_status(string.format("Fetching results for: %s…", State.query))
     ui.render_list()
-    api.fetch(1)
+    State.restoring_history = true
+    if api.execute_search then
+      api.execute_search(State.query)
+    else
+      api.fetch(1)
+    end
+    State.restoring_history = false
   else
     ui.render_list()
     ui.render_preview(false)

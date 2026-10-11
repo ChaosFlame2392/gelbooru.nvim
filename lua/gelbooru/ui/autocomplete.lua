@@ -5,6 +5,28 @@ local tags = require("gelbooru.tags")
 
 local M = {}
 
+local function is_syntax_directive(t)
+  if not t or t == "" then
+    return false
+  end
+  t = t:lower()
+  if t == "random" or t == "asc" or t == "desc" then
+    return true
+  end
+  if t:match("^sort:")
+    or t:match("^order:")
+    or t:match("^limit:")
+    or t:match("^offset:")
+    or t:match("^rating:")
+    or t:match("^score:")
+    or t:match("^id:")
+    or t:match("^artist:")
+    or t:match("^character:") then
+    return true
+  end
+  return false
+end
+
 function M.update_autocomplete(query)
   local State = state.State
   local UI = state.UI
@@ -36,7 +58,7 @@ function M.update_autocomplete(query)
   local line = full or ""
   local is_local = util.is_local_query(line)
 
-  local search_target = query_part:gsub("^[-~]", ""):lower()
+  local search_target = query_part:gsub("^[|%-~]+", ""):lower()
   local target_norm = util.normalize_str(search_target)
   local has_norm = target_norm ~= "" and #target_norm > 0
 
@@ -175,7 +197,7 @@ function M.update_autocomplete(query)
     end
 
     -- Trigger live API fallback if few results found
-    if #candidates < 10 and #search_target >= 3 then
+    if #candidates < 10 and #search_target >= 3 and not is_syntax_directive(search_target) then
       tags.fetch_api_tags(search_target)
     end
   end

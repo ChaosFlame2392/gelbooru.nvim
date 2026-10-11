@@ -223,4 +223,53 @@ function M.keymap(buf, mode, key, fn)
   vim.keymap.set(mode, key, fn, { buffer = buf, nowait = true, noremap = true, silent = true })
 end
 
+function M.close_timer(timer)
+  if not timer then
+    return nil
+  end
+  pcall(function()
+    timer:stop()
+    if not timer:is_closing() then
+      timer:close()
+    end
+  end)
+  return nil
+end
+
+function M.file_ext(url_or_path)
+  if not url_or_path or type(url_or_path) ~= "string" then
+    return ""
+  end
+  local clean = url_or_path:gsub("[?#].*$", "")
+  local fname = clean:match("([^/\\]+)$") or clean
+  local ext = fname:match("%.([^%.]+)$") or ""
+  return ext:lower()
+end
+
+function M.is_same_post(p1, p2)
+  if not p1 or not p2 then
+    return false
+  end
+  if p1 == p2 then
+    return true
+  end
+  if p1.is_local or p2.is_local then
+    return p1.file_url ~= nil and p1.file_url == p2.file_url
+  end
+  return p1.id ~= nil and p2.id ~= nil and tostring(p1.id) == tostring(p2.id)
+end
+
+function M.shuffle(list)
+  if not list or #list <= 1 then
+    return list or {}
+  end
+  local uv = vim.uv or vim.loop
+  math.randomseed(os.time() + (uv.hrtime() % 1000000))
+  for i = #list, 2, -1 do
+    local j = math.random(i)
+    list[i], list[j] = list[j], list[i]
+  end
+  return list
+end
+
 return M

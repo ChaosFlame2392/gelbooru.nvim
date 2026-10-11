@@ -1781,6 +1781,28 @@ describe("local.query: Query Parsing and Post Filtering", function()
       assert.are.equal("20", sorted_fallback[2].id)
       assert.are.equal("10", sorted_fallback[3].id)
     end)
+
+    it("-video excludes video posts in matches_post and filter_posts", function()
+      local p_video = { id = "1", tags = "video solo 1girl", file_url = "/media/1.mp4", is_local = true }
+      local p_image = { id = "2", tags = "solo 1girl", file_url = "/media/2.jpg", is_local = true }
+      local p_anim = { id = "3", tags = "video vocaloid", file_url = "/media/3.webm", is_local = true }
+
+      -- matches_post check
+      assert.is_false(local_query.matches_post(p_video, "-video"))
+      assert.is_true(local_query.matches_post(p_image, "-video"))
+      assert.is_false(local_query.matches_post(p_anim, "-video"))
+
+      -- filter_posts check
+      local filtered = local_query.filter_posts({ p_video, p_image, p_anim }, "-video")
+      assert.are.equal(1, #filtered)
+      assert.are.equal("2", filtered[1].id)
+
+      -- Positive video check
+      local vid_only = local_query.filter_posts({ p_video, p_image, p_anim }, "video")
+      assert.are.equal(2, #vid_only)
+      assert.are.equal("1", vid_only[1].id)
+      assert.are.equal("3", vid_only[2].id)
+    end)
   end)
 end)
 
@@ -2289,6 +2311,35 @@ describe("Multi-Stage Piped Sorting Pipeline (parse_pipeline & execute_pipeline)
       assert.are.equal("tag | sort::", p.base_query)
       assert.are.equal(0, #p.stages)
     end)
+
+    it("parses zenless_zone_zero sort:id:1000|sort:score:200|sort:random -video preserving base_query and 3 stages", function()
+      local p = local_query.parse_pipeline("zenless_zone_zero sort:id:1000|sort:score:200|sort:random -video")
+      assert.are.equal("zenless_zone_zero -video", p.base_query)
+      assert.are.equal(3, #p.stages)
+      assert.are.same({ key = "id", dir = "desc", limit = 1000 }, p.stages[1])
+      assert.are.same({ key = "score", dir = "desc", limit = 200 }, p.stages[2])
+      assert.are.same({ key = "random", dir = "asc", limit = nil }, p.stages[3])
+
+      -- Variations with whitespace or lack thereof
+      local p_spaced = local_query.parse_pipeline("zenless_zone_zero sort:id:1000 | sort:score:200 | sort:random -video")
+      assert.are.equal("zenless_zone_zero -video", p_spaced.base_query)
+      assert.are.equal(3, #p_spaced.stages)
+      assert.are.same({ key = "id", dir = "desc", limit = 1000 }, p_spaced.stages[1])
+      assert.are.same({ key = "score", dir = "desc", limit = 200 }, p_spaced.stages[2])
+      assert.are.same({ key = "random", dir = "asc", limit = nil }, p_spaced.stages[3])
+
+      -- Comma-separated sort stages: tag | sort:score:desc,date:desc
+      local p_comma = local_query.parse_pipeline("tag | sort:score:desc,date:desc")
+      assert.are.equal("tag", p_comma.base_query)
+      assert.are.equal(2, #p_comma.stages)
+      assert.are.same({ key = "score", dir = "desc", limit = nil }, p_comma.stages[1])
+      assert.are.same({ key = "date", dir = "desc", limit = nil }, p_comma.stages[2])
+
+      -- Standalone single sort without limit and without pipe preserves standard paginated online browsing
+      local p_single = local_query.parse_pipeline("solo sort:score")
+      assert.are.equal("solo sort:score", p_single.base_query)
+      assert.are.equal(0, #p_single.stages)
+    end)
   end)
 
   describe("query.execute_pipeline", function()
@@ -2457,6 +2508,102 @@ describe("Multi-Stage Piped Sorting Pipeline (parse_pipeline & execute_pipeline)
       assert.are.equal("30", filtered[1].id)
       assert.are.equal("20", filtered[2].id)
     end)
+
+    it("Phase 1: parses range and offset syntax in parse_pipeline stages", function()
+      -- Range with .. syntax: sort:id:1000..1200
+      local p1 = local_query.parse_pipeline("sort:id:1000..1200")
+      assert.are.equal(1, #p1.stages)
+      assert.are.equal("id", p1.stages[1].key)
+      assert.are.equal(1000, p1.stages[1].offset)
+      assert.are.equal(1200, p1.stages[1].limit)
+
+      -- Range with - syntax: sort:score:50-100
+      local p2 = local_query.parse_pipeline("sort:score:50-100")
+      assert.are.equal(1, #p2.stages)
+      assert.are.equal("score", p2.stages[1].key)
+      assert.are.equal(50, p2.stages[1].offset)
+      assert.are.equal(100, p2.stages[1].limit)
+
+      -- Inverted range normalization: sort:id:1200..1000 -> offset 1000, limit 1200
+      local p3 = local_query.parse_pipeline("sort:id:1200..1000")
+      assert.are.equal(1000, p3.stages[1].offset)
+      assert.are.equal(1200, p3.stages[1].limit)
+
+      -- limit:1000..1200
+      local p4 = local_query.parse_pipeline("miku | limit:1000..1200")
+      assert.are.equal("miku", p4.base_query)
+      assert.are.equal(1, #p4.stages)
+      assert.are.equal(1000, p4.stages[1].offset)
+      assert.are.equal(1200, p4.stages[1].limit)
+
+      -- standalone offset:50
+      local p5 = local_query.parse_pipeline("miku | offset:50")
+      assert.are.equal("miku", p5.base_query)
+      assert.are.equal(1, #p5.stages)
+      assert.are.equal(50, p5.stages[1].offset)
+      assert.is_nil(p5.stages[1].limit)
+    end)
+
+    it("Phase 1: execute_pipeline slices range correctly on large dataset", function()
+      local items = {}
+      for i = 1, 1500 do
+        table.insert(items, { id = tostring(i), score = i, file_url = "/" .. i .. ".jpg" })
+      end
+
+      -- Pipeline with sort:id:asc:1000..1200
+      -- Items sorted by id ascending (1 to 1500)
+      -- offset: 1000, limit: 1200 -> slice 1001 to 1200 = 200 items
+      local pipeline = local_query.parse_pipeline("sort:id:asc:1000..1200")
+      local sliced = local_query.execute_pipeline(items, pipeline)
+
+      assert.are.equal(200, #sliced)
+      assert.are.equal("1001", sliced[1].id)
+      assert.are.equal("1200", sliced[#sliced].id)
+    end)
+
+    it("Phase 1: execute_pipeline slices with offset only or offset + limit", function()
+      local items = {}
+      for i = 1, 20 do
+        table.insert(items, { id = tostring(i), file_url = "/" .. i .. ".jpg" })
+      end
+
+      -- Pipeline with offset:15 (items 16 to 20)
+      local p1 = local_query.parse_pipeline("offset:15")
+      local sliced1 = local_query.execute_pipeline(items, p1)
+      assert.are.equal(5, #sliced1)
+      assert.are.equal("16", sliced1[1].id)
+      assert.are.equal("20", sliced1[5].id)
+
+      -- Pipeline with offset:10 limit:5 (items 11 to 15)
+      local p2 = local_query.parse_pipeline("offset:10 limit:5")
+      local sliced2 = local_query.execute_pipeline(items, p2)
+      assert.are.equal(5, #sliced2)
+      assert.are.equal("11", sliced2[1].id)
+      assert.are.equal("15", sliced2[5].id)
+    end)
+
+    it("Phase 2: split_by_pipeline_pipe anchors random lookahead and avoids splitting intra-tag pipes", function()
+      -- foot_focus|random_encounters has intra-tag pipe, random_encounters is NOT random directive
+      local p = local_query.parse_pipeline("foot_focus|random_encounters")
+      assert.are.equal("foot_focus|random_encounters", p.base_query)
+      assert.are.equal(0, #p.stages)
+
+      -- foot_focus | random DOES split into stage
+      local p2 = local_query.parse_pipeline("foot_focus | random")
+      assert.are.equal("foot_focus", p2.base_query)
+      assert.are.equal(1, #p2.stages)
+      assert.are.equal("random", p2.stages[1].key)
+
+      -- chained pipeline: solo | sort:score:100..200 | random
+      local p3 = local_query.parse_pipeline("solo | sort:score:100..200 | random")
+      assert.are.equal("solo", p3.base_query)
+      assert.are.equal(2, #p3.stages)
+      assert.are.equal("score", p3.stages[1].key)
+      assert.are.equal(100, p3.stages[1].offset)
+      assert.are.equal(200, p3.stages[1].limit)
+      assert.are.equal("random", p3.stages[2].key)
+    end)
   end)
 end)
+
 

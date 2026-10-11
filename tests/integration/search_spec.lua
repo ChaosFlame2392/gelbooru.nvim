@@ -795,5 +795,223 @@ describe("Integration: Search & List flow", function()
 
       download.curl_async = orig_curl_async
     end)
+
+    it("sets pool_target to 1000 and preserves -video in remote_tags for zenless_zone_zero sort:id:1000|sort:score:200|sort:random -video", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_curl_async = download.curl_async
+      local captured_urls = {}
+      local status_messages = {}
+
+      local orig_set_status = ui.set_status
+      ui.set_status = function(msg, dur)
+        if msg then
+          table.insert(status_messages, msg)
+        end
+        return orig_set_status(msg, dur)
+      end
+
+      -- Mock 3 batches of 100 posts (300 posts total), with IDs from 1 to 300
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          table.insert(captured_urls, url)
+          local pid = tonumber(url:match("pid=(%d+)")) or 0
+          local posts = {}
+          for i = 1, 100 do
+            local id_num = (pid * 100) + i
+            table.insert(posts, {
+              id = tostring(id_num),
+              score = tostring(id_num * 2),
+              tags = "zenless_zone_zero",
+              file_url = string.format("https://example.com/%d.jpg", id_num),
+            })
+          end
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = posts }))
+          end)
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      api.execute_search("zenless_zone_zero sort:id:1000|sort:score:200|sort:random -video")
+
+      vim.wait(500, function()
+        return not state.State.loading and #state.State.posts > 0
+      end, 20)
+
+      assert.is_false(state.State.loading)
+
+      -- 1. Verify remote_tags URL encoding preserves base_query (-video) and sort:id:desc
+      assert.is_true(#captured_urls > 0)
+      local first_url = captured_urls[1]
+      assert.is_truthy(first_url:find("zenless_zone_zero"))
+      assert.is_truthy(first_url:find("%-video") or first_url:find("-video"))
+      assert.is_truthy(first_url:find("sort%%3Aid%%3Adesc") or first_url:find("sort:id:desc"))
+
+      -- 2. Verify status messages reflect candidate pool target of 1000
+      local found_target_1000 = false
+      for _, msg in ipairs(status_messages) do
+        if msg:find("/1000") then
+          found_target_1000 = true
+          break
+        end
+      end
+      assert.is_true(found_target_1000)
+
+      -- 3. Verify in-memory reduction sliced down to 200 posts (Stage 2 sort:score:200)
+      assert.are.equal(200, #state.State.posts)
+
+      download.curl_async = orig_curl_async
+      ui.set_status = orig_set_status
+    end)
+
+    it("Phase 1: executes piped search with server-side offset jump (sort:id:1000..1200 starts at pid=10)", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_curl_async = download.curl_async
+      local captured_urls = {}
+
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          table.insert(captured_urls, url)
+          local pid = tonumber(url:match("pid=(%d+)")) or 0
+          local posts = {}
+          for i = 1, 100 do
+            local id_num = (pid * 100) + i
+            table.insert(posts, {
+              id = tostring(id_num),
+              score = tostring(id_num),
+              tags = "miku",
+              file_url = string.format("https://example.com/%d.jpg", id_num),
+            })
+          end
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = posts }))
+          end)
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      api.execute_search("miku sort:id:1000..1200")
+
+      vim.wait(500, function()
+        return not state.State.loading and #state.State.posts > 0
+      end, 20)
+
+      assert.is_false(state.State.loading)
+      assert.is_true(#captured_urls > 0)
+      -- First request MUST jump directly to pid=10 (1000 / 100 = 10)
+      assert.is_truthy(captured_urls[1]:find("pid=10"))
+      -- Verify we got 200 posts
+      assert.are.equal(200, #state.State.posts)
+
+      download.curl_async = orig_curl_async
+    end)
+
+    it("Phase 2: restore_history re-executes search when State.posts is empty", function()
+      local history = require("gelbooru.core.history")
+      ui.open()
+
+      local search_executed = nil
+      local orig_execute = api.execute_search
+      api.execute_search = function(q, opts)
+        search_executed = q
+        state.State.posts = {}
+      end
+
+      -- Push history 1 with empty posts
+      state.State.query = "obscure_tag | sort:score:10"
+      state.State.posts = {}
+      history.push_history("obscure_tag | sort:score:10")
+      history.save_current_history()
+
+      -- Now push history 2 with posts
+      history.push_history("miku")
+      state.State.query = "miku"
+      state.State.posts = { { id = "1", file_url = "/1.jpg" } }
+      history.save_current_history()
+
+      assert.are.equal(2, #state.State.history)
+      assert.are.equal(2, state.State.history_idx)
+
+      -- Restore previous history (idx 1, which had empty posts)
+      history.restore_history(1)
+
+      -- Should have called api.execute_search instead of api.fetch(1)
+      assert.are.equal("obscure_tag | sort:score:10", search_executed)
+      -- History length should remain 2 (not duplicated)
+      assert.are.equal(2, #state.State.history)
+      assert.are.equal(1, state.State.history_idx)
+
+      api.execute_search = orig_execute
+    end)
+
+    it("Phase 2: autocomplete does not trigger API lookup for syntax directives", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_curl_async = download.curl_async
+      local tags_api_called = false
+
+      download.curl_async = function(url, cb)
+        if url:find("s=tag") then
+          tags_api_called = true
+        end
+        orig_curl_async(url, cb)
+      end
+
+      local ac = require("gelbooru.ui.autocomplete")
+      -- Directly test autocomplete with directives
+      ac.update_autocomplete("sort:s")
+      ac.update_autocomplete("order:r")
+      ac.update_autocomplete("limit:1")
+      ac.update_autocomplete("offset:1")
+
+      vim.wait(100, function() return false end, 20)
+      assert.is_false(tags_api_called)
+
+      download.curl_async = orig_curl_async
+    end)
+
+    it("Phase 2: autocomplete preserves leading delimiter in submit_input and Space commit", function()
+      ui.open()
+      state.State.tags_by_name["hatsune_miku"] = { name = "hatsune_miku", count = 5000, type = "character" }
+      local ac = require("gelbooru.ui.autocomplete")
+
+      local function get_cb(buf, mode, key)
+        local maps = vim.api.nvim_buf_get_keymap(buf, mode)
+        for _, m in ipairs(maps) do
+          if m.lhs == key or (key == "<Space>" and m.lhs == " ") then return m.callback end
+        end
+      end
+
+      -- 1. Test <CR> submit_input with leading pipe delimiter
+      vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, -1, false, { "|hatsune" })
+      vim.api.nvim_win_set_cursor(state.UI.wins.input, { 1, 8 })
+      ac.update_autocomplete("|hatsune")
+
+      state.State.autocomplete_navigated = true
+      state.State.autocomplete_cur = 1
+
+      local cr_cb = get_cb(state.UI.bufs.input, "n", "<CR>")
+      assert.is_not_nil(cr_cb)
+      cr_cb()
+
+      assert.are.equal("|hatsune_miku", state.State.query)
+
+      -- 2. Test <Space> auto-commit with leading minus delimiter
+      vim.api.nvim_buf_set_lines(state.UI.bufs.input, 0, -1, false, { "-hatsune_miku" })
+      vim.api.nvim_win_set_cursor(state.UI.wins.input, { 1, 13 })
+      ac.update_autocomplete("-hatsune_miku")
+      state.State.autocomplete_cur = 1
+
+      local sp_cb = get_cb(state.UI.bufs.input, "i", "<Space>")
+      assert.is_not_nil(sp_cb)
+      sp_cb()
+
+      local committed_line = vim.api.nvim_buf_get_lines(state.UI.bufs.input, 0, 1, false)[1]
+      assert.are.equal("-hatsune_miku ", committed_line)
+    end)
   end)
 end)

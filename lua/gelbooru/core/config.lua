@@ -37,6 +37,16 @@ M.TAG_BADGES = {
   [6] = "Meme",
 }
 
+M.VALID_MEDIA_EXTS = {
+  ["jpg"] = true,
+  ["jpeg"] = true,
+  ["png"] = true,
+  ["gif"] = true,
+  ["webp"] = true,
+  ["mp4"] = true,
+  ["webm"] = true,
+}
+
 M.META_TAGS = {
   { n = "id:", c = 0, t = 5 },
   { n = "sort:score", c = 0, t = 5 },
