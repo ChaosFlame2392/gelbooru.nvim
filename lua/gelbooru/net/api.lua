@@ -68,6 +68,9 @@ function M.normalize_remote_query(tags_str)
     return { "" }
   end
 
+  local parse_mod = require("gelbooru.query.parse")
+  tags_str = parse_mod.normalize_modifier_spacing(tags_str) or tags_str
+
   local tokens = {}
   for tok in tags_str:gmatch("%S+") do
     table.insert(tokens, tok)
@@ -305,8 +308,17 @@ function M.fetch(direction, is_explicit)
       if cache_key and #posts > 0 then
         set_session_cache(cache_key, posts)
       end
+      local existing_ids = {}
+      for _, ep in ipairs(State.posts) do
+        local epid = tostring(ep.id or ep.file_url or "")
+        if epid ~= "" then existing_ids[epid] = true end
+      end
       for _, p in ipairs(posts) do
-        table.insert(State.posts, p)
+        local pid = tostring(p.id or p.file_url or "")
+        if pid == "" or not existing_ids[pid] then
+          if pid ~= "" then existing_ids[pid] = true end
+          table.insert(State.posts, p)
+        end
       end
       State.page = State.page + 1
       history.save_current_history()
@@ -402,8 +414,17 @@ function M.fetch(direction, is_explicit)
           if cache_key and #deduped > 0 then
             set_session_cache(cache_key, deduped)
           end
+          local existing_ids = {}
+          for _, ep in ipairs(State.posts) do
+            local epid = tostring(ep.id or ep.file_url or "")
+            if epid ~= "" then existing_ids[epid] = true end
+          end
           for _, p in ipairs(deduped) do
-            table.insert(State.posts, p)
+            local pid = tostring(p.id or p.file_url or "")
+            if pid == "" or not existing_ids[pid] then
+              if pid ~= "" then existing_ids[pid] = true end
+              table.insert(State.posts, p)
+            end
           end
           State.page = State.page + 1
           history.save_current_history()
@@ -433,6 +454,11 @@ function M.execute_search(query, opts)
 
   if State.torn_down then
     return
+  end
+
+  if type(query) == "string" then
+    local parse_mod = require("gelbooru.query.parse")
+    query = parse_mod.normalize_modifier_spacing(query) or query
   end
 
   if query and util.is_local_query(query) then
@@ -626,7 +652,7 @@ function M.execute_piped_search(query, pipe)
       end
     end
   end
-  remote_tags = M.normalize_remote_tags(remote_tags)
+  local branches = M.normalize_remote_query(remote_tags)
 
   local nonce_param = ""
   if remote_tags:lower():find("sort:random", 1, true) or remote_tags:lower():find("order:random", 1, true) then
@@ -637,6 +663,9 @@ function M.execute_piped_search(query, pipe)
 
   State.loading = true
   local candidate_pool = {}
+
+  local pool_cache_key = "pool::" .. table.concat(branches, "||")
+  local cached_pool = get_session_cache(pool_cache_key)
 
   local function finish_pipeline()
     if State.search_epoch ~= epoch or State.torn_down then
@@ -651,6 +680,10 @@ function M.execute_piped_search(query, pipe)
       util.set_lines(state.UI.bufs.img, { "  No posts found" })
       util.set_lines(state.UI.bufs.meta, {})
       return
+    end
+
+    if #candidate_pool > 0 and pool_cache_key then
+      set_session_cache(pool_cache_key, candidate_pool)
     end
 
     -- Execute subsequent pipeline stages in memory:
@@ -703,6 +736,17 @@ function M.execute_piped_search(query, pipe)
     end
   end
 
+  if cached_pool and #cached_pool > 0 then
+    if #cached_pool >= pool_target then
+      candidate_pool = vim.deepcopy(cached_pool)
+      finish_pipeline()
+      return
+    elseif not (remote_tags:lower():find("sort:random", 1, true) or remote_tags:lower():find("order:random", 1, true)) then
+      candidate_pool = vim.deepcopy(cached_pool)
+      pid = start_pid + math.floor(#candidate_pool / page_size)
+    end
+  end
+
   local function fetch_batch()
     if State.search_epoch ~= epoch or State.torn_down then
       return
@@ -717,79 +761,83 @@ function M.execute_piped_search(query, pipe)
     local limit = math.min(page_size, remaining)
     ui.set_status(string.format("Fetching candidate pool (%d/%d)…", #candidate_pool, pool_target))
 
-    local url = string.format(
-      "%s&tags=%s&limit=%d&pid=%d%s%s",
-      config.options.api_base,
-      util.url_encode(remote_tags),
-      limit,
-      pid,
-      util.auth_qs(),
-      nonce_param
-    )
+    local batch_posts = {}
+    local completed = 0
+    local any_ok = false
 
-    download.curl_async(url, function(body)
-      if State.search_epoch ~= epoch then
+    local function on_batch_done()
+      if State.search_epoch ~= epoch or State.torn_down then
         return
       end
-      if State.torn_down or not (state.UI.wins.frame and vim.api.nvim_win_is_valid(state.UI.wins.frame)) then
+      if not any_ok and #candidate_pool == 0 then
         State.loading = false
+        ui.set_status("Error: API request failed")
+        ui.render_list()
+        util.set_lines(state.UI.bufs.img, { "  Error: API request failed" })
+        util.set_lines(state.UI.bufs.meta, {})
         return
       end
 
-      if not body then
-        if #candidate_pool > 0 then
-          finish_pipeline()
-        else
-          State.loading = false
-          ui.set_status("Error: API request failed")
-          ui.render_list()
-          util.set_lines(state.UI.bufs.img, { "  Error: API request failed" })
-          util.set_lines(state.UI.bufs.meta, {})
+      -- Deduplicate new posts against candidate_pool by ID
+      local seen_pool_ids = {}
+      for _, cp in ipairs(candidate_pool) do
+        local cpid = tostring(cp.id or cp.file_url or "")
+        if cpid ~= "" then seen_pool_ids[cpid] = true end
+      end
+      local added_count = 0
+      for _, p in ipairs(batch_posts) do
+        local pid_str = tostring(p.id or p.file_url or "")
+        if pid_str == "" or not seen_pool_ids[pid_str] then
+          if pid_str ~= "" then seen_pool_ids[pid_str] = true end
+          table.insert(candidate_pool, p)
+          added_count = added_count + 1
         end
-        return
       end
 
-      local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
-      if not ok or not data or not data.post then
-        if #candidate_pool > 0 then
-          finish_pipeline()
-        else
-          State.loading = false
-          ui.set_status("No results" .. (query ~= "" and (" for: " .. query) or ""))
-          ui.render_list()
-          history.save_current_history()
-          util.set_lines(state.UI.bufs.img, { "  No posts found" })
-          util.set_lines(state.UI.bufs.meta, {})
-        end
-        return
-      end
-
-      local posts = ensure_array(data.post)
-      if #posts == 0 then
-        if #candidate_pool > 0 then
-          finish_pipeline()
-        else
-          State.loading = false
-          ui.set_status("No results" .. (query ~= "" and (" for: " .. query) or ""))
-          ui.render_list()
-          history.save_current_history()
-          util.set_lines(state.UI.bufs.img, { "  No posts found" })
-          util.set_lines(state.UI.bufs.meta, {})
-        end
-        return
-      end
-
-      for _, p in ipairs(posts) do
-        table.insert(candidate_pool, p)
-      end
-
-      if #posts < limit or #candidate_pool >= pool_target then
+      if #candidate_pool >= pool_target or #batch_posts == 0 or added_count == 0 then
         finish_pipeline()
       else
         pid = pid + 1
         fetch_batch()
       end
-    end)
+    end
+
+    for _, branch in ipairs(branches) do
+      local url = string.format(
+        "%s&tags=%s&limit=%d&pid=%d%s%s",
+        config.options.api_base,
+        util.url_encode(branch),
+        limit,
+        pid,
+        util.auth_qs(),
+        nonce_param
+      )
+
+      download.curl_async(url, function(body)
+        if State.search_epoch ~= epoch then
+          return
+        end
+        if State.torn_down or not (state.UI.wins.frame and vim.api.nvim_win_is_valid(state.UI.wins.frame)) then
+          State.loading = false
+          return
+        end
+        completed = completed + 1
+        if body then
+          any_ok = true
+          local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
+          if ok and data and data.post then
+            local p_list = ensure_array(data.post)
+            for _, p in ipairs(p_list) do
+              table.insert(batch_posts, p)
+            end
+          end
+        end
+
+        if completed == #branches then
+          on_batch_done()
+        end
+      end)
+    end
   end
 
   fetch_batch()

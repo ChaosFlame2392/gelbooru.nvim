@@ -136,6 +136,11 @@ local function attach_defensive_keymaps(buf)
     end
   end
 
+  util.keymap(buf, "n", "<LeftMouse>", go_list)
+  util.keymap(buf, "n", "<2-LeftMouse>", go_list)
+  util.keymap(buf, "n", "<3-LeftMouse>", go_list)
+  util.keymap(buf, "n", "<4-LeftMouse>", go_list)
+  util.keymap(buf, "n", "<RightMouse>", go_list)
   util.keymap(buf, "n", "j", function() nav(1) end)
   util.keymap(buf, "n", "k", function() nav(-1) end)
   util.keymap(buf, "n", "gg", function() nav("gg") end)

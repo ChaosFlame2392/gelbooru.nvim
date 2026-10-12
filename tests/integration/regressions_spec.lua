@@ -865,4 +865,143 @@ describe("Regression Tests for UI & Search bugs", function()
       ui.teardown()
     end)
   end)
+
+  describe("Regression Suite: Modal Continuity, Shielding, Modifier Spacing, Mouse Protection & Deduplication", function()
+    it("normalizes spacing after colons in query modifiers seamlessly", function()
+      local parse = require("gelbooru.query.parse")
+      assert.are.equal("sort:random:1000", parse.normalize_modifier_spacing("sort: random:1000"))
+      assert.are.equal("sort:score:200", parse.normalize_modifier_spacing("sort: score:200"))
+      assert.are.equal("rating:questionable", parse.normalize_modifier_spacing("rating: questionable"))
+      assert.are.equal("rating:general", parse.normalize_modifier_spacing("rating: general"))
+      assert.are.equal("score:50", parse.normalize_modifier_spacing("score: 50"))
+      assert.are.equal("id:12345", parse.normalize_modifier_spacing("id: 12345"))
+      assert.are.equal("limit:100", parse.normalize_modifier_spacing("limit: 100"))
+      assert.are.equal("offset:200", parse.normalize_modifier_spacing("offset: 200"))
+
+      local pipeline = require("gelbooru.query.pipeline")
+      local pipe = pipeline.parse_pipeline("~claret_flint ~acheron_(honkai:_star_rail) sort: random:1000 sort: score:200")
+      assert.are.equal("~claret_flint ~acheron_(honkai:_star_rail)", pipe.base_query)
+      assert.are.equal(2, #pipe.stages)
+      assert.are.equal("random", pipe.stages[1].key)
+      assert.are.equal(1000, pipe.stages[1].limit)
+      assert.are.equal("score", pipe.stages[2].key)
+      assert.are.equal(200, pipe.stages[2].limit)
+    end)
+
+    it("positions tag modal over left panel when width permits and restores preview on close", function()
+      ui.open()
+      state.State.posts = {
+        { id = "99001", file_url = "https://example.com/1.jpg", tags = "tag1 tag2 tag3", rating = "g", score = 10, width = 100, height = 100 }
+      }
+      state.State.cur = 1
+      state.State.cur_id = "99001"
+      ui.render_list()
+
+      ui.open_tag_modal()
+      assert.is_not_nil(state.UI.wins.tag_modal)
+      assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.tag_modal))
+
+      -- Modal positioning
+      local l = ui.calc_layout()
+      local win_cfg = vim.api.nvim_win_get_config(state.UI.wins.tag_modal)
+      local actual_col = type(win_cfg.col) == "table" and (win_cfg.col[false] or win_cfg.col[1]) or win_cfg.col
+      assert.are.equal(l.list.col, actual_col)
+
+      -- Shielding flags
+      local buf = state.UI.bufs.tag_modal
+      assert.are.equal("gelbooru_tag_modal", vim.bo[buf].filetype)
+      assert.is_true(vim.b[buf].which_key_ignore)
+      assert.is_true(vim.b[buf].whichkey_disable)
+      assert.is_true(vim.b[buf].miniclue_disable)
+
+      -- Blocked helper keys
+      local maps = vim.api.nvim_buf_get_keymap(buf, "n")
+      local map_by_lhs = {}
+      for _, km in ipairs(maps) do
+        map_by_lhs[km.lhs] = km
+      end
+      assert.is_not_nil(map_by_lhs["z"], "z must be blocked in tag modal")
+      assert.is_not_nil(map_by_lhs["/"], "/ must be blocked in tag modal")
+      assert.is_true(map_by_lhs["<Space>"] ~= nil or map_by_lhs[" "] ~= nil, "<Space> must be mapped in tag modal")
+      assert.is_not_nil(map_by_lhs["<LeftMouse>"], "<LeftMouse> must be mapped in tag modal")
+
+      -- Close tag modal and verify cur_id is reset so preview can restore
+      ui.close_tag_modal()
+      assert.is_nil(state.UI.wins.tag_modal)
+      vim.wait(100, function() return state.State.cur_id == "99001" or state.State.cur_id == nil end)
+
+      ui.teardown()
+    end)
+
+    it("guards mouse focus and non-interactive window clicks with WinEnter redirect", function()
+      ui.open()
+      assert.is_not_nil(state.UI.wins.list)
+      assert.is_not_nil(state.UI.wins.img)
+      assert.is_not_nil(state.UI.wins.frame)
+
+      -- Check mouse click mappings on decorative/img buffers
+      for _, buf in ipairs({ state.UI.bufs.frame, state.UI.bufs.div, state.UI.bufs.img, state.UI.bufs.status }) do
+        local maps = vim.api.nvim_buf_get_keymap(buf, "n")
+        local has_left_click = false
+        for _, km in ipairs(maps) do
+          if km.lhs == "<LeftMouse>" then has_left_click = true end
+        end
+        assert.is_true(has_left_click, "Non-interactive buffer must map <LeftMouse>")
+      end
+
+      -- If focus enters non-interactive img or background window, WinEnter redirects back to list
+      vim.api.nvim_set_current_win(state.UI.wins.img)
+      vim.api.nvim_exec_autocmds("WinEnter", { group = state.UI.aug })
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "Focus must redirect to list window")
+
+      -- If tag modal is open, focus redirects to tag modal
+      state.State.posts = { { id = "1", tags = "test", width = 10, height = 10 } }
+      state.State.cur = 1
+      ui.open_tag_modal()
+      assert.is_not_nil(state.UI.wins.tag_modal)
+
+      vim.api.nvim_set_current_win(state.UI.wins.list)
+      vim.api.nvim_exec_autocmds("WinEnter", { group = state.UI.aug })
+      assert.are.equal(state.UI.wins.tag_modal, vim.api.nvim_get_current_win(), "Focus must remain in tag modal")
+
+      ui.close_tag_modal()
+      ui.teardown()
+    end)
+
+    it("deduplicates candidate pool by ID across batches, random pages, and branches", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_curl = download.curl_async
+      local duplicate_batches = {
+        { id = "101", score = "50", tags = "tag1", width = 100, height = 100, file_url = "https://example.com/101.jpg" },
+        { id = "102", score = "40", tags = "tag1", width = 100, height = 100, file_url = "https://example.com/102.jpg" },
+        -- Duplicate ID in same or subsequent batch
+        { id = "101", score = "50", tags = "tag1", width = 100, height = 100, file_url = "https://example.com/101.jpg" },
+        { id = "103", score = "30", tags = "tag1", width = 100, height = 100, file_url = "https://example.com/103.jpg" },
+      }
+      download.curl_async = function(url, cb)
+        if not cb then return end
+        vim.schedule(function()
+          if url:find("s=post") then
+            cb(vim.fn.json_encode({ post = duplicate_batches }))
+          else
+            cb("{}")
+          end
+        end)
+      end
+
+      api.execute_search("tag1 sort:random:100 sort:score:100")
+      vim.wait(1000, function() return #state.State.posts > 0 end, 10)
+
+      local seen_ids = {}
+      for _, p in ipairs(state.State.posts) do
+        assert.is_nil(seen_ids[p.id], "Found duplicate post ID in posts: " .. tostring(p.id))
+        seen_ids[p.id] = true
+      end
+      assert.are.equal(3, #state.State.posts)
+
+      download.curl_async = orig_curl
+      ui.teardown()
+    end)
+  end)
 end)

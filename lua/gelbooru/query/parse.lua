@@ -28,10 +28,27 @@ end
 
 M.normalize_rating = normalize_rating
 
+--- Normalizes spaces after colon in query modifiers like `sort: random:1000` -> `sort:random:1000`.
+---@param q string|nil
+---@return string|nil
+local function normalize_modifier_spacing(q)
+  if not q or type(q) ~= "string" then return q end
+  return q:gsub("([~%-]?)([Ss][Oo][Rr][Tt]):%s+", "%1%2:")
+          :gsub("([~%-]?)([Oo][Rr][Dd][Ee][Rr]):%s+", "%1%2:")
+          :gsub("([~%-]?)([Ss][Cc][Oo][Rr][Ee]):%s+", "%1%2:")
+          :gsub("([~%-]?)([Rr][Aa][Tt][Ii][Nn][Gg]):%s+", "%1%2:")
+          :gsub("([~%-]?)([Ii][Dd]):%s+", "%1%2:")
+          :gsub("([~%-]?)([Ll][Ii][Mm][Ii][Tt]):%s+", "%1%2:")
+          :gsub("([~%-]?)([Oo][Ff][Ff][Ss][Ee][Tt]):%s+", "%1%2:")
+end
+
+M.normalize_modifier_spacing = normalize_modifier_spacing
+
 --- Tokenizes raw query string into token objects, preserving quotes and `local:"..."` prefixes.
 ---@param str string
 ---@return table[]
 local function tokenize_query(str)
+  str = normalize_modifier_spacing(str) or ""
   local tokens = {}
   local i = 1
   local len = #str
@@ -419,6 +436,7 @@ M.parse_sort_token = parse_sort_token
 ---@param tag_str string|nil
 ---@return table
 local function _parse_tags_internal(tag_str)
+  tag_str = normalize_modifier_spacing(tag_str)
   local filter = {
     positive_tags = {},
     negative_tags = {},

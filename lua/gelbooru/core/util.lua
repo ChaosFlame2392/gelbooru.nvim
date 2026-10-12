@@ -265,6 +265,9 @@ function M.shuffle(list)
   end
   local uv = vim.uv or vim.loop
   math.randomseed(os.time() + (uv.hrtime() % 1000000))
+  math.random()
+  math.random()
+  math.random()
   for i = #list, 2, -1 do
     local j = math.random(i)
     list[i], list[j] = list[j], list[i]

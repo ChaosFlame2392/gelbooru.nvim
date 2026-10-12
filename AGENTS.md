@@ -62,8 +62,8 @@ When viewing posts, the post list window is focused with `cursorline` enabled:
 | `m` | Toggle metadata panel | Toggles `State.show_meta` boolean. Recalculates floating layout dimensions via `calc_layout()`, hides or displays the metadata window (`wins.meta`) and divider (`wins.hdiv`), and adjusts preview canvas height. |
 | `M` | Focus metadata inspector | Ensures `State.show_meta = true`, recalculates layout, and transfers window focus to `UI.wins.meta` with `cursorline = true` for deep tag inspection. |
 | `u` | Quick Artist Search | Single-key artist lookup. Extracts the artist tag of the focused post and immediately populates and queries it in the search bar. |
-| `t` / `T` | Tag Picker Modal | Opens centered floating modal (`wins.tag_modal`) displaying badged tags of active post with `<Space>` inclusion toggle (`[x]`), `-`/`x` exclusion toggle (`[-]`), `a` toggle all, `y` yank tag, and `<CR>` search commit (excluded tags are automatically prefixed with `-`). Preserves and restores focus to originating window (list or meta). |
-| `d` / `D` | Delete local file | Opens centered floating confirmation modal (`j`/`k` to navigate between Yes and Cancel, `<CR>` to confirm, `y`/`n`/`<Esc>` shortcuts). Stages the file for deferred deletion in `State.pending_deletions`. Immediately removes `[SAVED]` badge from list while keeping preview canvas and metadata fully rendered. Physical unlinking is deferred to `ui.teardown()`. Pressing `<CR>` before exit cancels deferred deletion and restores `[SAVED]` without network re-download. |
+| `t` / `T` | Tag Picker Modal | Opens floating modal (`wins.tag_modal`) positioned over the left post list panel (`col = l.list.col`) so the image preview canvas remains fully visible. Displays badged tags of active post with `<Space>` inclusion toggle (`[x]`), `-`/`x` exclusion toggle (`[-]`), `a` toggle all, `y` yank tag, double-click `<2-LeftMouse>` toggle, and `<CR>` search commit. Shielded against `which-key`, `mini.clue`, and folding key leaks (`which_key_ignore`, `filetype = "gelbooru_tag_modal"`). On dismiss (`q`/`<Esc>`), unconditionally restores image preview canvas and resets `cur_id`. Preserves and restores focus to originating window (list or meta). |
+| `d` / `D` | Delete local file | Opens centered floating confirmation modal (`j`/`k` to navigate between Yes and Cancel, `<CR>` to confirm, `y`/`n`/`<Esc>` shortcuts). Stages the file for deferred deletion in `State.pending_deletions`. Immediately removes `[SAVED]` badge from list while keeping preview canvas and metadata fully rendered. Physical unlinking is deferred to `ui.teardown()`. Pressing `<CR>` before exit cancels deferred deletion and restores `[SAVED]` without network re-download. Restores preview canvas upon modal exit. |
 | `o` | Open post web page | Spawns system default browser with full post page (`https://gelbooru.com/index.php?page=post&s=view&id=...`). |
 | `O` | Open locally with media viewer | Opens media file directly in system media viewer (`open` on macOS honoring Finder default such as IINA, `xdg-open` on Linux, or user-configured `config.options.media_player`). If post is not downloaded yet, automatically downloads it to `save_dir` first, then opens it locally. |
 | `<` / `>` | Adjust explorer width | Increments or decrements post list width ratio (`State.list_width_ratio`, clamped 0.10–0.40, default 0.25), dynamically resizing image canvas and nudging placement. |
@@ -86,7 +86,7 @@ Entered via `M` from the list window:
 | `q`, `<Esc>`, `M` | Return to post list | Restores focus to `UI.wins.list` without altering scroll position. |
 | `m` | Hide & return to list | Sets `State.show_meta = false`, recalculates layout to hide meta panel, and returns focus to `UI.wins.list`. |
 | `u` | Quick Artist Search | Immediately queries the artist of the active post in the search bar. |
-| `t` / `T` | Tag Picker Modal | Opens centered floating modal displaying badged tags of active post. |
+| `t` / `T` | Tag Picker Modal | Opens floating modal displaying badged tags of active post over the left panel, preserving image visibility. |
 | `d` / `D` | Delete local file | Prompts confirmation dialog to delete local file while maintaining viewer focus. |
 | `/`, `i`, `I`, `a`, `A`, `s`, `S` | Jump to search | Transitions directly into Search Mode in the input bar. |
 | `o` | Open web page | Opens full post URL (`https://gelbooru.com/index.php?page=post&s=view&id=...`) in default browser. |
@@ -109,8 +109,8 @@ When typing in the query bar, the autocomplete window (`wins.ac`) displays match
 
 ### 2.4 Mouse Interaction & Boundary Protection
 - **Mouse Focus**: Mouse clicks are supported to easily switch focus between interactive windows (`input`, `list`, `meta`). On teardown, original `vim.o.mouse` setting is strictly restored.
-- **Window Focus Guards**: Decorative dividers (`frame`, `div`, `vdiv`, `hdiv`, `status`, `ac`) have `focusable = false`.
-- **Defensive Boundary Keymaps**: Even if terminal events land in non-interactive buffers, pressing `/` or `i` transitions to search mode, and `q` or `<Esc>` returns to the post list.
+- **Window Focus Guards**: Decorative dividers (`frame`, `div`, `vdiv`, `hdiv`, `status`, `ac`, `img`) have `focusable = false`. A global `WinEnter` autocommand redirects any focus landing on non-interactive floats or underlying background editor windows back to `UI.wins.list` (or back to the active modal if `tag_modal` or `confirm_modal` is open).
+- **Defensive Boundary Keymaps**: Mouse clicks (`<LeftMouse>`, `<2-LeftMouse>`, `<RightMouse>`) on non-interactive buffers (`frame`, `div`, `vdiv`, `hdiv`, `status`, `ac`, `img`) immediately return focus to the post list. Pressing `/` or `i` transitions to search mode, and `q` or `<Esc>` returns to the post list.
 
 ---
 

@@ -868,6 +868,12 @@ function M.close_tag_modal()
   end
   UI.tag_modal_prev_win = nil
   M.set_status()
+  vim.schedule(function()
+    if not state.State.torn_down then
+      state.State.cur_id = nil
+      M.render_preview(false)
+    end
+  end)
 end
 
 function M.open_tag_modal()
@@ -945,12 +951,24 @@ function M.open_tag_modal()
   local modal_w = math.min(max_avail_w, math.max(20, math.min(max_avail_w, max_len + 6)))
   local modal_h = math.max(3, math.min(#items, math.floor(vim.o.lines * 0.7)))
   local modal_row = math.max(1, math.floor((vim.o.lines - modal_h) / 2))
-  local modal_col = math.max(1, math.floor((vim.o.columns - modal_w) / 2))
+  local l = M.calc_layout()
+  local modal_col
+  if not State.zen_mode and l.list and l.list.width and modal_w <= (l.list.width + 6) then
+    modal_col = math.max(1, l.list.col)
+  else
+    modal_col = math.max(1, math.floor((vim.o.columns - modal_w) / 2))
+  end
 
   UI.bufs.tag_modal = vim.api.nvim_create_buf(false, true)
   vim.bo[UI.bufs.tag_modal].buftype = "nofile"
   vim.bo[UI.bufs.tag_modal].bufhidden = "wipe"
   vim.bo[UI.bufs.tag_modal].modifiable = true
+  vim.bo[UI.bufs.tag_modal].filetype = "gelbooru_tag_modal"
+  pcall(function()
+    vim.b[UI.bufs.tag_modal].which_key_ignore = true
+    vim.b[UI.bufs.tag_modal].whichkey_disable = true
+    vim.b[UI.bufs.tag_modal].miniclue_disable = true
+  end)
 
   local function render_modal_lines()
     if not UI.bufs.tag_modal or not vim.api.nvim_buf_is_valid(UI.bufs.tag_modal) then
@@ -987,6 +1005,17 @@ function M.open_tag_modal()
 
   local function tmap(key, fn)
     util.keymap(UI.bufs.tag_modal, "n", key, fn)
+  end
+
+  -- Block helper popups, folding, and normal-mode editing in modal
+  local block_keys = {
+    "z", "Z", "v", "V", "<C-v>", "c", "C", "d", "D", "p", "P",
+    "r", "R", "s", "S", "i", "I", "o", "O", "u", "U", "w", "W",
+    "b", "B", "e", "E", "m", "M", "t", "T", "h", "l", "f", "F",
+    ";", ":", "'", '"', "<BS>", "<Del>", "/", "?"
+  }
+  for _, bk in ipairs(block_keys) do
+    tmap(bk, function() end)
   end
 
   local function nav_down()
@@ -1027,6 +1056,21 @@ function M.open_tag_modal()
   end
   tmap("<Space>", toggle_cur)
   tmap(" ", toggle_cur)
+  tmap("<Leader>", toggle_cur)
+  tmap("<Leader>/", function() end)
+  tmap("<Localleader>", function() end)
+
+  tmap("<LeftMouse>", function()
+    vim.schedule(function()
+      if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
+        local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
+        if cur > #items then
+          pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { math.max(1, #items), 0 })
+        end
+      end
+    end)
+  end)
+  tmap("<2-LeftMouse>", toggle_cur)
 
   local function toggle_exclude()
     if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
@@ -1161,6 +1205,12 @@ function M.close_confirm_modal()
     pcall(vim.api.nvim_set_current_win, UI.wins.list)
   end
   UI.confirm_prev_win = nil
+  vim.schedule(function()
+    if not state.State.torn_down then
+      state.State.cur_id = nil
+      M.render_preview(false)
+    end
+  end)
 end
 
 function M.open_confirm_modal(filename, on_confirm)
@@ -1190,6 +1240,22 @@ function M.open_confirm_modal(filename, on_confirm)
   vim.bo[UI.bufs.confirm_modal].buftype = "nofile"
   vim.bo[UI.bufs.confirm_modal].bufhidden = "wipe"
   vim.bo[UI.bufs.confirm_modal].modifiable = true
+  vim.bo[UI.bufs.confirm_modal].filetype = "gelbooru_confirm_modal"
+  pcall(function()
+    vim.b[UI.bufs.confirm_modal].which_key_ignore = true
+    vim.b[UI.bufs.confirm_modal].whichkey_disable = true
+    vim.b[UI.bufs.confirm_modal].miniclue_disable = true
+  end)
+
+  local block_keys = {
+    "z", "Z", "v", "V", "<C-v>", "c", "C", "d", "D", "p", "P",
+    "r", "R", "s", "S", "i", "I", "o", "O", "u", "U", "w", "W",
+    "b", "B", "e", "E", "m", "M", "t", "T", "h", "l", "f", "F",
+    ";", ":", "'", '"', "<BS>", "<Del>", "/", "?", "<Space>", " "
+  }
+  for _, bk in ipairs(block_keys) do
+    util.keymap(UI.bufs.confirm_modal, "n", bk, function() end)
+  end
 
   local choice = 1 -- 1 = Yes, 2 = Cancel
 
@@ -1532,6 +1598,39 @@ function M.ensure_ui()
     callback = M.teardown,
   })
 
+  vim.api.nvim_create_autocmd("WinEnter", {
+    group = UI.aug,
+    callback = function()
+      if State.torn_down or not (UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame)) then
+        return
+      end
+      local cur_win = vim.api.nvim_get_current_win()
+      if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
+        if cur_win ~= UI.wins.tag_modal then
+          pcall(vim.api.nvim_set_current_win, UI.wins.tag_modal)
+        end
+        return
+      end
+      if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
+        if cur_win ~= UI.wins.confirm_modal then
+          pcall(vim.api.nvim_set_current_win, UI.wins.confirm_modal)
+        end
+        return
+      end
+
+      if cur_win == UI.wins.list or cur_win == UI.wins.input then
+        return
+      end
+      if UI.wins.meta and vim.api.nvim_win_is_valid(UI.wins.meta) and cur_win == UI.wins.meta then
+        return
+      end
+
+      if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+        pcall(vim.api.nvim_set_current_win, UI.wins.list)
+      end
+    end,
+  })
+
   vim.api.nvim_create_autocmd("CursorMoved", {
     group = UI.aug,
     buffer = UI.bufs.list,
@@ -1816,8 +1915,12 @@ function M.ensure_ui()
   mm("<CR>", api.save_current)
 
   -- Defensive keymaps on non-interactive buffers in case mouse/focus lands in them
+  local mouse_clicks = { "<LeftMouse>", "<2-LeftMouse>", "<3-LeftMouse>", "<4-LeftMouse>", "<RightMouse>" }
   for _, buf in ipairs({ UI.bufs.frame, UI.bufs.div, UI.bufs.vdiv, UI.bufs.hdiv, UI.bufs.img, UI.bufs.status, UI.bufs.ac }) do
     if buf and vim.api.nvim_buf_is_valid(buf) then
+      for _, click in ipairs(mouse_clicks) do
+        util.keymap(buf, "n", click, return_to_list)
+      end
       for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
         util.keymap(buf, "n", k, M.enter_search)
       end

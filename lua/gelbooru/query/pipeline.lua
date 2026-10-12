@@ -76,6 +76,7 @@ function M.parse_pipeline(query_or_tags)
     return { base_query = "", stages = {} }
   end
 
+  query_or_tags = parse.normalize_modifier_spacing(query_or_tags) or query_or_tags
   local s = vim.trim(query_or_tags)
   if s == "" then
     return { base_query = "", stages = {} }
