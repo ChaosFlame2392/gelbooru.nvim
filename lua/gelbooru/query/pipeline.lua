@@ -141,6 +141,11 @@ function M.parse_pipeline(query_or_tags)
   if has_pipe then
     if #stages > 0 then
       is_pipeline = true
+    else
+      return {
+        base_query = table.concat(non_stage_tokens, " "),
+        stages = {},
+      }
     end
   else
     if #stages > 1 then

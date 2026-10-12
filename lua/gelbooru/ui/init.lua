@@ -45,6 +45,7 @@ function M.teardown()
   if UI.save_discovered_timer or #State.discovered > 0 then
     pcall(tags.save_discovered_now)
   end
+  UI.save_discovered_timer = util.close_timer(UI.save_discovered_timer)
 
   pcall(function()
     require("gelbooru.local.indexer").stop()
@@ -878,7 +879,10 @@ function M.open_tag_modal()
     return
   end
 
-  UI.tag_modal_prev_win = vim.api.nvim_get_current_win()
+  local cur_win = vim.api.nvim_get_current_win()
+  if cur_win ~= UI.wins.tag_modal and cur_win ~= UI.wins.confirm_modal then
+    UI.tag_modal_prev_win = cur_win
+  end
 
   local seen = {}
   local items = {}
@@ -1156,11 +1160,15 @@ function M.close_confirm_modal()
   elseif UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
     pcall(vim.api.nvim_set_current_win, UI.wins.list)
   end
+  UI.confirm_prev_win = nil
 end
 
 function M.open_confirm_modal(filename, on_confirm)
   local UI = state.UI
-  UI.confirm_prev_win = vim.api.nvim_get_current_win()
+  local cur_win = vim.api.nvim_get_current_win()
+  if cur_win ~= UI.wins.confirm_modal and cur_win ~= UI.wins.tag_modal then
+    UI.confirm_prev_win = cur_win
+  end
 
   if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
     pcall(vim.api.nvim_win_close, UI.wins.confirm_modal, true)
@@ -1172,7 +1180,8 @@ function M.open_confirm_modal(filename, on_confirm)
   end
 
   local disp_fn = vim.fn.fnamemodify(filename, ":t")
-  local modal_w = math.max(46, math.min(math.max(10, vim.o.columns - 4), #disp_fn + 22))
+  local max_avail_w = math.max(10, vim.o.columns - 4)
+  local modal_w = math.min(max_avail_w, math.max(20, math.min(max_avail_w, math.max(46, #disp_fn + 22))))
   local modal_h = 5
   local modal_row = math.max(1, math.floor((vim.o.lines - modal_h) / 2))
   local modal_col = math.max(1, math.floor((vim.o.columns - modal_w) / 2))
@@ -1316,6 +1325,7 @@ function M.delete_current()
     }
     p._pending_delete = true
     p._local_file_path = local_path
+    p._was_local = (p.is_local == true)
 
     local id_num = p.id and tonumber(p.id)
     if id_num then
@@ -1575,7 +1585,7 @@ function M.ensure_ui()
   end)
   local function force_refresh()
     local p = State.posts[State.cur]
-    if p and p.is_local and p.id then
+    if p and p.id then
       local meta_path = util.meta_cache_path(p.id)
       if meta_path and vim.fn.filereadable(meta_path) == 1 then
         pcall(vim.fn.delete, meta_path)

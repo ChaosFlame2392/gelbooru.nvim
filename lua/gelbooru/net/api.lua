@@ -104,13 +104,13 @@ function M.normalize_remote_query(tags_str)
         local canon = rating_map[r:lower()]
         if canon then table.insert(positive_ratings, canon) end
       end
-    elseif tok:match("^~score:") then
+    elseif tok:match("^~[Ss][Cc][Oo][Rr][Ee]:") then
       table.insert(base_tokens, (tok:gsub("^~", "")))
-    elseif tok:match("^~id:") then
+    elseif tok:match("^~[Ii][Dd]:") then
       table.insert(base_tokens, (tok:gsub("^~", "")))
     elseif tok:sub(1, 1) == "~" and #tok > 1 then
       table.insert(or_tags, tok:sub(2))
-    else
+    elseif tok ~= "~" and tok ~= "|" and not tok:match("^|+$") then
       table.insert(base_tokens, tok)
     end
   end
@@ -129,6 +129,7 @@ function M.normalize_remote_query(tags_str)
   end
   positive_ratings = dedup(positive_ratings)
   negative_ratings = dedup(negative_ratings)
+  or_tags = dedup(or_tags)
 
   local rating_clause = {}
   if #positive_ratings > 0 then
@@ -332,7 +333,7 @@ function M.fetch(direction, is_explicit)
         nonce_param
       )
       download.curl_async(branch_url, function(body)
-        if State.search_epoch ~= epoch or State.torn_down then
+        if State.search_epoch ~= epoch or State.torn_down or not (UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame)) then
           return
         end
         completed = completed + 1
@@ -376,11 +377,27 @@ function M.fetch(direction, is_explicit)
             end
           end
 
-          table.sort(deduped, function(a, b)
-            local ida = tonumber(a.id) or 0
-            local idb = tonumber(b.id) or 0
-            return ida > idb
-          end)
+          local sort_opt = nil
+          if State.query then
+            local q_lower = State.query:lower()
+            if q_lower:find("sort:score", 1, true) or q_lower:find("order:score", 1, true) then
+              local is_asc = q_lower:find("sort:score:asc", 1, true) or q_lower:find("order:score_asc", 1, true)
+              sort_opt = { key = "score", dir = is_asc and "asc" or "desc" }
+            elseif q_lower:find("sort:id:asc", 1, true) or q_lower:find("order:id_asc", 1, true) then
+              sort_opt = { key = "id", dir = "asc" }
+            elseif q_lower:find("sort:random", 1, true) or q_lower:find("order:random", 1, true) then
+              sort_opt = { key = "random", dir = "asc" }
+            end
+          end
+          if sort_opt then
+            require("gelbooru.query.sort").sort_posts(deduped, sort_opt)
+          else
+            table.sort(deduped, function(a, b)
+              local ida = tonumber(a.id) or 0
+              local idb = tonumber(b.id) or 0
+              return ida > idb
+            end)
+          end
 
           if cache_key and #deduped > 0 then
             set_session_cache(cache_key, deduped)
@@ -642,7 +659,7 @@ function M.execute_piped_search(query, pipe)
     local final_posts
     if stage1 and stage1.offset and stage1.offset > 0 then
       local base_offset = start_pid * page_size
-      local rel_start = math.max(1, (stage1.offset - base_offset) + 1)
+      local rel_start = (stage1.is_range and stage1.offset == 1) and 1 or math.max(1, (stage1.offset - base_offset) + 1)
       local rel_end
       if stage1.offset and not stage1.limit then
         rel_end = #candidate_pool
@@ -807,12 +824,19 @@ function M.save_current(cb)
       end
     end
     if path and vim.fn.filereadable(path) == 1 then
-      p.is_local = true
-      p.file_url = path
+      p.is_local = (p._was_local == true)
+      if p.is_local then
+        p.file_url = path
+      end
+      p._was_local = nil
+      p._local_file_path = nil
       ui.render_list()
       ui.set_status("Restored file: " .. vim.fn.fnamemodify(path, ":t"), 2500)
       if cb then cb(true, path) end
       return
+    else
+      p._was_local = nil
+      p._local_file_path = nil
     end
   end
 

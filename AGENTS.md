@@ -136,8 +136,10 @@ gelbooru.nvim/
 │       ├── layout_spec.lua           # Layout math, window visibility, metadata formatting
 │       ├── local_spec.lua            # End-to-end local browser workflow & query filtering
 │       ├── minor_features_spec.lua   # Zen mode, width resizing, hotkey dispatch
+│       ├── pipeline_stress_spec.lua  # Pipeline multi-stage slicing, candidate pools, concurrency & race safety
 │       ├── regressions_spec.lua      # Guards against placement tearing, blanking, locks
 │       ├── search_spec.lua           # Search execution, cursor reset, list repainting
+│       ├── tag_menu_spec.lua         # Interactive tag picker modal (t/T), exclusion, Yank, confirm modal, focus
 │       └── helpers/
 │           ├── harness.lua           # Headless environment setup/teardown & memory isolation
 │           ├── mock_net.lua          # Network API stubs for curl and async downloads
@@ -489,14 +491,24 @@ Maintainers and agents modifying `gelbooru.nvim` **MUST** strictly uphold the fo
 ### 12. Zen Mode Focus & Canvas Cleanliness Invariant
 - Zen Mode (`\`) must maintain focus on `UI.wins.list` while disabling `cursorline` and setting list width to 1 (with `hide = true`). It must strictly NEVER focus `UI.wins.img`, preventing solid rectangular terminal block cursor artifacts from rendering on the image canvas while permitting `j`/`k`/`gg`/`G` list motions to navigate seamlessly. Exiting Zen Mode restores `cursorline = true`.
 
-### 13. Local File Deletion In-Place Continuity
-- When deleting a local or saved post (`d` / `D`), the file is safely unlinked from disk, removed from `saved_index`, and caches are purged. However, the post must strictly remain in `State.posts` and `State.cur` must NOT change or advance. The post state transitions to online mode (`p.is_local = false`), keeping the preview and metadata visible in the viewer so the user can immediately re-download the post by pressing `<CR>`.
+### 13. Deferred Deletion, Dedicated Floating Modal & In-Place Continuity
+- When deleting a local or saved post (`d` / `D`), a dedicated centered floating confirmation modal (`UI.wins.confirm_modal`) is displayed with `j`/`k`/`<Down>`/`<Up>`/`<Tab>` selection, `<CR>` confirmation, and `y`/`n`/`q`/`<Esc>` shortcuts. Modal width dynamically clamps to screen width on narrow terminals (`max_avail_w = math.max(10, vim.o.columns - 4)`). Originating window focus is tracked in `UI.confirm_prev_win` and restored on modal dismissal.
+- Deletion is staged in `State.pending_deletions`, records original local status in `p._was_local`, unmarks `[SAVED]` immediately, and resets `State.cur_id = nil` to prevent canvas placement eviction and blanking. Physical unlinking on disk is deferred until `ui.teardown()`. Pressing `<CR>` before UI exit cleanly restores the post without network re-downloading, resetting `p._pending_delete`, restoring `p.is_local = (p._was_local == true)`, and clearing `_was_local` and `_local_file_path`.
 
-### 14. Upstream Booru API Modifier Normalization
-- Upstream Gelbooru DAPI accepts the `~` prefix strictly on native tags for disjunction (`~tag1 ~tag2`), and returns empty responses if `~` is prepended to metadata modifiers (e.g. `~rating:questionable`). Outgoing remote queries must normalize `~rating:`, `~score:`, and `~id:` to strip the leading `~` while strictly preserving native tag disjunction tildes.
+### 14. Upstream Booru API Modifier Normalization & Multi-Branch Sort Preservation
+- Upstream Gelbooru DAPI accepts the `~` prefix strictly on native tags for disjunction (`~tag1 ~tag2`), and returns empty responses if `~` is prepended to metadata modifiers (e.g. `~rating:questionable`, `~Score:>=50`, `~ID:12345`). Outgoing remote queries must case-insensitively normalize `~score:`, `~id:`, and `~rating:` to strip the leading `~`, while pruning bare tildes/pipes (`~`, `|`).
+- When multi-branch disjunction queries (`~tag1 ~tag2 sort:score`) return results, all branches fetch concurrently, results are merged and deduped by ID, and query sort directives (`sort:score`, `sort:id:asc`, `sort:random`) are explicitly preserved and re-applied to merged posts across all branches (rather than strictly defaulting to ID descending).
 
 ### 15. Concurrency Child Process Management
 - All external child processes (such as `ffmpeg` thumbnail extraction spawned via `vim.system`) must be tracked in `image.active_ffmpeg_handles`. On image replacement, canvas reset, or `ui.teardown()`, all active handles must be killed with SIGKILL (9) via `image.abort_all_ffmpeg()`, preventing orphaned zombie processes.
+
+### 16. Interactive Tag Picker Modal Exclusion & Focus Restoration
+- Tag Picker Modal (`t` / `T`) opens centered floating window (`UI.wins.tag_modal`) displaying badged tags of the active post. Supports inclusion toggle (`<Space>` -> `[x]`), exclusion toggle (`-` or `x` -> `[-]`), toggle all (`a`), yank tag (`y`), and `<CR>` search commit (excluded tags are automatically prepended with `-`).
+- Tracks originating window (`UI.tag_modal_prev_win`) whether opened from `list` or `meta`, and strictly restores focus on modal dismissal or commit. Width is dynamically clamped on narrow terminals.
+
+### 17. Multi-Stage Cascading Pipeline & Open-Ended Range Bounds
+- Pipeline queries (`tag1 | sort:id:1000..1200 | sort:score:50 | sort:random`) support leading (`..200` parsed as offset=1, limit=200, `is_range=true`) and trailing (`50..` parsed as offset=50, limit=nil, `is_range=true`) open-ended range expressions across both local and remote engines.
+- In remote piped search, ranges starting at offset 1 (`..200`) calculate `rel_start = 1` without dropping post #1. Slicing gracefully handles empty stages (`tag | | sort:score`), trailing pipes (`tag |`), bare pipes (`|`), whitespace stages, and inverted bounds (`50..10`).
 
 ---
 
@@ -524,11 +536,13 @@ The repository includes unit and integration test suites using `plenary.nvim` an
   - `local_spec.lua`: Folder scanning, numeric ID parsing, query parsing, enrichment.
   - `util_spec.lua`: URL encoding, entity decoding, normalization, fuzzy matching.
 - `tests/integration/`:
-  - `search_spec.lua`: Search execution, cursor reset, list repainting.
+  - `search_spec.lua`: Search execution, cursor reset, list repainting, multi-branch sort preservation.
   - `layout_spec.lua`: Layout math, window visibility, metadata formatting across `m` toggle.
   - `autocomplete_spec.lua`: Dropdown population, selection index advancement.
   - `local_spec.lua`: End-to-end local browser workflow, tag/rating/score filtering.
   - `minor_features_spec.lua`: Zen mode (`\`), explorer width (`<`/`>`), artist quick search (`u`), media dispatch (`O`).
+  - `tag_menu_spec.lua`: Interactive tag picker modal (`t`/`T`), inclusion/exclusion (`-`/`x`), yank (`y`), confirm modal (`d`), narrow terminal width clamping, focus restoration.
+  - `pipeline_stress_spec.lua`: Multi-stage pipeline execution, open-ended ranges (`..200`, `50..`), candidate pool sizing, rapid race safety, concurrent background indexing.
   - `regressions_spec.lua`: Guards against search blanking, placement tearing, artist deadlocks.
 
 ---
@@ -563,19 +577,17 @@ This branch introduces unified local library browsing, offline booru metadata en
 - **Server-Side Range & Offset Jumping (`sort:id:1000..1200`, `offset:1000`)**: Server-side offset pagination jumping via `pid = math.floor(offset / 100)` in `lua/gelbooru/net/api.lua`, reducing remote API requests by 83–98% for deep queries and slicing intermediate windows in memory.
 - **In-Session TTL Query & Candidate Pool Caching**: In-memory caching (`State.session_cache`) with 5-minute TTL for candidate pools (`pool::<tags>:pid=<pid>`) and paginated API batches (`page::<query>:pid=<pid>`). Allows instant filter re-evaluation without network re-fetching when query conditions change. Completely cleared on session termination / teardown (`State.session_cache = {}`) and force-refreshed via `R`. Zero persistent disk footprint.
 - **Unified Helper Deduplication & Security Sanitization**: Consolidated `util.close_timer`, `util.file_ext`, `util.is_same_post`, `util.shuffle`, and `config.VALID_MEDIA_EXTS`. Added credential redaction (`api_key`, `user_id`) in logger and POSIX command argument separators (`--`) in system openers.
-- **Interactive Tag Picker Modal (`t` / `T`)**: Centered floating modal window (`UI.wins.tag_modal`) displaying categorized, badged tags of the active post. Provides `<Space>` selection toggle, `a` toggle all, `y` yank to clipboard/registers, and `<CR>` instant multi-tag search commit, returning smoothly to list focus.
-- **In-Place Local File Deletion (`d` / `D`) with Online Continuity**: Safely unlinks local files and clears cache entries upon user confirmation (`vim.ui.select`), unmarking the item from `saved_index`. Strictly preserves active viewer focus (`State.cur` and `State.posts`), transitioning the post to online mode (`p.is_local = false`) so users can immediately re-download the file with `<CR>`.
+- **Interactive Tag Picker Modal (`t` / `T`) with Exclusion Mode (`-tag`)**: Centered floating modal window (`UI.wins.tag_modal`) displaying categorized, badged tags of the active post. Provides `<Space>` selection toggle (`[x]`), `-` and `x` hotkeys for exclusion (`[-]`), `a` toggle all, `y` yank to clipboard/registers, and `<CR>` instant multi-tag search commit (excluded tags prepended with `-`). Tracks `UI.tag_modal_prev_win` and safely restores focus to whichever window triggered it (`list` or `meta`). Width is dynamically clamped on narrow terminals.
+- **Deferred Deletion with Dedicated Floating Confirm Modal (`d` / `D`)**: Centered floating confirmation modal dialog with `j`/`k` / `<Down>`/`<Up>` / `<Tab>` motion and `<CR>` confirmation (with `y`/`n`/`q`/`<Esc>` direct shortcuts). Staging file in `State.pending_deletions` immediately unmarks `[SAVED]` while keeping preview canvas and metadata intact (resetting `State.cur_id = nil` prevents placement eviction and canvas blanking). Tracks `UI.confirm_prev_win` for smooth focus restoration. Physical unlinking deferred to `ui.teardown()`; pressing `<CR>` before exit restores file immediately without network re-download. Clamped to screen width on narrow terminals (`max_avail_w = math.max(10, vim.o.columns - 4)`).
 - **Query Bar Substring Autocomplete Cursor Alignment**: Dynamic token boundary slicing using active cursor column (`col = cursor[2]`) in `ui/init.lua`, allowing completion of previous tokens anywhere in the query string without mangling trailing tokens.
-- **Open-Ended Range Bounds Syntax (`50..` / `50-` / `..100`)**: Support for open-ended range notation in pipeline slicing and remote search pool sizing across both online and local libraries.
-- **Deferred Deletion with Dedicated Floating Confirm Modal**: Replaced default `vim.ui.select` (1/2 numbering requiring Enter) with a dedicated centered floating confirmation modal dialog with `j`/`k` / `<Down>`/`<Up>` motion and `<CR>` confirmation (with `y`/`n`/`q`/`<Esc>` direct shortcuts). Staging file in `State.pending_deletions` immediately unmarks `[SAVED]` while keeping preview canvas and metadata intact (resetting `State.cur_id = nil` prevents placement eviction and canvas blanking). Physical unlinking deferred to `ui.teardown()`; `<CR>` before exit restores file immediately without re-download.
-- **Tag Picker Modal Exclusion (`-tag`)**: Added interactive exclusion mode to `open_tag_modal` (`t`/`T`) via `-` and `x` hotkeys (`[-]` indicator) alongside `<Space>` inclusion (`[x]`). On `<CR>`, excluded tags are automatically prepended with `-` in the search bar. Originating window focus (list or meta) is strictly recorded in `UI.tag_modal_prev_win` and restored upon dismissal.
-- **Native Gelbooru Rating OR Translation & Parallel Multi-Branch Tag Queries**: Translates rating disjunctions (`~rating:explicit ~rating:questionable`, `rating:q,e`, `rating:q|e`) into Gelbooru-native negative exclusions of unselected ratings (`-rating:general -rating:sensitive`), returning results in a single fast remote query. Single `~tag` stripped ("1 out of 1 is just 1", resolving `~foot_focus` and `~rating:questionable`). Multi-tag disjunctions (`~foot_focus ~soles`) executed as parallel branch queries and merged/deduplicated by post ID.
-- **Upstream Booru API Modifier Normalization (`~rating:`, `~score:`, `~id:`, `~sort:`, `~order:`)**: Transparent normalization of upstream modifier expressions in `net/api.lua`, preventing empty `<posts count="0"/>` API failures while preserving native tag disjunction tildes (`~tag1 ~tag2`).
+- **Open-Ended Range Bounds Syntax (`50..` / `50-` / `..100`)**: Support for leading (`..200`) and trailing (`50..`) open-ended range notation in pipeline slicing and remote search pool sizing across both online and local libraries. Remote piped searches starting at offset 1 (`..200`) correctly maintain `rel_start = 1` without dropping the first post. Resilient against empty stages, trailing pipes, bare pipes, whitespace, and inverted bounds.
+- **Multi-Branch Parallel Search Query Sort Preservation**: When executing multi-tag disjunction queries (`~tag1 ~tag2 sort:score`), all branches fetch concurrently, results are merged and deduped by ID, and query sort directives (`sort:score`, `sort:id:asc`, `sort:random`) are explicitly preserved and re-applied to merged posts across all branches. Transparently normalizes upstream case-insensitive modifier expressions (`~Score:`, `~ID:`, `~Rating:`) and prunes bare tildes/pipes.
+- **Native Gelbooru Rating OR Translation**: Translates rating disjunctions (`~rating:explicit ~rating:questionable`, `rating:q,e`, `rating:q|e`) into Gelbooru-native negative exclusions of unselected ratings (`-rating:general -rating:sensitive`), returning results in a single fast remote query. Single `~tag` stripped ("1 out of 1 is just 1", resolving `~foot_focus` and `~rating:questionable`).
 - **Dedicated `gelbooru.query` Package Modularization**: Extracted parsing, filtering, sorting, and pipelining into `lua/gelbooru/query/` (`init.lua`, `parse.lua`, `pipeline.lua`, `sort.lua`, `filter.lua`) while maintaining 100% backwards compatibility via `lua/gelbooru/local/query.lua`.
 - **Eager Lookahead & Zero-Delay Prefetch Pipeline**: Prefetching initiates immediately upon cursor motion without waiting for cooldown timers. Eliminates artificial delay for immediate next posts and preserves in-flight downloads during same-direction navigation.
 - **Child Process Lifecycle Management for `ffmpeg`**: Active process handles tracked in `image.active_ffmpeg_handles` and cleanly terminated with SIGKILL (9) on placement close and teardown.
 - **Zen Mode List Focus Preservation & Artifact Elimination**: Full canvas allocation (`list.width = 1`, `hide = true`) while maintaining focus on `UI.wins.list` and disabling `cursorline`, eliminating terminal block cursor artifacts on the canvas and preserving motion navigation (`j`/`k`/`gg`/`G`).
-- **Test Suite Efficacy & Quality Audit**: Purged tautological tests, added substantive real-path tests for download retries, referer headers, atomic `.part` renames, URL parsing, video formats, and new modular query/tag suites.
+- **Comprehensive Pipeline & Concurrency Stress Verification Suite**: Added `pipeline_stress_spec.lua` covering multi-stage pipeline execution, open-ended ranges, candidate pool bounds, rapid user race safety (search switching, rapid pagination, j/k flurry, open/close cycling), and concurrent Tier 2 background indexing during navigation.
 
 ---
 

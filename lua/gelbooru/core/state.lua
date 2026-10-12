@@ -55,7 +55,10 @@ M.UI = {
   resize_timer = nil,
   resume_timer = nil,
   prefetch_timers = {},
+  indexer_timer = nil,
   current_placement = nil,
+  tag_modal_prev_win = nil,
+  confirm_prev_win = nil,
   PREVIEW_COOLDOWN_MS = 150,
 }
 
@@ -103,6 +106,8 @@ function M.reset_ui()
   M.UI.prefetch_timers = {}
   M.UI.indexer_timer = nil
   M.UI.current_placement = nil
+  M.UI.tag_modal_prev_win = nil
+  M.UI.confirm_prev_win = nil
 end
 
 function M.reset_tag_state()

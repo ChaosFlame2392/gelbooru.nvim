@@ -113,6 +113,10 @@ M.is_dir_token = is_dir_token
 ---@return boolean|nil is_range
 local function parse_limit_or_range(val)
   if not val then return nil, nil end
+  if type(val) ~= "string" and type(val) ~= "number" then return nil, nil end
+  val = vim.trim(tostring(val))
+  if val == "" then return nil, nil end
+
   local open_o = val:match("^(%d+)%.%.$") or val:match("^(%d+)%-$")
   if open_o then
     return tonumber(open_o), nil, true

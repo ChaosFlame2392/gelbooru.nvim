@@ -1143,5 +1143,115 @@ describe("Integration: Search & List flow", function()
 
       download.curl_async = orig_curl_async
     end)
+
+    it("normalize_remote_query handles uppercase ~Score: and ~ID:, drops bare ~, and deduplicates OR tags", function()
+      local branches = api.normalize_remote_query("~Score:>=50 ~ID:12345 ~miku ~miku ~luka ~")
+      assert.are.equal(2, #branches)
+      assert.is_truthy(branches[1]:lower():find("score:>=50"))
+      assert.is_truthy(branches[1]:lower():find("id:12345"))
+      assert.is_falsy(branches[1]:find("~Score"))
+      assert.is_falsy(branches[1]:find("~ID"))
+      assert.is_falsy(branches[1]:find("%s~%s"))
+      -- Check that miku and luka are in the branches (no duplicate miku branch)
+      local has_miku = false
+      local has_luka = false
+      for _, b in ipairs(branches) do
+        if b:find("miku") then has_miku = true end
+        if b:find("luka") then has_luka = true end
+      end
+      assert.is_true(has_miku)
+      assert.is_true(has_luka)
+    end)
+
+    it("multi-branch search preserves query sort directives (such as sort:score) on merged posts", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_curl_async = download.curl_async
+
+      download.curl_async = function(url, cb)
+        if url:find("miku") then
+          vim.schedule(function()
+            cb(vim.fn.json_encode({
+              post = {
+                { id = "100", score = "10", file_url = "https://example.com/100.jpg" },
+                { id = "300", score = "50", file_url = "https://example.com/300.jpg" },
+              },
+            }))
+          end)
+        elseif url:find("luka") then
+          vim.schedule(function()
+            cb(vim.fn.json_encode({
+              post = {
+                { id = "200", score = "80", file_url = "https://example.com/200.jpg" },
+                { id = "400", score = "20", file_url = "https://example.com/400.jpg" },
+              },
+            }))
+          end)
+        else
+          orig_curl_async(url, cb)
+        end
+      end
+
+      api.execute_search("~miku ~luka sort:score")
+
+      vim.wait(500, function()
+        return not state.State.loading and #state.State.posts == 4
+      end, 20)
+
+      assert.are.equal(4, #state.State.posts)
+      -- Sorted by score descending: id 200 (score 80), id 300 (score 50), id 400 (score 20), id 100 (score 10)
+      assert.are.equal("200", state.State.posts[1].id)
+      assert.are.equal("300", state.State.posts[2].id)
+      assert.are.equal("400", state.State.posts[3].id)
+      assert.are.equal("100", state.State.posts[4].id)
+
+      download.curl_async = orig_curl_async
+    end)
+
+    it("force_refresh R invalidates cached metadata for online posts with ID", function()
+      ui.open()
+      local p = { id = "777888", tags = "original_tag", score = 10, file_url = "https://example.com/777888.jpg" }
+      state.State.posts = { p }
+      state.State.cur = 1
+
+      local meta_path = util.meta_cache_path(p.id)
+      util.write_json(meta_path, { id = p.id, tags = "cached_tag", score = 99 })
+      assert.is_true(vim.fn.filereadable(meta_path) == 1)
+
+      p._metadata_fetched = true
+      ui.force_refresh()
+
+      assert.is_false(vim.fn.filereadable(meta_path) == 1, "meta cache file must be deleted on R")
+      assert.is_nil(p._metadata_fetched, "_metadata_fetched must be reset on R")
+    end)
+
+    it("save_current restores post and clears internal _was_local and _local_file_path staging flags", function()
+      ui.open()
+      local tmp = vim.fn.tempname() .. ".jpg"
+      local f = io.open(tmp, "w")
+      if f then f:write("data"); f:close() end
+
+      local p = { id = "999111", is_local = false, file_url = "https://example.com/999111.jpg" }
+      state.State.posts = { p }
+      state.State.cur = 1
+      state.State.pending_deletions = {
+        ["999111"] = { path = tmp, id = p.id, p = p },
+      }
+      p._pending_delete = true
+      p._local_file_path = tmp
+      p._was_local = false
+
+      api.save_current(function(saved, path)
+        assert.is_true(saved)
+        assert.are.equal(tmp, path)
+      end)
+
+      assert.is_nil(p._pending_delete)
+      assert.is_nil(p._was_local, "_was_local must be cleared after restore")
+      assert.is_nil(p._local_file_path, "_local_file_path must be cleared after restore")
+      assert.is_nil(state.State.pending_deletions["999111"])
+
+      vim.fn.delete(tmp)
+    end)
   end)
 end)

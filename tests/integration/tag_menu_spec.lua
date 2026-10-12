@@ -397,6 +397,40 @@ describe("Integration: Interactive Tag Picker Modal ('t' / 'T')", function()
     vim.o.columns = orig_cols
   end)
 
+  it("open_confirm_modal does not crash or exceed screen width on narrow terminal", function()
+    local orig_cols = vim.o.columns
+    vim.o.columns = 25
+    ui.open()
+    local confirmed = false
+    local ok = pcall(ui.open_confirm_modal, "very_long_filename_123456789.jpg", function() confirmed = true end)
+    assert.is_true(ok, "open_confirm_modal must not throw on narrow terminal")
+    if state.UI.wins.confirm_modal then
+      local cfg = vim.api.nvim_win_get_config(state.UI.wins.confirm_modal)
+      assert.is_true(cfg.width <= vim.o.columns, "confirm modal width must not exceed screen columns")
+      assert.is_true(cfg.width >= 1, "confirm modal width must be >= 1")
+      ui.close_confirm_modal()
+    end
+    vim.o.columns = orig_cols
+  end)
+
+  it("close_confirm_modal restores focus to originating window and resets confirm_prev_win", function()
+    ui.open()
+    state.State.posts = vim.deepcopy(mock_net.sample_posts)
+    state.State.cur = 1
+    ui.render_list()
+    ui.render_metadata(state.State.posts[1])
+    vim.api.nvim_set_current_win(state.UI.wins.meta)
+
+    ui.open_confirm_modal("test.jpg", function() end)
+    assert.is_not_nil(state.UI.wins.confirm_modal)
+    assert.are.equal(state.UI.wins.meta, state.UI.confirm_prev_win)
+
+    ui.close_confirm_modal()
+    assert.is_nil(state.UI.wins.confirm_modal)
+    assert.is_nil(state.UI.confirm_prev_win, "confirm_prev_win must be cleared on close")
+    assert.are.equal(state.UI.wins.meta, vim.api.nvim_get_current_win(), "focus must return to meta window")
+  end)
+
   it("cleans up tag modal handles on ui.teardown()", function()
     ui.open()
     state.State.posts = vim.deepcopy(mock_net.sample_posts)
