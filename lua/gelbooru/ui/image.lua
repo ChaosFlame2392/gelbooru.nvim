@@ -156,11 +156,7 @@ end
 
 local function attach_defensive_keymaps(buf)
   local util = require("gelbooru.core.util")
-  pcall(function()
-    vim.b[buf].which_key_ignore = true
-    vim.b[buf].whichkey_disable = true
-    vim.b[buf].miniclue_disable = true
-  end)
+  util.shield_buffer(buf)
 
   local function go_search()
     local ui = require("gelbooru.ui")
@@ -179,6 +175,7 @@ local function attach_defensive_keymaps(buf)
     end
     if s.UI.wins.list and vim.api.nvim_win_is_valid(s.UI.wins.list) then
       pcall(vim.api.nvim_set_current_win, s.UI.wins.list)
+      pcall(vim.api.nvim_win_set_cursor, s.UI.wins.list, { math.max(1, s.State.cur), 0 })
       local ui = require("gelbooru.ui")
       if ui and ui.set_status then
         ui.set_status()
@@ -192,6 +189,7 @@ local function attach_defensive_keymaps(buf)
         local cur = vim.api.nvim_get_current_win()
         if cur ~= s.UI.wins.list and cur ~= s.UI.wins.input and cur ~= s.UI.wins.meta then
           pcall(vim.api.nvim_set_current_win, s.UI.wins.list)
+          pcall(vim.api.nvim_win_set_cursor, s.UI.wins.list, { math.max(1, s.State.cur), 0 })
         end
       end
     end)

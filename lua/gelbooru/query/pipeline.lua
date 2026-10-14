@@ -39,12 +39,14 @@ local function split_by_pipeline_pipe(str)
         else
           local rest = str:sub(i + 1):lower()
           if rest:match("^sort:") or rest:match("^order:") or rest:match("^limit:") or rest:match("^offset:")
-            or rest:match("^random[%s|:]") or rest:match("^random$") then
+            or rest:match("^random[%s|:]") or rest:match("^random$")
+            or rest:match("^%d+%.%.") or rest:match("^%.%.%d+") or rest:match("^%d+[%s|]") or rest:match("^%d+$") then
             is_pipe_delim = true
           else
             local prev = str:sub(cur_start, i - 1):lower()
             if prev:match("sort:[^%s|]+$") or prev:match("order:[^%s|]+$") or prev:match("limit:[^%s|]+$")
-              or prev:match("offset:%d+$") or prev:match("random$") then
+              or prev:match("offset:%d+$") or prev:match("random$")
+              or prev:match("%d+%.%.%d+$") or prev:match("%d+$") then
               is_pipe_delim = true
             end
           end
@@ -130,7 +132,19 @@ function M.parse_pipeline(query_or_tags)
             elseif (tok_lower == "asc" or tok_lower == "desc") and has_preceding_stage and #stages > 0 and stages[#stages].key then
               stages[#stages].dir = tok_lower
             else
-              table.insert(non_stage_tokens, tok.raw)
+              local o, l, is_range = parse.parse_limit_or_range(clean_tok)
+              if is_range or (o and l) or ((p_idx > 1 or has_preceding_stage) and l) then
+                table.insert(stages, {
+                  key = "id",
+                  dir = "desc",
+                  offset = o,
+                  limit = l,
+                  is_range = is_range or false,
+                })
+                has_preceding_stage = true
+              else
+                table.insert(non_stage_tokens, tok.raw)
+              end
             end
           end
         end

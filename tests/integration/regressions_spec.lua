@@ -1122,5 +1122,161 @@ describe("Regression Tests for UI & Search bugs", function()
 
       ui.teardown()
     end)
+
+    it("neutralizes Space and Leader keys across all Gelbooru buffers (list, meta, input)", function()
+      ui.open()
+      for _, buf in ipairs({ state.UI.bufs.list, state.UI.bufs.meta, state.UI.bufs.input }) do
+        assert.is_true(vim.b[buf].which_key_ignore, "which_key_ignore not set on buffer")
+        assert.is_true(vim.b[buf].whichkey_disable, "whichkey_disable not set on buffer")
+        assert.is_true(vim.b[buf].miniclue_disable, "miniclue_disable not set on buffer")
+
+        local keymaps = vim.api.nvim_buf_get_keymap(buf, "n")
+        local mapped = {}
+        for _, km in ipairs(keymaps) do
+          mapped[km.lhs] = km
+        end
+        local leader_lhs = vim.g.mapleader or "\\"
+        local localleader_lhs = vim.g.maplocalleader or "\\"
+        assert.is_truthy(mapped["<Space>"] or mapped[" "], "<Space> not mapped on buffer")
+        assert.is_truthy(mapped[leader_lhs] or mapped["<Leader>"] or mapped[" "] or mapped["<Space>"], "<Leader> not mapped on buffer")
+        assert.is_truthy(mapped[localleader_lhs] or mapped["<Localleader>"] or mapped["\\"], "<Localleader> not mapped on buffer")
+        local sp_km = mapped["<Space>"] or mapped[" "]
+        if sp_km then
+          assert.are.equal(1, sp_km.nowait)
+        end
+      end
+      ui.teardown()
+    end)
+
+    it("mouse click outside post list window does not displace post list cursor position", function()
+      ui.open()
+      state.State.posts = {}
+      for i = 1, 20 do
+        table.insert(state.State.posts, { id = tostring(i), file_url = string.format("/media/%d.jpg", i), width = 100, height = 100 })
+      end
+      state.State.cur = 3
+      ui.render_list()
+      assert.are.equal(3, vim.api.nvim_win_get_cursor(state.UI.wins.list)[1])
+
+      -- Mock getmousepos clicking on image window (row 15)
+      local orig_getmousepos = vim.fn.getmousepos
+      vim.fn.getmousepos = function()
+        return { winid = state.UI.wins.img, line = 15, wincol = 10, screenrow = 18, screencol = 45 }
+      end
+
+      -- Trigger <LeftMouse> on list buffer
+      local keymaps = vim.api.nvim_buf_get_keymap(state.UI.bufs.list, "n")
+      local left_mouse_fn = nil
+      for _, km in ipairs(keymaps) do
+        if km.lhs == "<LeftMouse>" then
+          left_mouse_fn = km.callback
+          break
+        end
+      end
+      assert.is_not_nil(left_mouse_fn, "<LeftMouse> callback not found on list buffer")
+      left_mouse_fn()
+
+      -- Cursor MUST remain pinned at line 3 and NOT move to line 15!
+      assert.are.equal(3, state.State.cur)
+      assert.are.equal(3, vim.api.nvim_win_get_cursor(state.UI.wins.list)[1])
+
+      -- Now simulate clicking directly on list window at line 7
+      vim.fn.getmousepos = function()
+        return { winid = state.UI.wins.list, line = 7, wincol = 5, screenrow = 10, screencol = 10 }
+      end
+      left_mouse_fn()
+
+      assert.are.equal(7, state.State.cur)
+      assert.are.equal(7, vim.api.nvim_win_get_cursor(state.UI.wins.list)[1])
+
+      vim.fn.getmousepos = orig_getmousepos
+      ui.teardown()
+    end)
+
+    it("parses bare range expressions (500..600, 900..1200) and bare limits (| 500) as pipeline stages", function()
+      local query = require("gelbooru.query")
+
+      -- Bare range without pipe
+      local p1 = query.parse_pipeline("500..600")
+      assert.are.equal("", p1.base_query)
+      assert.are.equal(1, #p1.stages)
+      assert.are.equal("id", p1.stages[1].key)
+      assert.are.equal("desc", p1.stages[1].dir)
+      assert.are.equal(500, p1.stages[1].offset)
+      assert.are.equal(600, p1.stages[1].limit)
+
+      -- Bare range 900..1200
+      local p2 = query.parse_pipeline("900..1200")
+      assert.are.equal(900, p2.stages[1].offset)
+      assert.are.equal(1200, p2.stages[1].limit)
+
+      -- Bare range with tag
+      local p3 = query.parse_pipeline("hatsune_miku 500..600")
+      assert.are.equal("hatsune_miku", p3.base_query)
+      assert.are.equal(1, #p3.stages)
+      assert.are.equal(500, p3.stages[1].offset)
+      assert.are.equal(600, p3.stages[1].limit)
+
+      -- Limit after pipe
+      local p4 = query.parse_pipeline("hatsune_miku | 500")
+      assert.are.equal("hatsune_miku", p4.base_query)
+      assert.are.equal(1, #p4.stages)
+      assert.are.equal(500, p4.stages[1].limit)
+
+      -- Range after pipe
+      local p5 = query.parse_pipeline("hatsune_miku | 500..600")
+      assert.are.equal(500, p5.stages[1].offset)
+      assert.are.equal(600, p5.stages[1].limit)
+    end)
+
+    it("candidate pool caching scopes by start_pid and supports parent stream reuse without network roundtrips", function()
+      local download = require("gelbooru.net.download")
+      ui.open()
+
+      local fetch_counts = 0
+      local orig_curl = download.curl_async
+      download.curl_async = function(url, cb)
+        fetch_counts = fetch_counts + 1
+        local pid = tonumber(url:match("pid=(%d+)")) or 0
+        local posts = {}
+        for i = 1, 100 do
+          local post_id = (pid * 100) + i
+          table.insert(posts, {
+            id = tostring(post_id),
+            score = 1000 - post_id,
+            file_url = string.format("https://example.com/%d.jpg", post_id),
+            preview_url = string.format("https://example.com/prev_%d.jpg", post_id),
+          })
+        end
+        cb(vim.json.encode({ post = posts }))
+      end
+
+      -- 1. Fetch 1000 posts via sort:id:1000
+      api.execute_search("sort:id:1000")
+      vim.wait(1000, function() return #state.State.posts == 1000 end, 10)
+      assert.are.equal(1000, #state.State.posts)
+      assert.are.equal(10, fetch_counts) -- 10 pages fetched (pid 0..9)
+
+      -- 2. Query 500..600: must reuse the in-memory parent stream!
+      api.execute_search("500..600")
+      vim.wait(500, function() return #state.State.posts == 100 end, 10)
+      assert.are.equal(100, #state.State.posts)
+      assert.are.equal(10, fetch_counts) -- ZERO new network calls!
+      assert.are.equal("501", tostring(state.State.posts[1].id))
+      assert.are.equal("600", tostring(state.State.posts[#state.State.posts].id))
+
+      -- 3. Closing UI does NOT purge 5-minute session cache
+      ui.teardown()
+      ui.open()
+
+      -- Query sort:id:500 | sort:score:200 still resolves instantly from parent cache!
+      api.execute_search("sort:id:500 | sort:score:200")
+      vim.wait(500, function() return #state.State.posts == 200 end, 10)
+      assert.are.equal(200, #state.State.posts)
+      assert.are.equal(10, fetch_counts) -- ZERO network calls!
+
+      download.curl_async = orig_curl
+      ui.teardown()
+    end)
   end)
 end)

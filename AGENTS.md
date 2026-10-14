@@ -39,8 +39,8 @@ The top query bar accepts both online and local library search expressions:
 - `id:<digits>` or bare `<digits>` — Directly loads a single post by its Gelbooru numeric ID.
 - **Multi-Stage Cascading Pipeline Syntax**: Unix pipe syntax (`|`) or space-separated sort/limit directives chain filtering stages:
   - `tag1 tag2 | sort:id:1000..1200 | sort:score:50 | sort:random`
-  - Range & Offset Jumping: `sort:id:1000..1200`, `limit:1000..1200`, `offset:1000`. Starts remote fetching directly at server page `pid = math.floor(offset / 100)`, bypassing unneeded network roundtrips and slicing the exact window in memory.
-  - In-Session TTL Query Caching: In-memory candidate pool (`pool::<tags>:pid=<pid>`) and page batch (`page::<query>:pid=<pid>`) caching with 5-minute TTL. Adding or tweaking query conditions re-evaluates cached candidate pools instantly without re-fetching 500 images over the network. Zero disk persistence across Neovim sessions; completely purged on UI exit (`M.teardown()`) and force-refreshed on `R`.
+  - Range & Offset Jumping: `500..600`, `sort:id:1000..1200`, `limit:1000..1200`, `offset:1000`. Recognizes bare ranges (`%d+..%d+`) and limit directives after pipes. Starts remote fetching directly at server page `pid = math.floor(offset / 100)`, bypassing unneeded network roundtrips and slicing the exact window in memory.
+  - In-Session TTL Query Caching: In-memory candidate pool (`pool::<tags>:pid=<pid>`) and page batch (`page::<query>:pid=<pid>`) caching with 5-minute TTL. Adding or tweaking query conditions re-evaluates cached candidate pools instantly without re-fetching 500 images over the network. If `pid = 0` pool already covers requested offset and limits, slices directly from memory with zero network requests. Zero disk persistence across Neovim sessions; preserved across UI opens/closes with a 5-minute TTL, and force-refreshed on `R`.
 
 
 ### 2.3 Three-Mode Interaction Model
@@ -108,9 +108,9 @@ When typing in the query bar, the autocomplete window (`wins.ac`) displays match
 | `i`, `I`, `a`, `A`, `s`, `S`, `/` (normal mode) | Defensive re-enter search | Re-enters insert mode, sets `State.input_focused = true`, and reopens autocomplete popup. |
 
 ### 2.4 Mouse Interaction & Boundary Protection
-- **Mouse Focus**: Mouse clicks are supported to easily switch focus between interactive windows (`input`, `list`, `meta`). On teardown, original `vim.o.mouse` setting is strictly restored.
-- **Window Focus Guards**: Decorative dividers (`frame`, `div`, `vdiv`, `hdiv`, `status`, `ac`, `img`) have `focusable = false`. A global `WinEnter` autocommand redirects any focus landing on non-interactive floats or underlying background editor windows back to `UI.wins.list` (or back to the active modal if `tag_modal` or `confirm_modal` is open).
-- **Defensive Boundary Keymaps**: Mouse clicks (`<LeftMouse>`, `<2-LeftMouse>`, `<RightMouse>`) on non-interactive buffers (`frame`, `div`, `vdiv`, `hdiv`, `status`, `ac`, `img`) immediately return focus to the post list. Pressing `/` or `i` transitions to search mode, and `q` or `<Esc>` returns to the post list.
+- **Mouse Focus & Unified Routing**: Mouse clicks are supported to easily switch focus between interactive windows (`input`, `list`, `meta`). Clicking on `UI.wins.list` navigates post items. Clicking outside the list (on `img`, dividers, `status`, `frame`, or background editor) keeps/restores focus to `UI.wins.list` and strictly pins the list cursor to `State.cur`, preventing any displacement. On teardown, original `vim.o.mouse` setting is strictly restored.
+- **Window Focus & Global Key Neutralization (`util.shield_buffer`)**: Decorative dividers (`frame`, `div`, `vdiv`, `hdiv`, `status`, `ac`, `img`) have `focusable = false`. All Gelbooru buffers (`list`, `meta`, `input`, `img`, modals, frames) are shielded via `util.shield_buffer`, setting `which_key_ignore = true`, `whichkey_disable = true`, `miniclue_disable = true`, and mapping `<Space>`, ` `, `<Leader>`, `<Localleader>` with `nowait = true` to silent no-op, preventing global leader and plugin menus from leaking into the UI.
+- **Defensive Boundary Keymaps**: Mouse clicks (`<LeftMouse>`, `<2-LeftMouse>`, `<RightMouse>`) on non-interactive buffers (`frame`, `div`, `vdiv`, `hdiv`, `status`, `ac`, `img`) route through the unified click handler. Pressing `/` or `i` transitions to search mode, and `q` or `<Esc>` returns to the post list.
 
 ---
 

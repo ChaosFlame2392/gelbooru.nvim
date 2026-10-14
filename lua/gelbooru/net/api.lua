@@ -643,6 +643,10 @@ function M.execute_piped_search(query, pipe)
   -- If Stage 1 has a remote sort key (sort:id, sort:score, sort:random),
   -- pass it in the remote tags parameter so Gelbooru server orders the initial stream.
   local remote_tags = base_query
+  if stage1 and not stage1.key then
+    stage1.key = "id"
+    stage1.dir = "desc"
+  end
   if stage1 and stage1.key then
     local k = stage1.key:lower()
     local remote_sort = nil
@@ -672,8 +676,55 @@ function M.execute_piped_search(query, pipe)
   State.loading = true
   local candidate_pool = {}
 
-  local pool_cache_key = "pool::" .. table.concat(branches, "||")
-  local cached_pool = get_session_cache(pool_cache_key)
+  local branches_key = table.concat(branches, "||")
+  local pool_cache_key = (nonce_param == "")
+      and string.format("pool::%s:pid=%d", branches_key, start_pid)
+    or nil
+  local cached_pool = pool_cache_key and get_session_cache(pool_cache_key) or nil
+
+  -- Cross-pool parent reuse:
+  -- If start_pid > 0 and pool::...:pid=0 has already fetched enough posts from the stream,
+  -- slice directly from the parent stream without redundant network roundtrips.
+  if not cached_pool and start_pid > 0 and nonce_param == "" then
+    local parent_key = string.format("pool::%s:pid=0", branches_key)
+    local parent_pool = get_session_cache(parent_key)
+    if parent_pool and #parent_pool > 0 then
+      local req_end = stage1.limit or (stage1.offset + config.options.per_page)
+      if #parent_pool >= req_end then
+        local start_idx = (stage1.is_range and stage1.offset == 1) and 1 or ((stage1.offset and stage1.offset > 0) and (stage1.offset + 1) or 1)
+        local end_idx = math.min(#parent_pool, req_end)
+        local window_posts = {}
+        for i = start_idx, end_idx do
+          table.insert(window_posts, parent_pool[i])
+        end
+        local final_posts
+        if #stages > 1 then
+          local downstream_stages = {}
+          for s_idx = 2, #stages do
+            table.insert(downstream_stages, stages[s_idx])
+          end
+          final_posts = query_mod.execute_pipeline(window_posts, downstream_stages)
+        else
+          final_posts = window_posts
+        end
+        State.loading = false
+        State.posts = final_posts
+        State.page = math.floor(end_idx / page_size) + 1
+        State.cur = 1
+        State.cur_id = nil
+        history.save_current_history()
+        ui.set_status()
+        ui.render_list()
+        if #final_posts > 0 then
+          ui.render_preview(false)
+        else
+          util.set_lines(state.UI.bufs.img, { "  No posts found" })
+          util.set_lines(state.UI.bufs.meta, {})
+        end
+        return
+      end
+    end
+  end
 
   local function finish_pipeline()
     if State.search_epoch ~= epoch or State.torn_down then

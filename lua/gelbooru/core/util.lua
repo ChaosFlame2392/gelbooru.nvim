@@ -223,6 +223,25 @@ function M.keymap(buf, mode, key, fn)
   vim.keymap.set(mode, key, fn, { buffer = buf, nowait = true, noremap = true, silent = true })
 end
 
+function M.shield_buffer(buf)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  pcall(function()
+    vim.b[buf].which_key_ignore = true
+    vim.b[buf].whichkey_disable = true
+    vim.b[buf].miniclue_disable = true
+  end)
+  for _, m in ipairs({ "n", "v", "x" }) do
+    M.keymap(buf, m, "<Space>", function() end)
+    M.keymap(buf, m, " ", function() end)
+    M.keymap(buf, m, "<Leader>", function() end)
+    M.keymap(buf, m, "<Localleader>", function() end)
+  end
+  M.keymap(buf, "n", "z", function() end)
+  M.keymap(buf, "n", "Z", function() end)
+end
+
 function M.close_timer(timer)
   if not timer then
     return nil

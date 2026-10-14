@@ -273,15 +273,21 @@ local function parse_stage(stage_str)
           else
             local o, l, is_range = parse_limit_or_range(p1)
             if is_range then
+              stage.key = "id"
+              stage.dir = "desc"
               stage.offset = o
               stage.limit = l
               stage.is_range = true
               matched = true
             elseif o and l then
+              stage.key = "id"
+              stage.dir = "desc"
               stage.offset = o
               stage.limit = l
               matched = true
             elseif l then
+              stage.key = "id"
+              stage.dir = "desc"
               stage.limit = l
               matched = true
             elseif p1 ~= "" and p1:match("^[%w_]+$") then

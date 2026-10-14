@@ -116,9 +116,6 @@ function M.teardown()
     end
   end
   invalidate_layout()
-  pcall(function()
-    require("gelbooru.net.api").clear_session_cache()
-  end)
   state.reset_query_state()
   state.reset_ui()
   state.reset_tag_state()
@@ -1472,6 +1469,12 @@ function M.ensure_ui()
   UI.bufs.ac = util.scratch()
   vim.bo[UI.bufs.ac].bufhidden = "hide"
 
+  for _, b in pairs(UI.bufs) do
+    if b and vim.api.nvim_buf_is_valid(b) then
+      util.shield_buffer(b)
+    end
+  end
+
   local l = M.calc_layout()
 
   UI.wins.frame = util.float(UI.bufs.frame, l.frame.row, l.frame.col, l.frame.width, l.frame.height, {
@@ -1722,6 +1725,9 @@ function M.ensure_ui()
       end
       p._metadata_fetched = nil
     end
+    pcall(function()
+      require("gelbooru.net.api").clear_session_cache()
+    end)
     M.render_preview(true)
   end
   M.force_refresh = force_refresh
@@ -1924,6 +1930,7 @@ function M.ensure_ui()
     end
     if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
       pcall(vim.api.nvim_set_current_win, UI.wins.list)
+      pcall(vim.api.nvim_win_set_cursor, UI.wins.list, { math.max(1, State.cur), 0 })
       M.set_status()
     end
     vim.schedule(function()
@@ -1932,10 +1939,64 @@ function M.ensure_ui()
         local cur = vim.api.nvim_get_current_win()
         if cur ~= UI.wins.list and cur ~= UI.wins.input and cur ~= UI.wins.meta then
           pcall(vim.api.nvim_set_current_win, UI.wins.list)
+          pcall(vim.api.nvim_win_set_cursor, UI.wins.list, { math.max(1, State.cur), 0 })
         end
       end
     end)
   end
+
+  local function handle_mouse_click()
+    if State.torn_down then
+      return
+    end
+    if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
+      pcall(vim.api.nvim_set_current_win, UI.wins.tag_modal)
+      return
+    end
+    if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
+      pcall(vim.api.nvim_set_current_win, UI.wins.confirm_modal)
+      return
+    end
+
+    local m = vim.fn.getmousepos()
+    if not m or not m.winid or m.winid == 0 then
+      return
+    end
+
+    if m.winid == UI.wins.list then
+      if State.input_focused then
+        exit_input()
+      end
+      if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+        pcall(vim.api.nvim_set_current_win, UI.wins.list)
+        if m.line >= 1 and m.line <= #State.posts then
+          on_cursor_change(m.line)
+        else
+          pcall(vim.api.nvim_win_set_cursor, UI.wins.list, { math.max(1, State.cur), 0 })
+        end
+      end
+    elseif UI.wins.meta and vim.api.nvim_win_is_valid(UI.wins.meta) and m.winid == UI.wins.meta then
+      if State.input_focused then
+        exit_input()
+      end
+      pcall(vim.api.nvim_set_current_win, UI.wins.meta)
+      if m.line >= 1 then
+        pcall(vim.api.nvim_win_set_cursor, UI.wins.meta, { m.line, math.max(0, m.wincol - 1) })
+      end
+    elseif UI.wins.input and vim.api.nvim_win_is_valid(UI.wins.input) and m.winid == UI.wins.input then
+      M.enter_search()
+    else
+      -- Click was on non-interactive float (img, div, vdiv, hdiv, status, frame) or outside
+      if State.input_focused then
+        exit_input()
+      end
+      if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+        pcall(vim.api.nvim_set_current_win, UI.wins.list)
+        pcall(vim.api.nvim_win_set_cursor, UI.wins.list, { math.max(1, State.cur), 0 })
+      end
+    end
+  end
+
   mm("q", return_to_list)
   mm("<Esc>", return_to_list)
   mm("M", return_to_list)
@@ -1955,7 +2016,25 @@ function M.ensure_ui()
   mm("<CR>", api.save_current)
 
   -- Defensive keymaps on non-interactive buffers in case mouse/focus lands in them
-  local mouse_clicks = { "<LeftMouse>", "<2-LeftMouse>", "<3-LeftMouse>", "<4-LeftMouse>", "<RightMouse>" }
+  local mouse_clicks = {
+    "<LeftMouse>", "<2-LeftMouse>", "<3-LeftMouse>", "<4-LeftMouse>",
+    "<RightMouse>", "<2-RightMouse>", "<3-RightMouse>", "<4-RightMouse>",
+  }
+  local mouse_drags = {
+    "<LeftDrag>", "<LeftRelease>", "<RightDrag>", "<RightRelease>",
+  }
+  for _, click in ipairs(mouse_clicks) do
+    util.keymap(UI.bufs.list, "n", click, handle_mouse_click)
+    util.keymap(UI.bufs.meta, "n", click, handle_mouse_click)
+  end
+  for _, drag in ipairs(mouse_drags) do
+    util.keymap(UI.bufs.list, "n", drag, function()
+      if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+        pcall(vim.api.nvim_win_set_cursor, UI.wins.list, { math.max(1, State.cur), 0 })
+      end
+    end)
+  end
+
   local shield_keys = {
     "b", "B", "c", "C", "e", "E", "f", "F", "h", "H", "l", "L",
     "n", "N", "p", "P", "v", "V", "<C-v>", "w", "W", "x", "X",
@@ -1966,13 +2045,9 @@ function M.ensure_ui()
   }
   for _, buf in ipairs({ UI.bufs.frame, UI.bufs.div, UI.bufs.vdiv, UI.bufs.hdiv, UI.bufs.img, UI.bufs.status, UI.bufs.ac }) do
     if buf and vim.api.nvim_buf_is_valid(buf) then
-      pcall(function()
-        vim.b[buf].which_key_ignore = true
-        vim.b[buf].whichkey_disable = true
-        vim.b[buf].miniclue_disable = true
-      end)
+      util.shield_buffer(buf)
       for _, click in ipairs(mouse_clicks) do
-        util.keymap(buf, "n", click, return_to_list)
+        util.keymap(buf, "n", click, handle_mouse_click)
       end
       util.keymap(buf, "n", "<Space>", return_to_list)
       util.keymap(buf, "n", " ", return_to_list)
