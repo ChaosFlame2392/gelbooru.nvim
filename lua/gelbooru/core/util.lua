@@ -228,10 +228,17 @@ function M.shield_buffer(buf)
     return
   end
   pcall(function()
+    vim.bo[buf].filetype = "gelbooru"
     vim.b[buf].which_key_ignore = true
     vim.b[buf].whichkey_disable = true
     vim.b[buf].miniclue_disable = true
   end)
+  local ok, wk_conf = pcall(require, "which-key.config")
+  if ok and wk_conf and wk_conf.disable and type(wk_conf.disable.ft) == "table" then
+    if not vim.tbl_contains(wk_conf.disable.ft, "gelbooru") then
+      table.insert(wk_conf.disable.ft, "gelbooru")
+    end
+  end
   for _, m in ipairs({ "n", "v", "x" }) do
     M.keymap(buf, m, "<Space>", function() end)
     M.keymap(buf, m, " ", function() end)

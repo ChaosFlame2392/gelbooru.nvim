@@ -235,6 +235,28 @@ local function parse_stage(stage_str)
         stage.limit = l
         matched = true
       end
+    elseif t:match("^id:(.+)$") then
+      local id_val = t:match("^id:(.+)$")
+      local o, l, is_range = parse_limit_or_range(id_val)
+      if is_range then
+        stage.key = "id"
+        stage.dir = "desc"
+        stage.offset = o
+        stage.limit = l
+        stage.is_range = true
+        matched = true
+      elseif o and l then
+        stage.key = "id"
+        stage.dir = "desc"
+        stage.offset = o
+        stage.limit = l
+        matched = true
+      elseif l then
+        stage.key = "id"
+        stage.dir = "desc"
+        stage.limit = l
+        matched = true
+      end
     elseif t:match("^sort:(.+)$") then
       local expr = t:match("^sort:(.+)$")
       if expr == "random" then

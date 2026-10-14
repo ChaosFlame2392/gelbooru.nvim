@@ -558,8 +558,8 @@ describe("Integration: Search & List flow", function()
       assert.is_truthy(requested_urls[2]:find("limit=100") and requested_urls[2]:find("pid=1"))
       assert.is_truthy(requested_urls[3]:find("limit=100") and requested_urls[3]:find("pid=2"))
 
-      -- 2. Verify remote query included sort:id:desc
-      assert.is_truthy(requested_urls[1]:find("sort%%3Aid%%3Adesc") or requested_urls[1]:find("sort:id:desc"))
+      -- 2. Verify remote query included sort:id
+      assert.is_truthy(requested_urls[1]:find("sort%%3Aid") or requested_urls[1]:find("sort:id"))
 
       -- 3. Verify in-memory reduction to top 50 scores
       assert.are.equal(50, #state.State.posts)
@@ -612,7 +612,7 @@ describe("Integration: Search & List flow", function()
       -- Only 1 batch request issued with limit=15
       assert.are.equal(1, #requested_urls)
       assert.is_truthy(requested_urls[1]:find("limit=15"))
-      assert.is_truthy(requested_urls[1]:find("sort%%3Ascore%%3Adesc") or requested_urls[1]:find("sort:score:desc"))
+      assert.is_truthy(requested_urls[1]:find("sort%%3Ascore") or requested_urls[1]:find("sort:score"))
       assert.are.equal(15, #state.State.posts)
 
       download.curl_async = orig_curl_async
@@ -847,7 +847,7 @@ describe("Integration: Search & List flow", function()
       local first_url = captured_urls[1]
       assert.is_truthy(first_url:find("zenless_zone_zero"))
       assert.is_truthy(first_url:find("%-video") or first_url:find("-video"))
-      assert.is_truthy(first_url:find("sort%%3Aid%%3Adesc") or first_url:find("sort:id:desc"))
+      assert.is_truthy(first_url:find("sort%%3Aid") or first_url:find("sort:id"))
 
       -- 2. Verify status messages reflect candidate pool target of 1000
       local found_target_1000 = false

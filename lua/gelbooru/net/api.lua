@@ -651,7 +651,7 @@ function M.execute_piped_search(query, pipe)
     local k = stage1.key:lower()
     local remote_sort = nil
     if k == "id" or k == "score" then
-      local dir_str = (stage1.dir and stage1.dir:lower() == "asc") and ":asc" or ":desc"
+      local dir_str = (stage1.dir and stage1.dir:lower() == "asc") and ":asc" or ""
       remote_sort = string.format("sort:%s%s", k, dir_str)
     elseif k == "random" then
       remote_sort = "sort:random"
@@ -743,6 +743,16 @@ function M.execute_piped_search(query, pipe)
 
     if #candidate_pool > 0 and pool_cache_key then
       set_session_cache(pool_cache_key, candidate_pool)
+      if start_pid > 0 and nonce_param == "" then
+        local parent_key = string.format("pool::%s:pid=0", branches_key)
+        local parent_pool = get_session_cache(parent_key)
+        if parent_pool and #parent_pool == start_pid * page_size then
+          for _, p in ipairs(candidate_pool) do
+            table.insert(parent_pool, p)
+          end
+          set_session_cache(parent_key, parent_pool)
+        end
+      end
     end
 
     -- Execute subsequent pipeline stages in memory:

@@ -109,7 +109,7 @@ function M.teardown()
       pcall(vim.api.nvim_win_close, w, true)
     end
   end
-  for _, k in ipairs({ "img", "hdiv", "meta", "ac", "tag_modal", "confirm_modal" }) do
+  for _, k in ipairs({ "img", "hdiv", "meta", "ac", "confirm_modal" }) do
     local b = UI.bufs[k]
     if b and vim.api.nvim_buf_is_valid(b) then
       pcall(vim.api.nvim_buf_delete, b, { force = true })
@@ -851,319 +851,6 @@ function M.search_active_artist()
   end
 end
 
-function M.close_tag_modal()
-  local UI = state.UI
-  if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
-    pcall(vim.api.nvim_win_close, UI.wins.tag_modal, true)
-  end
-  UI.wins.tag_modal = nil
-  if UI.bufs.tag_modal and vim.api.nvim_buf_is_valid(UI.bufs.tag_modal) then
-    pcall(vim.api.nvim_buf_delete, UI.bufs.tag_modal, { force = true })
-  end
-  UI.bufs.tag_modal = nil
-  if UI.tag_modal_prev_win and vim.api.nvim_win_is_valid(UI.tag_modal_prev_win) then
-    pcall(vim.api.nvim_set_current_win, UI.tag_modal_prev_win)
-  elseif UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
-    pcall(vim.api.nvim_set_current_win, UI.wins.list)
-  end
-  UI.tag_modal_prev_win = nil
-  M.set_status()
-  vim.schedule(function()
-    if not state.State.torn_down then
-      state.State.cur_id = nil
-      M.render_preview(false)
-    end
-  end)
-end
-
-function M.open_tag_modal()
-  local State = state.State
-  local UI = state.UI
-  local p = State.posts[State.cur]
-  if not p or not p.tags or vim.trim(p.tags) == "" then
-    M.set_status("No tags available for this post", 2000)
-    return
-  end
-
-  local cur_win = vim.api.nvim_get_current_win()
-  if cur_win ~= UI.wins.tag_modal and cur_win ~= UI.wins.confirm_modal then
-    UI.tag_modal_prev_win = cur_win
-  end
-
-  local seen = {}
-  local items = {}
-  for raw_tag in p.tags:gmatch("%S+") do
-    local tag = util.decode_html(raw_tag)
-    local tag_lower = tag:lower()
-    if tag ~= "" and not seen[tag_lower] then
-      seen[tag_lower] = true
-      local typ = 0
-      if p.artist and tag_lower == p.artist:lower() then
-        typ = 1
-      elseif State.tags_by_name and State.tags_by_name[tag_lower] then
-        typ = tonumber(State.tags_by_name[tag_lower].t) or 0
-      elseif tag:match("^sort:") or tag:match("^rating:") or tag:match("^id:") or tag:match("^score:") then
-        typ = 5
-      end
-      local badge = config.TAG_BADGES[typ] or "General"
-      table.insert(items, {
-        name = tag,
-        typ = typ,
-        badge = badge,
-        selected = false,
-      })
-    end
-  end
-
-  if #items == 0 then
-    M.set_status("No tags available for this post", 2000)
-    return
-  end
-
-  local type_order = { [1] = 1, [3] = 2, [4] = 3, [0] = 4, [6] = 5, [5] = 6 }
-  table.sort(items, function(a, b)
-    local oa = type_order[a.typ] or 99
-    local ob = type_order[b.typ] or 99
-    if oa ~= ob then
-      return oa < ob
-    end
-    return a.name:lower() < b.name:lower()
-  end)
-
-  if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
-    pcall(vim.api.nvim_win_close, UI.wins.tag_modal, true)
-    UI.wins.tag_modal = nil
-  end
-  if UI.bufs.tag_modal and vim.api.nvim_buf_is_valid(UI.bufs.tag_modal) then
-    pcall(vim.api.nvim_buf_delete, UI.bufs.tag_modal, { force = true })
-    UI.bufs.tag_modal = nil
-  end
-
-  local max_len = 0
-  for _, item in ipairs(items) do
-    local str_len = 4 + #item.badge + 3 + #item.name
-    if str_len > max_len then
-      max_len = str_len
-    end
-  end
-
-  local max_avail_w = math.max(10, vim.o.columns - 4)
-  local modal_w = math.min(max_avail_w, math.max(20, math.min(max_avail_w, max_len + 6)))
-  local modal_h = math.max(3, math.min(#items, math.floor(vim.o.lines * 0.7)))
-  local modal_row = math.max(1, math.floor((vim.o.lines - modal_h) / 2))
-  local l = M.calc_layout()
-  local modal_col
-  if not State.zen_mode and l.list and l.list.width and modal_w <= (l.list.width + 6) then
-    modal_col = math.max(1, l.list.col)
-  else
-    modal_col = math.max(1, math.floor((vim.o.columns - modal_w) / 2))
-  end
-
-  UI.bufs.tag_modal = vim.api.nvim_create_buf(false, true)
-  vim.bo[UI.bufs.tag_modal].buftype = "nofile"
-  vim.bo[UI.bufs.tag_modal].bufhidden = "wipe"
-  vim.bo[UI.bufs.tag_modal].modifiable = true
-  vim.bo[UI.bufs.tag_modal].filetype = "gelbooru_tag_modal"
-  pcall(function()
-    vim.b[UI.bufs.tag_modal].which_key_ignore = true
-    vim.b[UI.bufs.tag_modal].whichkey_disable = true
-    vim.b[UI.bufs.tag_modal].miniclue_disable = true
-  end)
-
-  local function render_modal_lines()
-    if not UI.bufs.tag_modal or not vim.api.nvim_buf_is_valid(UI.bufs.tag_modal) then
-      return
-    end
-    local lines = {}
-    for _, item in ipairs(items) do
-      local mark = " "
-      if item.mode == "exclude" then
-        mark = "-"
-      elseif item.selected or item.mode == "include" then
-        mark = "x"
-      end
-      table.insert(lines, string.format("[%s] [%s] %s", mark, item.badge, item.name))
-    end
-    vim.bo[UI.bufs.tag_modal].modifiable = true
-    vim.api.nvim_buf_set_lines(UI.bufs.tag_modal, 0, -1, false, lines)
-    vim.bo[UI.bufs.tag_modal].modifiable = false
-  end
-
-  render_modal_lines()
-
-  UI.wins.tag_modal = util.float(UI.bufs.tag_modal, modal_row, modal_col, modal_w, modal_h, {
-    border = "rounded",
-    title = string.format("  Tags (%d)  ", #items),
-    title_pos = "center",
-    zindex = 75,
-    focusable = true,
-  })
-  vim.wo[UI.wins.tag_modal].cursorline = true
-  vim.wo[UI.wins.tag_modal].winhighlight = "Normal:NormalFloat,FloatBorder:FloatBorder"
-  pcall(vim.api.nvim_set_current_win, UI.wins.tag_modal)
-  pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { 1, 0 })
-
-  local function tmap(key, fn)
-    util.keymap(UI.bufs.tag_modal, "n", key, fn)
-  end
-
-  -- Block helper popups, folding, and normal-mode editing in modal
-  local block_keys = {
-    "z", "Z", "v", "V", "<C-v>", "c", "C", "d", "D", "p", "P",
-    "r", "R", "s", "S", "i", "I", "o", "O", "u", "U", "w", "W",
-    "b", "B", "e", "E", "m", "M", "t", "T", "h", "l", "f", "F",
-    ";", ":", "'", '"', "<BS>", "<Del>", "/", "?"
-  }
-  for _, bk in ipairs(block_keys) do
-    tmap(bk, function() end)
-  end
-
-  local function nav_down()
-    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
-    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
-    if cur < #items then
-      vim.api.nvim_win_set_cursor(UI.wins.tag_modal, { cur + 1, 0 })
-    end
-  end
-
-  local function nav_up()
-    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
-    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
-    if cur > 1 then
-      vim.api.nvim_win_set_cursor(UI.wins.tag_modal, { cur - 1, 0 })
-    end
-  end
-
-  tmap("j", nav_down)
-  tmap("<Down>", nav_down)
-  tmap("k", nav_up)
-  tmap("<Up>", nav_up)
-
-  local function toggle_cur()
-    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
-    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
-    if items[cur] then
-      if items[cur].mode == "none" or (not items[cur].selected and items[cur].mode ~= "exclude") then
-        items[cur].mode = "include"
-        items[cur].selected = true
-      else
-        items[cur].mode = "none"
-        items[cur].selected = false
-      end
-      render_modal_lines()
-      pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { cur, 0 })
-    end
-  end
-  tmap("<Space>", toggle_cur)
-  tmap(" ", toggle_cur)
-  tmap("<Leader>", toggle_cur)
-  tmap("<Leader>/", function() end)
-  tmap("<Localleader>", function() end)
-
-  tmap("<LeftMouse>", function()
-    vim.schedule(function()
-      if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
-        local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
-        if cur > #items then
-          pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { math.max(1, #items), 0 })
-        end
-      end
-    end)
-  end)
-  tmap("<2-LeftMouse>", toggle_cur)
-
-  local function toggle_exclude()
-    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
-    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
-    if items[cur] then
-      if items[cur].mode == "exclude" then
-        items[cur].mode = "none"
-        items[cur].selected = false
-      else
-        items[cur].mode = "exclude"
-        items[cur].selected = false
-      end
-      render_modal_lines()
-      pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { cur, 0 })
-    end
-  end
-  tmap("-", toggle_exclude)
-  tmap("x", toggle_exclude)
-
-  tmap("+", function()
-    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
-    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
-    if items[cur] then
-      items[cur].mode = "include"
-      items[cur].selected = true
-      render_modal_lines()
-      pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { cur, 0 })
-    end
-  end)
-
-  tmap("a", function()
-    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
-    local all_selected = true
-    for _, it in ipairs(items) do
-      if not it.selected then
-        all_selected = false
-        break
-      end
-    end
-    local new_val = not all_selected
-    for _, it in ipairs(items) do
-      it.selected = new_val
-      it.mode = new_val and "include" or "none"
-    end
-    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
-    render_modal_lines()
-    pcall(vim.api.nvim_win_set_cursor, UI.wins.tag_modal, { cur, 0 })
-  end)
-
-  tmap("y", function()
-    if not UI.wins.tag_modal or not vim.api.nvim_win_is_valid(UI.wins.tag_modal) then return end
-    local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
-    local it = items[cur]
-    if it then
-      pcall(vim.fn.setreg, '"', it.name)
-      pcall(vim.fn.setreg, "+", it.name)
-      M.set_status("Yanked tag: " .. it.name, 2000)
-      pcall(vim.notify, "Yanked tag: " .. it.name, vim.log.levels.INFO)
-    end
-  end)
-
-  tmap("<CR>", function()
-    local chosen = {}
-    for _, it in ipairs(items) do
-      if it.mode == "exclude" then
-        table.insert(chosen, "-" .. it.name)
-      elseif it.selected or it.mode == "include" then
-        table.insert(chosen, it.name)
-      end
-    end
-    if #chosen == 0 then
-      if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
-        local cur = vim.api.nvim_win_get_cursor(UI.wins.tag_modal)[1]
-        if items[cur] then
-          table.insert(chosen, items[cur].name)
-        end
-      end
-    end
-    M.close_tag_modal()
-    if #chosen > 0 then
-      local query_str = table.concat(chosen, " ")
-      if UI.bufs.input and vim.api.nvim_buf_is_valid(UI.bufs.input) then
-        vim.bo[UI.bufs.input].modifiable = true
-        vim.api.nvim_buf_set_lines(UI.bufs.input, 0, 1, false, { query_str })
-      end
-      api.execute_search(query_str)
-    end
-  end)
-
-  tmap("q", M.close_tag_modal)
-  tmap("<Esc>", M.close_tag_modal)
-end
-
 local function find_local_file_for_post(p)
   if not p then return nil end
   if p.is_local and p.file_url and not p.file_url:match("^https?://") and vim.fn.filereadable(p.file_url) == 1 then
@@ -1216,7 +903,7 @@ end
 function M.open_confirm_modal(filename, on_confirm)
   local UI = state.UI
   local cur_win = vim.api.nvim_get_current_win()
-  if cur_win ~= UI.wins.confirm_modal and cur_win ~= UI.wins.tag_modal then
+  if cur_win ~= UI.wins.confirm_modal then
     UI.confirm_prev_win = cur_win
   end
 
@@ -1611,12 +1298,6 @@ function M.ensure_ui()
         return
       end
       local cur_win = vim.api.nvim_get_current_win()
-      if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
-        if cur_win ~= UI.wins.tag_modal then
-          pcall(vim.api.nvim_set_current_win, UI.wins.tag_modal)
-        end
-        return
-      end
       if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
         if cur_win ~= UI.wins.confirm_modal then
           pcall(vim.api.nvim_set_current_win, UI.wins.confirm_modal)
@@ -1640,12 +1321,6 @@ function M.ensure_ui()
           return
         end
         local cur = vim.api.nvim_get_current_win()
-        if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
-          if cur ~= UI.wins.tag_modal then
-            pcall(vim.api.nvim_set_current_win, UI.wins.tag_modal)
-          end
-          return
-        end
         if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
           if cur ~= UI.wins.confirm_modal then
             pcall(vim.api.nvim_set_current_win, UI.wins.confirm_modal)
@@ -1680,6 +1355,13 @@ function M.ensure_ui()
       end
       local ok, cursor = pcall(vim.api.nvim_win_get_cursor, UI.wins.list)
       if not ok or not cursor then
+        return
+      end
+      local m = vim.fn.getmousepos()
+      if m and m.winid and m.winid ~= 0 and m.winid ~= UI.wins.list then
+        _syncing_cursor = true
+        pcall(vim.api.nvim_win_set_cursor, UI.wins.list, { math.max(1, State.cur), 0 })
+        _syncing_cursor = false
         return
       end
       local line = cursor[1]
@@ -1854,8 +1536,6 @@ function M.ensure_ui()
   M.toggle_zen = toggle_zen
 
   lm("u", M.search_active_artist)
-  lm("t", M.open_tag_modal)
-  lm("T", M.open_tag_modal)
   lm("d", M.delete_current)
   lm("D", M.delete_current)
   lm("<", function()
@@ -1949,10 +1629,6 @@ function M.ensure_ui()
     if State.torn_down then
       return
     end
-    if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
-      pcall(vim.api.nvim_set_current_win, UI.wins.tag_modal)
-      return
-    end
     if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
       pcall(vim.api.nvim_set_current_win, UI.wins.confirm_modal)
       return
@@ -2000,20 +1676,20 @@ function M.ensure_ui()
   mm("q", return_to_list)
   mm("<Esc>", return_to_list)
   mm("M", return_to_list)
+  mm("<BS>", return_to_list)
   mm("m", function()
     State.show_meta = false
     return_to_list()
     handle_resize()
   end)
   mm("u", M.search_active_artist)
-  mm("t", M.open_tag_modal)
-  mm("T", M.open_tag_modal)
   mm("d", M.delete_current)
   mm("D", M.delete_current)
   mm("\\", toggle_zen)
   mm("o", open_web_page)
   mm("O", open_media_viewer)
   mm("<CR>", api.save_current)
+  lm("<BS>", history.history_prev)
 
   -- Defensive keymaps on non-interactive buffers in case mouse/focus lands in them
   local mouse_clicks = {
@@ -2059,8 +1735,6 @@ function M.ensure_ui()
       util.keymap(buf, "n", "q", return_to_list)
       util.keymap(buf, "n", "<Esc>", return_to_list)
       util.keymap(buf, "n", "\\", toggle_zen)
-      util.keymap(buf, "n", "t", M.open_tag_modal)
-      util.keymap(buf, "n", "T", M.open_tag_modal)
       util.keymap(buf, "n", "d", M.delete_current)
       util.keymap(buf, "n", "D", M.delete_current)
       for _, sk in ipairs(shield_keys) do

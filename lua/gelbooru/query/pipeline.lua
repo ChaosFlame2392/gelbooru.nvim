@@ -131,6 +131,21 @@ function M.parse_pipeline(query_or_tags)
               has_preceding_stage = true
             elseif (tok_lower == "asc" or tok_lower == "desc") and has_preceding_stage and #stages > 0 and stages[#stages].key then
               stages[#stages].dir = tok_lower
+            elseif tok_lower:match("^id:") then
+              local id_val = clean_tok:match("^[Ii][Dd]:(.*)$")
+              local o, l, is_range = parse.parse_limit_or_range(id_val)
+              if is_range or (o and l) or ((p_idx > 1 or has_preceding_stage) and l) then
+                table.insert(stages, {
+                  key = "id",
+                  dir = "desc",
+                  offset = o,
+                  limit = l,
+                  is_range = is_range or false,
+                })
+                has_preceding_stage = true
+              else
+                table.insert(non_stage_tokens, tok.raw)
+              end
             else
               local o, l, is_range = parse.parse_limit_or_range(clean_tok)
               if is_range or (o and l) or ((p_idx > 1 or has_preceding_stage) and l) then

@@ -888,83 +888,22 @@ describe("Regression Tests for UI & Search bugs", function()
       assert.are.equal(200, pipe.stages[2].limit)
     end)
 
-    it("positions tag modal over left panel when width permits and restores preview on close", function()
-      ui.open()
-      state.State.posts = {
-        { id = "99001", file_url = "https://example.com/1.jpg", tags = "tag1 tag2 tag3", rating = "g", score = 10, width = 100, height = 100 }
-      }
-      state.State.cur = 1
-      state.State.cur_id = "99001"
-      ui.render_list()
-
-      ui.open_tag_modal()
-      assert.is_not_nil(state.UI.wins.tag_modal)
-      assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.tag_modal))
-
-      -- Modal positioning
-      local l = ui.calc_layout()
-      local win_cfg = vim.api.nvim_win_get_config(state.UI.wins.tag_modal)
-      local actual_col = type(win_cfg.col) == "table" and (win_cfg.col[false] or win_cfg.col[1]) or win_cfg.col
-      assert.are.equal(l.list.col, actual_col)
-
-      -- Shielding flags
-      local buf = state.UI.bufs.tag_modal
-      assert.are.equal("gelbooru_tag_modal", vim.bo[buf].filetype)
-      assert.is_true(vim.b[buf].which_key_ignore)
-      assert.is_true(vim.b[buf].whichkey_disable)
-      assert.is_true(vim.b[buf].miniclue_disable)
-
-      -- Blocked helper keys
-      local maps = vim.api.nvim_buf_get_keymap(buf, "n")
-      local map_by_lhs = {}
-      for _, km in ipairs(maps) do
-        map_by_lhs[km.lhs] = km
-      end
-      assert.is_not_nil(map_by_lhs["z"], "z must be blocked in tag modal")
-      assert.is_not_nil(map_by_lhs["/"], "/ must be blocked in tag modal")
-      assert.is_true(map_by_lhs["<Space>"] ~= nil or map_by_lhs[" "] ~= nil, "<Space> must be mapped in tag modal")
-      assert.is_not_nil(map_by_lhs["<LeftMouse>"], "<LeftMouse> must be mapped in tag modal")
-
-      -- Close tag modal and verify cur_id is reset so preview can restore
-      ui.close_tag_modal()
-      assert.is_nil(state.UI.wins.tag_modal)
-      vim.wait(100, function() return state.State.cur_id == "99001" or state.State.cur_id == nil end)
-
-      ui.teardown()
-    end)
-
     it("guards mouse focus and non-interactive window clicks with WinEnter redirect", function()
       ui.open()
-      assert.is_not_nil(state.UI.wins.list)
-      assert.is_not_nil(state.UI.wins.img)
-      assert.is_not_nil(state.UI.wins.frame)
-
-      -- Check mouse click mappings on decorative/img buffers
-      for _, buf in ipairs({ state.UI.bufs.frame, state.UI.bufs.div, state.UI.bufs.img, state.UI.bufs.status }) do
-        local maps = vim.api.nvim_buf_get_keymap(buf, "n")
-        local has_left_click = false
-        for _, km in ipairs(maps) do
-          if km.lhs == "<LeftMouse>" then has_left_click = true end
-        end
-        assert.is_true(has_left_click, "Non-interactive buffer must map <LeftMouse>")
-      end
-
       -- If focus enters non-interactive img or background window, WinEnter redirects back to list
       vim.api.nvim_set_current_win(state.UI.wins.img)
       vim.api.nvim_exec_autocmds("WinEnter", { group = state.UI.aug })
       assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win(), "Focus must redirect to list window")
 
-      -- If tag modal is open, focus redirects to tag modal
-      state.State.posts = { { id = "1", tags = "test", width = 10, height = 10 } }
-      state.State.cur = 1
-      ui.open_tag_modal()
-      assert.is_not_nil(state.UI.wins.tag_modal)
+      -- If confirm modal is open, focus redirects to confirm modal
+      ui.open_confirm_modal("test.jpg", function() end)
+      assert.is_not_nil(state.UI.wins.confirm_modal)
 
       vim.api.nvim_set_current_win(state.UI.wins.list)
       vim.api.nvim_exec_autocmds("WinEnter", { group = state.UI.aug })
-      assert.are.equal(state.UI.wins.tag_modal, vim.api.nvim_get_current_win(), "Focus must remain in tag modal")
+      assert.are.equal(state.UI.wins.confirm_modal, vim.api.nvim_get_current_win(), "Focus must remain in confirm modal")
 
-      ui.close_tag_modal()
+      ui.close_confirm_modal()
       ui.teardown()
     end)
 

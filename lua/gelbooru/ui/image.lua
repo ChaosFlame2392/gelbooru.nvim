@@ -292,19 +292,6 @@ local function attach_defensive_keymaps(buf)
   util.keymap(buf, "n", "q", handle_q)
   util.keymap(buf, "n", "<Esc>", handle_q)
 
-  util.keymap(buf, "n", "t", function()
-    local ui = require("gelbooru.ui")
-    if ui and ui.open_tag_modal then
-      ui.open_tag_modal()
-    end
-  end)
-  util.keymap(buf, "n", "T", function()
-    local ui = require("gelbooru.ui")
-    if ui and ui.open_tag_modal then
-      ui.open_tag_modal()
-    end
-  end)
-
   util.keymap(buf, "n", "d", function()
     local ui = require("gelbooru.ui")
     if ui and ui.delete_current then
@@ -592,7 +579,6 @@ function M.nudge_current_placement()
     sanitize_dpi(p.img)
     p._state = nil
     pcall(p.update, p)
-    pcall(vim.api.nvim_buf_clear_namespace, p.buf, vim.api.nvim_create_namespace("snacks.image"), 0, 1)
     log("DEBUG", "RENDER", "Nudged placement for resize")
     return true
   end
@@ -623,7 +609,6 @@ function M.render_image(win, path)
     pcall(vim.api.nvim_win_set_buf, win, current.buf)
     current._state = nil
     pcall(current.update, current)
-    pcall(vim.api.nvim_buf_clear_namespace, current.buf, vim.api.nvim_create_namespace("snacks.image"), 0, 1)
     log("DEBUG", "RENDER", "In-place resize nudge: %s", path)
     return true
   end
@@ -658,9 +643,6 @@ function M.render_image(win, path)
     if orig_update then
       pcall(orig_update, self)
     end
-    if self and self.buf and vim.api.nvim_buf_is_valid(self.buf) then
-      pcall(vim.api.nvim_buf_clear_namespace, self.buf, vim.api.nvim_create_namespace("snacks.image"), 0, 1)
-    end
   end
 
   local old_buf = current and current.buf
@@ -673,7 +655,6 @@ function M.render_image(win, path)
     pcall(vim.api.nvim_buf_delete, old_buf, { force = true })
   end
   pcall(placement.update, placement)
-  pcall(vim.api.nvim_buf_clear_namespace, placement.buf, vim.api.nvim_create_namespace("snacks.image"), 0, 1)
   pcall(function()
     if vim.api.nvim_buf_is_valid(buf) then
       vim.bo[buf].modifiable = false
