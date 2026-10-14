@@ -1003,5 +1003,124 @@ describe("Regression Tests for UI & Search bugs", function()
       download.curl_async = orig_curl
       ui.teardown()
     end)
+
+    it("reuses in-memory candidate pool for subsequent queries when downstream sort or limit is added", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_curl = download.curl_async
+      local fetch_counts = 0
+
+      -- Generate 500 fake posts
+      local mock_500 = {}
+      for i = 1, 500 do
+        table.insert(mock_500, {
+          id = tostring(500 - i + 1),
+          score = tostring(i * 2),
+          file_url = "https://example.com/" .. i .. ".jpg",
+          tags = "tag1 anime",
+          width = 800,
+          height = 600,
+        })
+      end
+
+      download.curl_async = function(url, cb)
+        if not cb then return end
+        if url:find("s=post") then
+          fetch_counts = fetch_counts + 1
+          local pid = tonumber(url:match("pid=(%d+)")) or 0
+          local limit = tonumber(url:match("limit=(%d+)")) or 100
+          local batch = {}
+          for j = pid * limit + 1, math.min(#mock_500, (pid + 1) * limit) do
+            table.insert(batch, mock_500[j])
+          end
+          vim.schedule(function() cb(vim.fn.json_encode({ post = batch })) end)
+        else
+          vim.schedule(function() cb("{}") end)
+        end
+      end
+
+      -- Query 1: sort:id:500 (fetches 5 pages of 100)
+      api.execute_search("sort:id:500")
+      vim.wait(1000, function() return #state.State.posts == 500 end, 10)
+      assert.are.equal(500, #state.State.posts)
+      assert.are.equal(5, fetch_counts)
+
+      -- Query 2: add sort:score:200 on top (e.g. sort:id:500 | sort:score:200)
+      -- Candidate pool of 500 is already in cache! Must make 0 additional network calls!
+      api.execute_search("sort:id:500 | sort:score:200")
+      vim.wait(500, function() return #state.State.posts == 200 end, 10)
+      assert.are.equal(200, #state.State.posts)
+      assert.are.equal(5, fetch_counts) -- No new network requests!
+      assert.are.equal("1000", tostring(state.State.posts[1].score))
+
+      download.curl_async = orig_curl
+      ui.teardown()
+    end)
+
+    it("prioritizes permanently downloaded high-quality media in save_dir over preview cache upon navigation", function()
+      local config = require("gelbooru.core.config")
+      local image = require("gelbooru.ui.image")
+      ui.open()
+
+      local saved_file = config.options.save_dir .. "/99999.jpg"
+      local f = io.open(saved_file, "w")
+      if f then
+        f:write("fake high quality image content")
+        f:close()
+      end
+
+      local post = {
+        id = "99999",
+        file_url = "https://example.com/original_99999.jpg",
+        sample_url = "https://example.com/sample_99999.jpg",
+        preview_url = "https://example.com/prev_99999.jpg",
+        width = 1920,
+        height = 1080,
+      }
+      state.State.posts = { post, { id = "100000", file_url = "https://example.com/100000.jpg", width = 10, height = 10 } }
+      state.State.cur = 1
+
+      -- get_preview_targets must return saved_file from save_dir directly
+      local urls, dest = image.get_preview_targets(post)
+      assert.are.equal(saved_file, dest)
+      assert.are.equal(saved_file, urls[1])
+
+      -- When staged for deletion (_pending_delete = true), it must NOT use save_dir
+      post._pending_delete = true
+      local urls_del, dest_del = image.get_preview_targets(post)
+      assert.are.not_equal(saved_file, dest_del)
+      assert.is_truthy(dest_del:find("prev_99999.jpg"))
+
+      post._pending_delete = nil
+      ui.teardown()
+    end)
+
+    it("shields image and float buffers from global leader and command leaks", function()
+      ui.open()
+      local img_buf = state.UI.bufs.img
+      assert.is_not_nil(img_buf)
+
+      -- which-key / mini.clue disabling variables set
+      assert.is_true(vim.b[img_buf].which_key_ignore)
+      assert.is_true(vim.b[img_buf].whichkey_disable)
+      assert.is_true(vim.b[img_buf].miniclue_disable)
+
+      -- Space and shield keys mapped defensively
+      local keymaps = vim.api.nvim_buf_get_keymap(img_buf, "n")
+      local mapped = {}
+      for _, km in ipairs(keymaps) do
+        mapped[km.lhs] = true
+      end
+      assert.is_true(mapped["<Space>"] or mapped[" "])
+      assert.is_true(mapped["w"])
+      assert.is_true(mapped["z"])
+
+      -- When focus enters image window, WinEnter redirects back to list
+      vim.api.nvim_set_current_win(state.UI.wins.img)
+      vim.api.nvim_exec_autocmds("WinEnter", { group = state.UI.aug })
+      assert.are.equal(state.UI.wins.list, vim.api.nvim_get_current_win())
+
+      ui.teardown()
+    end)
   end)
 end)

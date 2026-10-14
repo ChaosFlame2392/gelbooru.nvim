@@ -38,6 +38,57 @@ function M.preview_source_name(p, url)
   return "preview"
 end
 
+function M.get_saved_media_path(post_id, fallback_url)
+  if not post_id or tostring(post_id) == "" or tostring(post_id) == "nil" then
+    return nil
+  end
+  local State = state.State
+  local del_key = tostring(post_id)
+  if State and State.pending_deletions and State.pending_deletions[del_key] then
+    return nil
+  end
+
+  local save_dir = config.options.save_dir and vim.fn.expand(config.options.save_dir)
+  if not save_dir or save_dir == "" or vim.fn.isdirectory(save_dir) ~= 1 then
+    return nil
+  end
+
+  local num_id = tonumber(post_id)
+  local local_index = require("gelbooru.local.index")
+  local saved_ext = num_id and State and State.saved_index and State.saved_index[num_id]
+  if not saved_ext and local_index.update_saved_index then
+    local idx = local_index.update_saved_index()
+    saved_ext = num_id and idx and idx[num_id]
+  end
+
+  if saved_ext and saved_ext ~= "" then
+    local candidate = string.format("%s/%s.%s", save_dir, tostring(post_id), saved_ext)
+    if vim.fn.filereadable(candidate) == 1 then
+      return candidate
+    end
+  end
+
+  if fallback_url and fallback_url ~= "" then
+    local ext = M.file_ext_from_url(fallback_url)
+    if ext and ext ~= "" then
+      local candidate = string.format("%s/%s.%s", save_dir, tostring(post_id), ext)
+      if vim.fn.filereadable(candidate) == 1 then
+        return candidate
+      end
+    end
+  end
+
+  local common_exts = { "jpg", "jpeg", "png", "gif", "webm", "mp4", "mkv" }
+  for _, ext in ipairs(common_exts) do
+    local candidate = string.format("%s/%s.%s", save_dir, tostring(post_id), ext)
+    if vim.fn.filereadable(candidate) == 1 then
+      return candidate
+    end
+  end
+
+  return nil
+end
+
 function M.get_preview_targets(p, url_idx)
   if not p then
     return {}, nil
@@ -50,6 +101,18 @@ function M.get_preview_targets(p, url_idx)
       return { thumb_dest }, thumb_dest
     end
     return { p.file_url }, p.file_url
+  end
+
+  -- Prioritize permanently downloaded media from save_dir over low-res preview cache
+  if p.id and not p._pending_delete then
+    local saved_path = M.get_saved_media_path(p.id, p.file_url)
+    if saved_path then
+      if M.is_video_post(p) or (saved_path and M.VIDEO_EXTS[util.file_ext(saved_path)]) then
+        local thumb_dest = M.get_video_thumbnail_path(saved_path, p.id)
+        return { thumb_dest }, thumb_dest
+      end
+      return { saved_path }, saved_path
+    end
   end
 
   local urls, seen = {}, {}
@@ -93,6 +156,12 @@ end
 
 local function attach_defensive_keymaps(buf)
   local util = require("gelbooru.core.util")
+  pcall(function()
+    vim.b[buf].which_key_ignore = true
+    vim.b[buf].whichkey_disable = true
+    vim.b[buf].miniclue_disable = true
+  end)
+
   local function go_search()
     local ui = require("gelbooru.ui")
     if ui and ui.enter_search then
@@ -115,6 +184,17 @@ local function attach_defensive_keymaps(buf)
         ui.set_status()
       end
     end
+    vim.schedule(function()
+      if s.State.torn_down then
+        return
+      end
+      if s.UI.wins.list and vim.api.nvim_win_is_valid(s.UI.wins.list) then
+        local cur = vim.api.nvim_get_current_win()
+        if cur ~= s.UI.wins.list and cur ~= s.UI.wins.input and cur ~= s.UI.wins.meta then
+          pcall(vim.api.nvim_set_current_win, s.UI.wins.list)
+        end
+      end
+    end)
   end
 
   local function handle_q()
@@ -141,6 +221,11 @@ local function attach_defensive_keymaps(buf)
   util.keymap(buf, "n", "<3-LeftMouse>", go_list)
   util.keymap(buf, "n", "<4-LeftMouse>", go_list)
   util.keymap(buf, "n", "<RightMouse>", go_list)
+  util.keymap(buf, "n", "<Space>", go_list)
+  util.keymap(buf, "n", " ", go_list)
+  util.keymap(buf, "n", "<Leader>", go_list)
+  util.keymap(buf, "n", "<Localleader>", go_list)
+
   util.keymap(buf, "n", "j", function() nav(1) end)
   util.keymap(buf, "n", "k", function() nav(-1) end)
   util.keymap(buf, "n", "gg", function() nav("gg") end)
@@ -237,6 +322,18 @@ local function attach_defensive_keymaps(buf)
 
   for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
     util.keymap(buf, "n", k, go_search)
+  end
+
+  local shield_keys = {
+    "b", "B", "c", "C", "e", "E", "f", "F", "h", "H", "l", "L",
+    "n", "N", "p", "P", "v", "V", "<C-v>", "w", "W", "x", "X",
+    "y", "Y", "z", "Z", ";", ":", "'", '"', "<BS>", "<Del>",
+    "<C-f>", "<C-b>", "<C-d>", "<C-u>", "<C-e>", "<C-y>", "<C-o>", "<C-i>",
+    "<C-p>", "<C-n>", "<C-w>", "<C-r>", "<Tab>", "<S-Tab>",
+    "<Up>", "<Down>", "<Left>", "<Right>",
+  }
+  for _, sk in ipairs(shield_keys) do
+    util.keymap(buf, "n", sk, go_list)
   end
 end
 

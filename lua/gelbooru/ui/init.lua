@@ -116,6 +116,9 @@ function M.teardown()
     end
   end
   invalidate_layout()
+  pcall(function()
+    require("gelbooru.net.api").clear_session_cache()
+  end)
   state.reset_query_state()
   state.reset_ui()
   state.reset_tag_state()
@@ -1628,6 +1631,34 @@ function M.ensure_ui()
       if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
         pcall(vim.api.nvim_set_current_win, UI.wins.list)
       end
+
+      vim.schedule(function()
+        if State.torn_down or not (UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame)) then
+          return
+        end
+        local cur = vim.api.nvim_get_current_win()
+        if UI.wins.tag_modal and vim.api.nvim_win_is_valid(UI.wins.tag_modal) then
+          if cur ~= UI.wins.tag_modal then
+            pcall(vim.api.nvim_set_current_win, UI.wins.tag_modal)
+          end
+          return
+        end
+        if UI.wins.confirm_modal and vim.api.nvim_win_is_valid(UI.wins.confirm_modal) then
+          if cur ~= UI.wins.confirm_modal then
+            pcall(vim.api.nvim_set_current_win, UI.wins.confirm_modal)
+          end
+          return
+        end
+        if cur == UI.wins.list or cur == UI.wins.input then
+          return
+        end
+        if UI.wins.meta and vim.api.nvim_win_is_valid(UI.wins.meta) and cur == UI.wins.meta then
+          return
+        end
+        if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+          pcall(vim.api.nvim_set_current_win, UI.wins.list)
+        end
+      end)
     end,
   })
 
@@ -1895,6 +1926,15 @@ function M.ensure_ui()
       pcall(vim.api.nvim_set_current_win, UI.wins.list)
       M.set_status()
     end
+    vim.schedule(function()
+      if State.torn_down then return end
+      if UI.wins.list and vim.api.nvim_win_is_valid(UI.wins.list) then
+        local cur = vim.api.nvim_get_current_win()
+        if cur ~= UI.wins.list and cur ~= UI.wins.input and cur ~= UI.wins.meta then
+          pcall(vim.api.nvim_set_current_win, UI.wins.list)
+        end
+      end
+    end)
   end
   mm("q", return_to_list)
   mm("<Esc>", return_to_list)
@@ -1916,11 +1956,28 @@ function M.ensure_ui()
 
   -- Defensive keymaps on non-interactive buffers in case mouse/focus lands in them
   local mouse_clicks = { "<LeftMouse>", "<2-LeftMouse>", "<3-LeftMouse>", "<4-LeftMouse>", "<RightMouse>" }
+  local shield_keys = {
+    "b", "B", "c", "C", "e", "E", "f", "F", "h", "H", "l", "L",
+    "n", "N", "p", "P", "v", "V", "<C-v>", "w", "W", "x", "X",
+    "y", "Y", "z", "Z", ";", ":", "'", '"', "<BS>", "<Del>",
+    "<C-f>", "<C-b>", "<C-d>", "<C-u>", "<C-e>", "<C-y>", "<C-o>", "<C-i>",
+    "<C-p>", "<C-n>", "<C-w>", "<C-r>", "<Tab>", "<S-Tab>",
+    "<Up>", "<Down>", "<Left>", "<Right>",
+  }
   for _, buf in ipairs({ UI.bufs.frame, UI.bufs.div, UI.bufs.vdiv, UI.bufs.hdiv, UI.bufs.img, UI.bufs.status, UI.bufs.ac }) do
     if buf and vim.api.nvim_buf_is_valid(buf) then
+      pcall(function()
+        vim.b[buf].which_key_ignore = true
+        vim.b[buf].whichkey_disable = true
+        vim.b[buf].miniclue_disable = true
+      end)
       for _, click in ipairs(mouse_clicks) do
         util.keymap(buf, "n", click, return_to_list)
       end
+      util.keymap(buf, "n", "<Space>", return_to_list)
+      util.keymap(buf, "n", " ", return_to_list)
+      util.keymap(buf, "n", "<Leader>", return_to_list)
+      util.keymap(buf, "n", "<Localleader>", return_to_list)
       for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
         util.keymap(buf, "n", k, M.enter_search)
       end
@@ -1931,6 +1988,9 @@ function M.ensure_ui()
       util.keymap(buf, "n", "T", M.open_tag_modal)
       util.keymap(buf, "n", "d", M.delete_current)
       util.keymap(buf, "n", "D", M.delete_current)
+      for _, sk in ipairs(shield_keys) do
+        util.keymap(buf, "n", sk, return_to_list)
+      end
     end
   end
 

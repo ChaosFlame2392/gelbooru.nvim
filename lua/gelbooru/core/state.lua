@@ -83,7 +83,7 @@ function M.reset_query_state()
   M.State.zen_mode = false
   M.State.saved_index = {}
   M.State.pending_deletions = {}
-  M.State.session_cache = {}
+  -- session_cache is preserved across query resets (TTL-managed in net/api.lua)
   M.State.local_folder_posts = nil
   M.State.local_filter = nil
   M.State.local_query_tag_str = nil

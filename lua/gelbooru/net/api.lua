@@ -13,35 +13,42 @@ local function ensure_array(v)
   return v
 end
 
+local SESSION_CACHE = {}
 local SESSION_CACHE_TTL = 300 -- 5 minutes in-session TTL
 
 local function get_session_cache(key)
-  local sc = state.State.session_cache
-  if not sc or not sc[key] then
+  if not key or not SESSION_CACHE[key] then
     return nil
   end
-  local entry = sc[key]
+  local entry = SESSION_CACHE[key]
   if os.time() > entry.expires_at then
-    sc[key] = nil
+    SESSION_CACHE[key] = nil
+    if state.State and state.State.session_cache then
+      state.State.session_cache[key] = nil
+    end
     return nil
   end
   return entry.data
 end
 
 local function set_session_cache(key, data)
-  if not state.State.session_cache then
-    state.State.session_cache = {}
-  end
-  state.State.session_cache[key] = {
+  if not key then return end
+  SESSION_CACHE[key] = {
     data = data,
     expires_at = os.time() + SESSION_CACHE_TTL,
   }
+  if state.State and state.State.session_cache then
+    state.State.session_cache[key] = SESSION_CACHE[key]
+  end
 end
 
 local M = {}
 
 function M.clear_session_cache()
-  state.State.session_cache = {}
+  SESSION_CACHE = {}
+  if state.State and state.State.session_cache then
+    state.State.session_cache = {}
+  end
 end
 
 --- Normalizes query modifiers for Gelbooru API compatibility.
@@ -604,6 +611,13 @@ function M.execute_piped_search(query, pipe)
   -- If stage1 has an open-ended range/offset (e.g. sort:id:50..), pool_target = math.min(stage1.offset + config.options.per_page, 2000).
   -- If stage1 has no limit, but any downstream stage has a limit (e.g. tag | sort:score:200 | sort:random),
   -- ensure pool_target = math.min(2000, math.max(max_stage_limit, config.options.per_page)).
+  local max_stage_limit = 0
+  for _, st in ipairs(stages) do
+    if st.limit and st.limit > max_stage_limit then
+      max_stage_limit = st.limit
+    end
+  end
+
   local pool_target
   if stage1 and stage1.offset and not stage1.limit then
     local base_offset = start_pid * page_size
@@ -617,14 +631,8 @@ function M.execute_piped_search(query, pipe)
     local needed = rel_start + count
     pool_target = math.min(needed, 2000)
   elseif stage1 and stage1.limit and stage1.limit > 0 then
-    pool_target = math.min(stage1.limit, 2000)
+    pool_target = math.min(math.max(stage1.limit, max_stage_limit), 2000)
   else
-    local max_stage_limit = 0
-    for _, st in ipairs(stages) do
-      if st.limit and st.limit > max_stage_limit then
-        max_stage_limit = st.limit
-      end
-    end
     if max_stage_limit > 0 then
       pool_target = math.min(2000, math.max(max_stage_limit, config.options.per_page))
     else
@@ -758,7 +766,10 @@ function M.execute_piped_search(query, pipe)
       return
     end
 
-    local limit = math.min(page_size, remaining)
+    local limit = page_size
+    if #candidate_pool == 0 and pool_target < page_size then
+      limit = pool_target
+    end
     ui.set_status(string.format("Fetching candidate pool (%d/%d)…", #candidate_pool, pool_target))
 
     local batch_posts = {}

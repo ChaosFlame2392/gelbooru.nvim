@@ -84,6 +84,9 @@ end
 
 function M.reset_environment()
   pcall(ui.teardown)
+  pcall(function()
+    require("gelbooru.net.api").clear_session_cache()
+  end)
   state.reset_ui()
   state.reset_tag_state()
   state.State.query = ""
