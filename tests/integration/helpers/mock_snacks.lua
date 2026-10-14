@@ -10,29 +10,58 @@ M.placements_created = {}
 function M.setup()
   M.placements_created = {}
 
-  package.loaded["snacks.image.placement"] = {
+  local placement_cls = {}
+  placement_cls.__index = placement_cls
+
+  placement_cls.progress = function(self)
+    self.spinner_started = true
+  end
+
+  placement_cls.close = function(self)
+    self.closed = true
+    if state.UI.current_placement == self then
+      state.UI.current_placement = nil
+    end
+  end
+
+  placement_cls.update = function(self)
+    self.updated_count = self.updated_count + 1
+  end
+
+  local mod
+  mod = {
     new = function(buf, src, opts)
-      local placement = {
+      local convert_obj = {
+        aborted = false,
+        abort = function(self)
+          self.aborted = true
+        end,
+      }
+      local placement = setmetatable({
         id = #M.placements_created + 1,
         buf = buf,
         src = src,
         opts = opts or {},
         closed = false,
         updated_count = 0,
-        close = function(self)
-          self.closed = true
-          if state.UI.current_placement == self then
-            state.UI.current_placement = nil
-          end
-        end,
-        update = function(self)
-          self.updated_count = self.updated_count + 1
-        end,
-      }
+        spinner_started = false,
+        img = {
+          src = src,
+          _convert = convert_obj,
+        },
+      }, placement_cls)
+
+      if mod.progress then
+        mod.progress(placement)
+      end
+
       table.insert(M.placements_created, placement)
       return placement
     end,
+    progress = placement_cls.progress,
   }
+
+  package.loaded["snacks.image.placement"] = mod
 end
 
 function M.teardown()

@@ -713,7 +713,8 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
 
       local placement = state.UI.current_placement
       assert.is_not_nil(placement)
-      -- placement.progress must be a callable no-op
+      -- placement.progress must be a callable no-op, and must not have triggered during creation
+      assert.is_false(placement.spinner_started, "progress spinner must NOT be started during placement.new")
       assert.is_function(placement.progress)
       placement.progress() -- should not throw or set extmark
 
@@ -721,6 +722,11 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       assert.has_no.errors(function()
         placement:update()
       end)
+
+      -- Verify close_current_placement aborts active convert process
+      assert.is_not_nil(placement.img._convert)
+      image.close_current_placement()
+      assert.is_true(placement.img._convert.aborted, "close_current_placement must call abort() on in-flight convert")
     end)
 
     it("Issue 0.3: toggle_zen disables cursorline and maintains UI.wins.list focus; exiting restores cursorline", function()

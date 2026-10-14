@@ -141,10 +141,23 @@ function M.abort_all_ffmpeg()
   M.active_ffmpeg_handles = {}
 end
 
+function M.abort_convert(placement)
+  if not placement then
+    return
+  end
+  local img = placement.img
+  if img and img._convert and type(img._convert.abort) == "function" then
+    pcall(img._convert.abort, img._convert)
+  end
+end
+
 function M.close_current_placement()
   local UI = state.UI
-  if UI.current_placement and UI.current_placement.close then
-    pcall(UI.current_placement.close, UI.current_placement)
+  if UI.current_placement then
+    M.abort_convert(UI.current_placement)
+    if UI.current_placement.close then
+      pcall(UI.current_placement.close, UI.current_placement)
+    end
     UI.current_placement = nil
   end
   if UI.wins and UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img)
@@ -593,6 +606,13 @@ function M.render_image(win, path)
   if not p_ok or not placement_mod then
     log("WARN", "RENDER", "snacks.image.placement not available")
     return false
+  end
+
+  -- Suppress snacks' unmanaged progress timer on the class table BEFORE placement.new runs.
+  -- Otherwise placement.new synchronously invokes self:progress() which starts an unmanaged 80ms
+  -- timer writing "convert loading …" into the placement buffer.
+  if placement_mod.progress then
+    placement_mod.progress = function() end
   end
 
   local current = state.UI.current_placement
