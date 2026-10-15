@@ -207,8 +207,9 @@ Handles Gelbooru REST API interactions:
 #### `lua/gelbooru/net/download.lua`
 Network transfer engine using `vim.system({"curl", ...})`:
 - `curl_async(url, cb)`: Lightweight async GET returning response body.
-- `download_async(url, dest, cb, opts)`: File downloader with deduplication (`active_downloads[dest]`), atomic writing via temporary `.part` files, referer headers, retry logic, and callback queue pruning.
-- `prefetch_around(idx)`: Calculates prefetch indices based on `prefetch_radius` and scroll direction, scheduling staggered async downloads into local preview cache with teardown guards.
+- `download_async(url, dest, cb, opts)`: File downloader with deduplication (`active_downloads[dest]`), atomic writing via `.part` files, referer headers, retry logic, callback queue pruning, strict HTTP(S) URL validation, and post-download binary integrity validation (`is_valid_media`).
+- `is_valid_media(file_path, ref_path)`: High-performance (<0.02ms) binary validator checking SOI/EOI markers for JPEG (`\xFF\xD8` and `\xFF\xD9`), `IEND` chunk for PNG, trailer for GIF, WebP headers, and rejecting HTML/XML error bodies.
+- `prefetch_around(idx)`: Calculates prefetch indices based on `prefetch_radius` and scroll direction, scheduling staggered async downloads into local preview cache with teardown guards and background ffmpeg thumbnail extraction for saved local videos.
 - `cancel_pending_resumes()`: Manages and cleans up deferred retry timers.
 
 #### `lua/gelbooru/local/init.lua`

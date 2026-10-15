@@ -433,6 +433,12 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
   url_idx = url_idx or 1
   local urls, dest = image.get_preview_targets(p, url_idx)
   if #urls == 0 or not dest then
+    if image.is_video_post(p) then
+      image.render_video_placeholder(p, "Preview not playable in terminal • Press 'O' to open")
+      M.set_status("Video post • Press 'O' to play", 2500)
+    else
+      fail_preview("No preview available")
+    end
     return
   end
   url_idx = math.max(1, math.min(url_idx, #urls))
@@ -460,7 +466,6 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
     end
 
     if p.is_local or video_to_extract then
-      image.render_video_placeholder(p, "Extracting video thumbnail…")
       M.set_status("Video post • extracting thumbnail…", 2000)
       image.extract_video_thumbnail(video_to_extract or dest or p.file_url, p.id, function(extracted_path)
         if state.State.torn_down then
@@ -527,7 +532,6 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
           end
         end
 
-        image.render_video_placeholder(p, "Extracting video thumbnail…")
         M.set_status("Video post • extracting thumbnail…", 2000)
         image.extract_video_thumbnail(dest, p.id, function(extracted_path)
           if state.State.torn_down then
@@ -587,6 +591,16 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
     return
   end
 
+  -- Integrity check for cached preview files
+  if not p.is_local and vim.fn.filereadable(dest) == 1 and not force_download then
+    if not download.is_valid_media(dest) then
+      log("WARN", "PREVIEW", "Cached preview file corrupted on disk, deleting and re-fetching: %s", dest)
+      vim.fn.delete(dest)
+      image.clear_snacks_cache_for(p.id)
+      force_download = true
+    end
+  end
+
   if not p.is_local and (vim.fn.filereadable(dest) == 0 or force_download) then
     if force_download and vim.fn.filereadable(dest) == 1 then
       vim.fn.delete(dest)
@@ -599,7 +613,12 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
       elseif url_idx < #urls then
         load_and_render_image(p, url_idx + 1, 0, true)
       else
-        fail_preview("Preview Download Failed")
+        if image.is_video_post(p) then
+          image.render_video_placeholder(p, "Preview not available • Press 'O' to open")
+          M.set_status("Video post • no static preview available", 2500)
+        else
+          fail_preview("Preview Download Failed")
+        end
       end
     end)
   elseif download.active_downloads[dest] then
@@ -609,7 +628,12 @@ local function load_and_render_image(p, url_idx, retry_count, force_download)
       elseif url_idx < #urls then
         load_and_render_image(p, url_idx + 1, 0, true)
       else
-        fail_preview("Preview Download Failed")
+        if image.is_video_post(p) then
+          image.render_video_placeholder(p, "Preview not available • Press 'O' to open")
+          M.set_status("Video post • no static preview available", 2500)
+        else
+          fail_preview("Preview Download Failed")
+        end
       end
     end)
   else
@@ -745,6 +769,7 @@ function M.render_preview(force_download)
   if not is_cached then
     if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img) then
       pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
+      util.set_lines(UI.bufs.img, { "", "  Loading preview…" })
     end
     M.set_status("Loading preview…")
   else

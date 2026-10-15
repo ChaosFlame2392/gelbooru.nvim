@@ -116,8 +116,19 @@ function M.get_preview_targets(p, url_idx)
   end
 
   local urls, seen = {}, {}
-  local candidates = { p.sample_url, p.preview_url, p.file_url }
-  for i = 1, 3 do
+  local candidates
+  if M.is_video_post(p) then
+    candidates = {}
+    if p.preview_url and p.preview_url ~= "" then
+      table.insert(candidates, p.preview_url)
+    end
+    if p.sample_url and p.sample_url ~= "" and not M.VIDEO_EXTS[util.file_ext(p.sample_url)] then
+      table.insert(candidates, p.sample_url)
+    end
+  else
+    candidates = { p.sample_url, p.preview_url, p.file_url }
+  end
+  for i = 1, #candidates do
     local u = candidates[i]
     if u and u ~= "" and not seen[u] then
       seen[u] = true

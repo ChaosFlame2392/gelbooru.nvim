@@ -790,3 +790,78 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
     assert.are.equal(0, vim.tbl_count(download.active_prefetch_handles))
   end)
 end)
+
+describe("download.is_valid_media: header and trailer integrity validation", function()
+  it("validates complete JPEG with SOI (FF D8) and EOI (FF D9)", function()
+    local path = tmp() .. ".jpg"
+    local f = io.open(path, "wb")
+    f:write("\255\216" .. string.rep("x", 2048) .. "\255\217")
+    f:close()
+
+    assert.is_true(download.is_valid_media(path))
+    vim.fn.delete(path)
+  end)
+
+  it("rejects truncated JPEG missing EOI marker (FF D9)", function()
+    local path = tmp() .. ".jpg"
+    local f = io.open(path, "wb")
+    -- Truncated JPEG stream (SOI present, but ends midway through scan data)
+    f:write("\255\216" .. string.rep("x", 2048) .. "\000\000")
+    f:close()
+
+    assert.is_false(download.is_valid_media(path))
+    vim.fn.delete(path)
+  end)
+
+  it("rejects truncated JPEG with size < 512 bytes", function()
+    local path = tmp() .. ".jpg"
+    local f = io.open(path, "wb")
+    f:write("\255\216" .. string.rep("x", 100) .. "\255\217")
+    f:close()
+
+    assert.is_false(download.is_valid_media(path))
+    vim.fn.delete(path)
+  end)
+
+  it("validates complete PNG ending with IEND chunk", function()
+    local path = tmp() .. ".png"
+    local f = io.open(path, "wb")
+    f:write("\137PNG\r\n\026\n" .. string.rep("x", 2048) .. "IEND\174\66\96\130")
+    f:close()
+
+    assert.is_true(download.is_valid_media(path))
+    vim.fn.delete(path)
+  end)
+
+  it("rejects truncated PNG missing IEND chunk", function()
+    local path = tmp() .. ".png"
+    local f = io.open(path, "wb")
+    f:write("\137PNG\r\n\026\n" .. string.rep("x", 2048))
+    f:close()
+
+    assert.is_false(download.is_valid_media(path))
+    vim.fn.delete(path)
+  end)
+
+  it("rejects HTML error page disguised with image extension", function()
+    local path = tmp() .. ".jpg"
+    local f = io.open(path, "wb")
+    f:write("<!DOCTYPE html><html><body><h1>503 Service Unavailable</h1></body></html>")
+    f:close()
+
+    assert.is_false(download.is_valid_media(path))
+    vim.fn.delete(path)
+  end)
+
+  it("rejects non-HTTP URL in download_async and safely notifies cb(false)", function()
+    local dest = tmp()
+    local cb_result = nil
+    local handle = download.download_async("/local/path/file.jpg", dest, function(ok)
+      cb_result = ok
+    end)
+
+    assert.is_nil(handle)
+    vim.wait(200, function() return cb_result ~= nil end)
+    assert.is_false(cb_result)
+  end)
+end)
