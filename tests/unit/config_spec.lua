@@ -112,4 +112,74 @@ describe("config", function()
       assert.is_true(found, "id: meta tag not found in META_TAGS")
     end)
   end)
+
+  describe("get_discovered_tags_file()", function()
+    it("returns path within options.tags_dir", function()
+      config.options.tags_dir = "/custom/tags/dir"
+      assert.are.equal("/custom/tags/dir/discovered.json", config.get_discovered_tags_file())
+    end)
+  end)
+
+  describe("TAG_TYPES and TAG_BADGES constants", function()
+    it("defines canonical tag category string names", function()
+      assert.are.equal("general", config.TAG_TYPES[0])
+      assert.are.equal("artist", config.TAG_TYPES[1])
+      assert.are.equal("copyright", config.TAG_TYPES[3])
+      assert.are.equal("character", config.TAG_TYPES[4])
+      assert.are.equal("meta", config.TAG_TYPES[5])
+      assert.are.equal("meme", config.TAG_TYPES[6])
+    end)
+
+    it("defines user-facing short badges for each category", function()
+      assert.are.equal("General", config.TAG_BADGES[0])
+      assert.are.equal("Artist", config.TAG_BADGES[1])
+      assert.are.equal("Series", config.TAG_BADGES[3])
+      assert.are.equal("Char", config.TAG_BADGES[4])
+      assert.are.equal("Meta", config.TAG_BADGES[5])
+      assert.are.equal("Meme", config.TAG_BADGES[6])
+    end)
+  end)
+
+  describe("VALID_MEDIA_EXTS", function()
+    it("whitelists supported image and video extensions", function()
+      local supported = { "jpg", "jpeg", "png", "gif", "webp", "mp4", "webm", "avi", "mov", "mkv" }
+      for _, ext in ipairs(supported) do
+        assert.is_true(config.VALID_MEDIA_EXTS[ext] == true, "extension " .. ext .. " should be supported")
+      end
+    end)
+
+    it("rejects non-media extensions", function()
+      local unsupported = { "txt", "zip", "json", "part", "md", "exe", "tar", "pdf" }
+      for _, ext in ipairs(unsupported) do
+        assert.is_nil(config.VALID_MEDIA_EXTS[ext], "extension " .. ext .. " should not be valid media")
+      end
+    end)
+  end)
+
+  describe("setup() option assignments", function()
+    it("assigns custom paths and boolean/string configurations", function()
+      config.setup({
+        save_dir = "/tmp/custom_save",
+        tags_dir = "/tmp/custom_tags",
+        cache_dir = "/tmp/custom_cache",
+        auth_file = "/tmp/custom_auth.json",
+        api_base = "https://example.com/api",
+        tags_api = "https://example.com/tags",
+        log_file = "/tmp/custom_log.log",
+        media_player = "mpv",
+        show_tags_in_list = true,
+      })
+
+      assert.are.equal("/tmp/custom_save", config.options.save_dir)
+      assert.are.equal("/tmp/custom_tags", config.options.tags_dir)
+      assert.are.equal("/tmp/custom_cache", config.options.cache_dir)
+      assert.are.equal("/tmp/custom_auth.json", config.options.auth_file)
+      assert.are.equal("https://example.com/api", config.options.api_base)
+      assert.are.equal("https://example.com/tags", config.options.tags_api)
+      assert.are.equal("/tmp/custom_log.log", config.options.log_file)
+      assert.are.equal("mpv", config.options.media_player)
+      assert.is_true(config.options.show_tags_in_list)
+    end)
+  end)
 end)
+

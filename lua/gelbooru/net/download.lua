@@ -1,6 +1,8 @@
 local config = require("gelbooru.core.config")
 local log = require("gelbooru.core.log")
 local state = require("gelbooru.core.state")
+local util = require("gelbooru.core.util")
+local constants = require("gelbooru.core.constants")
 
 local M = {}
 
@@ -49,7 +51,7 @@ function M.is_valid_media(file_path, ref_path)
       f:close()
       return false
     end
-    if size < 512 then
+    if size < constants.MIN_VALID_IMAGE_BYTES then
       f:close()
       return false
     end
@@ -65,7 +67,7 @@ function M.is_valid_media(file_path, ref_path)
       f:close()
       return false
     end
-    if size < 512 then
+    if size < constants.MIN_VALID_IMAGE_BYTES then
       f:close()
       return false
     end
@@ -81,7 +83,7 @@ function M.is_valid_media(file_path, ref_path)
       f:close()
       return false
     end
-    if size < 128 then
+    if size < constants.MIN_VALID_GIF_BYTES then
       f:close()
       return false
     end
@@ -97,13 +99,13 @@ function M.is_valid_media(file_path, ref_path)
     if hlen < 12 or head:sub(1, 4) ~= "RIFF" or head:sub(9, 12) ~= "WEBP" then
       return false
     end
-    return size >= 512
+    return size >= constants.MIN_VALID_IMAGE_BYTES
   end
 
   -- Video files (mp4, mov, m4v)
   if ext == "mp4" or ext == "mov" or ext == "m4v" then
     f:close()
-    return size >= 1024 and (hlen >= 8 and head:sub(5, 8) == "ftyp")
+    return size >= constants.MIN_VALID_MEDIA_BYTES and (hlen >= 8 and head:sub(5, 8) == "ftyp")
   end
 
   f:close()
@@ -113,8 +115,8 @@ function M.is_valid_media(file_path, ref_path)
     return false
   end
 
-  -- Generic fallback (unit test mocks, text or raw payloads): size > 1024 bytes
-  return size > 1024
+  -- Generic fallback (unit test mocks, text or raw payloads): size > MIN_VALID_MEDIA_BYTES bytes
+  return size > constants.MIN_VALID_MEDIA_BYTES
 end
 
 function M.abort_all()
@@ -146,9 +148,9 @@ function M.curl_async(url, cb)
       "--fail",
       "-L",
       "--max-time",
-      "25",
+      tostring(constants.CURL_API_TIMEOUT_SEC),
       "--connect-timeout",
-      "10",
+      tostring(constants.CURL_CONNECT_TIMEOUT_SEC),
       "--retry",
       "3",
       "--retry-delay",
@@ -250,8 +252,8 @@ function M.download_async(url, dest, cb, opts)
 
   local curl_cmd = {
     "curl", "-s", "--fail", "-L",
-    "--max-time", "300",
-    "--connect-timeout", "10",
+    "--max-time", tostring(constants.CURL_DOWNLOAD_TIMEOUT_SEC),
+    "--connect-timeout", tostring(constants.CURL_CONNECT_TIMEOUT_SEC),
     "--retry", "3", "--retry-delay", "2", "--retry-connrefused",
     "-H", "Referer: https://gelbooru.com/",
   }
@@ -390,11 +392,16 @@ function M.resume_pending_saves()
               return
             end
             local ok, data = pcall(vim.fn.json_decode, body)
-            if not ok or not data or not data.post or not data.post[1] then
+            if not ok or not data or not data.post then
               log("WARN", "DOWNLOAD", "No post found for orphaned id %s", post_id)
               return
             end
-            local file_url = data.post[1].file_url
+            local posts = util.ensure_array(data.post)
+            if not posts or not posts[1] then
+              log("WARN", "DOWNLOAD", "No post found for orphaned id %s", post_id)
+              return
+            end
+            local file_url = posts[1].file_url
             if not file_url or file_url == "" then
               log("WARN", "DOWNLOAD", "No file_url for orphaned post %s", post_id)
               return
@@ -405,7 +412,7 @@ function M.resume_pending_saves()
                 saved and "Auto-resumed save completed: %s" or "Auto-resume failed: %s", dest)
             end, { resume = true })
           end)
-        end, i * 200)
+        end, i * constants.RESUME_STAGGER_MS)
         M.pending_resumes[dest] = timer or true
         if timer then
           M.pending_resumes[timer] = timer
@@ -527,7 +534,7 @@ function M.prefetch_around(idx, scroll_dir)
                 M.active_prefetch_handles[dest] = handle
               end
             elseif not M.queued_prefetch_dests[dest] then
-              delay = delay + 50
+              delay = delay + constants.PREFETCH_STAGGER_MS
               M.queued_prefetch_dests[dest] = true
               local timer = vim.loop.new_timer()
               local timer_idx = #UI.prefetch_timers + 1

@@ -7,7 +7,7 @@ local M = {}
 
 M.sample_posts = {
   {
-    id = 1001,
+    id = 10001,
     rating = "general",
     score = 150,
     width = 1920,
@@ -18,7 +18,7 @@ M.sample_posts = {
     preview_url = "https://example.com/sample1_prev.jpg",
   },
   {
-    id = 1002,
+    id = 10002,
     rating = "sensitive",
     score = 85,
     width = 1200,
@@ -29,7 +29,7 @@ M.sample_posts = {
     preview_url = "https://example.com/sample2_prev.jpg",
   },
   {
-    id = 1003,
+    id = 10003,
     rating = "general",
     score = 210,
     width = 2000,

@@ -1829,8 +1829,8 @@ describe("local.index: Saved Index & Directory Mtime Cache", function()
   end)
 
   it("update_saved_index scans directory and builds saved_index with file extensions", function()
-    vim.fn.writefile({ "a" }, tmp_dir .. "/1001.jpg")
-    vim.fn.writefile({ "b" }, tmp_dir .. "/1002.png")
+    vim.fn.writefile({ "a" }, tmp_dir .. "/11001.jpg")
+    vim.fn.writefile({ "b" }, tmp_dir .. "/11002.png")
     vim.fn.writefile({ "c" }, tmp_dir .. "/post_1003.webp")
     vim.fn.writefile({ "d" }, tmp_dir .. "/artwork_no_id.jpg")
     vim.fn.writefile({ "e" }, tmp_dir .. "/notes.txt")
@@ -1838,22 +1838,22 @@ describe("local.index: Saved Index & Directory Mtime Cache", function()
     local idx = local_index.update_saved_index(tmp_dir)
 
     assert.is_table(idx)
-    assert.are.equal("jpg", idx[1001])
-    assert.are.equal("png", idx[1002])
+    assert.are.equal("jpg", idx[11001])
+    assert.are.equal("png", idx[11002])
     assert.are.equal("webp", idx[1003])
     assert.is_nil(idx["artwork_no_id"])
     assert.is_nil(idx["notes"])
-    assert.is_true(local_index.is_saved(1001))
-    assert.is_true(local_index.is_saved("1002"))
+    assert.is_true(local_index.is_saved(11001))
+    assert.is_true(local_index.is_saved("11002"))
     assert.is_true(local_index.is_saved(1003))
     assert.is_false(local_index.is_saved(9999))
   end)
 
   it("caches directory mtime and does not re-scan disk when mtime is unchanged", function()
-    vim.fn.writefile({ "a" }, tmp_dir .. "/5001.jpg")
+    vim.fn.writefile({ "a" }, tmp_dir .. "/15001.jpg")
 
     local_index.update_saved_index(tmp_dir)
-    assert.is_true(local_index.is_saved(5001))
+    assert.is_true(local_index.is_saved(15001))
 
     local uv = vim.uv or vim.loop
     local orig_fs_scandir = uv.fs_scandir
@@ -1867,25 +1867,25 @@ describe("local.index: Saved Index & Directory Mtime Cache", function()
     uv.fs_scandir = orig_fs_scandir
 
     assert.is_false(scandir_called)
-    assert.are.equal("jpg", idx2[5001])
+    assert.are.equal("jpg", idx2[15001])
   end)
 
   it("detects newly added files when directory mtime changes", function()
-    vim.fn.writefile({ "a" }, tmp_dir .. "/6001.jpg")
+    vim.fn.writefile({ "a" }, tmp_dir .. "/16001.jpg")
     local_index.update_saved_index(tmp_dir)
-    assert.is_true(local_index.is_saved(6001))
-    assert.is_false(local_index.is_saved(6002))
+    assert.is_true(local_index.is_saved(16001))
+    assert.is_false(local_index.is_saved(16002))
 
-    vim.fn.writefile({ "b" }, tmp_dir .. "/6002.png")
+    vim.fn.writefile({ "b" }, tmp_dir .. "/16002.png")
     local uv = vim.uv or vim.loop
     local stat = uv.fs_stat(tmp_dir)
     local cur_sec = stat and stat.mtime and (stat.mtime.sec or stat.mtime) or os.time()
     pcall(uv.fs_utime, tmp_dir, cur_sec + 2, cur_sec + 2)
 
     local idx2 = local_index.update_saved_index(tmp_dir)
-    assert.is_true(local_index.is_saved(6001))
-    assert.is_true(local_index.is_saved(6002))
-    assert.are.equal("png", idx2[6002])
+    assert.is_true(local_index.is_saved(16001))
+    assert.is_true(local_index.is_saved(16002))
+    assert.are.equal("png", idx2[16002])
   end)
 
   it("mark_saved updates saved_index immediately and refreshes mtime to prevent redundant rescan", function()
@@ -2702,6 +2702,88 @@ describe("Multi-Stage Piped Sorting Pipeline (parse_pipeline & execute_pipeline)
       state.State.pending_deletions = {}
     end)
   end)
+
+  describe("local/scan.lua edge cases & sequential filename collision", function()
+    local tmp_scan_dir
+    local scan_mod = require("gelbooru.local.scan")
+    local util = require("gelbooru.core.util")
+
+    before_each(function()
+      tmp_scan_dir = vim.fn.tempname()
+      vim.fn.mkdir(tmp_scan_dir, "p")
+    end)
+
+    after_each(function()
+      vim.fn.delete(tmp_scan_dir, "rf")
+    end)
+
+    it("sequential filenames with bare numeric IDs (0001.jpg, 0002.jpg, 42.png, 999.jpg) produce distinct post records", function()
+      vim.fn.writefile({ "dummy1" }, tmp_scan_dir .. "/0001.jpg")
+      vim.fn.writefile({ "dummy2" }, tmp_scan_dir .. "/0002.jpg")
+      vim.fn.writefile({ "dummy3" }, tmp_scan_dir .. "/42.png")
+      vim.fn.writefile({ "dummy4" }, tmp_scan_dir .. "/999.jpg")
+
+      local posts = scan_mod.scan_local_folder(tmp_scan_dir)
+      assert.are.equal(4, #posts)
+
+      local seen_urls = {}
+      for _, p in ipairs(posts) do
+        assert.is_true(p.is_local)
+        assert.is_nil(seen_urls[p.file_url])
+        seen_urls[p.file_url] = true
+      end
+    end)
+
+    it("sequential filename collision: handles duplicate numeric ID across distinct files (0001.jpg and 1.jpg)", function()
+      local file_a = tmp_scan_dir .. "/0001.jpg"
+      local file_b = tmp_scan_dir .. "/1.jpg"
+      vim.fn.writefile({ "data_a" }, file_a)
+      vim.fn.writefile({ "data_b" }, file_b)
+
+      local posts = scan_mod.scan_local_folder(tmp_scan_dir)
+      assert.are.equal(2, #posts)
+
+      local post_a = posts[1]
+      local post_b = posts[2]
+      assert.are_not.equal(post_a.file_url, post_b.file_url)
+
+      -- Local post identity strictly compares file_url, preventing collision
+      assert.is_false(util.is_same_post(post_a, post_b))
+    end)
+
+    it("explicit booru prefixes preserve ID extraction regardless of magnitude", function()
+      assert.are.equal("42", scan_mod.extract_post_id("gelbooru_42.jpg"))
+      assert.are.equal("42", scan_mod.extract_post_id("Gelbooru-42.png"))
+      assert.are.equal("42", scan_mod.extract_post_id("post_42.jpg"))
+      assert.are.equal("42", scan_mod.extract_post_id("Post 42.jpg"))
+      assert.are.equal("42", scan_mod.extract_post_id("id_42.jpg"))
+      assert.are.equal("42", scan_mod.extract_post_id("ID42.png"))
+      assert.are.equal("42", scan_mod.extract_post_id("prev_42.jpg"))
+    end)
+
+    it("extract_post_id returns nil for non-numeric filenames or empty/nil path", function()
+      assert.is_nil(scan_mod.extract_post_id(nil))
+      assert.is_nil(scan_mod.extract_post_id(""))
+      assert.is_nil(scan_mod.extract_post_id("wallpaper.jpg"))
+      assert.is_nil(scan_mod.extract_post_id("IMG_0042.png"))
+      assert.is_nil(scan_mod.extract_post_id("DSC0001.JPG"))
+      assert.is_nil(scan_mod.extract_post_id("screenshot_2024.png"))
+    end)
+
+    it("extract_post_id rejects bare numeric filenames < 10000 and accepts >= 10000", function()
+      assert.is_nil(scan_mod.extract_post_id("1.png"))
+      assert.is_nil(scan_mod.extract_post_id("02.jpg"))
+      assert.is_nil(scan_mod.extract_post_id("999.jpg"))
+      assert.is_nil(scan_mod.extract_post_id("9999.png"))
+      assert.is_nil(scan_mod.extract_post_id("1_tag.jpg"))
+      assert.is_nil(scan_mod.extract_post_id("42 - tag.png"))
+      assert.are.equal("10000", scan_mod.extract_post_id("10000.jpg"))
+      assert.are.equal("10001", scan_mod.extract_post_id("10001_tag.png"))
+      assert.are.equal("11802758", scan_mod.extract_post_id("11802758.jpg"))
+      assert.are.equal("11802758", scan_mod.extract_post_id("11802758 - tag.jpg"))
+    end)
+  end)
 end)
+
 
 

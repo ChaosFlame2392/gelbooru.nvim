@@ -67,6 +67,29 @@ describe("gelbooru.query.parse: Tokenizer and Modifier Parser", function()
     end)
   end)
 
+  describe("normalize_modifier_spacing", function()
+    it("strips whitespace following modifier colons", function()
+      assert.are.equal("sort:score", query_parse.normalize_modifier_spacing("sort: score"))
+      assert.are.equal("order:desc", query_parse.normalize_modifier_spacing("order: desc"))
+      assert.are.equal("rating:general", query_parse.normalize_modifier_spacing("rating: general"))
+      assert.are.equal("score:>=50", query_parse.normalize_modifier_spacing("score: >=50"))
+      assert.are.equal("id:12345", query_parse.normalize_modifier_spacing("id: 12345"))
+      assert.are.equal("limit:20", query_parse.normalize_modifier_spacing("limit: 20"))
+      assert.are.equal("offset:10", query_parse.normalize_modifier_spacing("offset: 10"))
+    end)
+
+    it("handles leading ~ or - prefixes in modifiers", function()
+      assert.are.equal("~rating:general", query_parse.normalize_modifier_spacing("~rating: general"))
+      assert.are.equal("-rating:explicit", query_parse.normalize_modifier_spacing("-rating: explicit"))
+      assert.are.equal("~sort:random", query_parse.normalize_modifier_spacing("~sort: random"))
+    end)
+
+    it("handles nil and non-string inputs safely", function()
+      assert.is_nil(query_parse.normalize_modifier_spacing(nil))
+      assert.are.equal(12345, query_parse.normalize_modifier_spacing(12345))
+    end)
+  end)
+
   describe("tokenize_query", function()
     it("splits unquoted whitespace tokens", function()
       local tokens = query_parse.tokenize_query("hatsune_miku 1girl vocaloid")
@@ -264,7 +287,60 @@ describe("gelbooru.query.pipeline: Multi-Stage Piped Execution", function()
       assert.are.equal(1, #p.stages)
       assert.are.equal(15, p.stages[1].limit)
     end)
+
+    it("handles empty stages, consecutive pipes, and trailing pipes cleanly", function()
+      -- Empty middle stage
+      local p1 = query_pipeline.parse_pipeline("miku | | sort:score")
+      assert.are.equal("miku", p1.base_query)
+      assert.are.equal(1, #p1.stages)
+      assert.are.equal("score", p1.stages[1].key)
+
+      -- Consecutive pipes
+      local p2 = query_pipeline.parse_pipeline("miku ||| sort:id:asc")
+      assert.are.equal("miku", p2.base_query)
+      assert.are.equal(1, #p2.stages)
+      assert.are.equal("id", p2.stages[1].key)
+      assert.are.equal("asc", p2.stages[1].dir)
+
+      -- Trailing pipes
+      local p3 = query_pipeline.parse_pipeline("miku |")
+      assert.are.equal("miku", p3.base_query)
+      assert.are.equal(0, #p3.stages)
+
+      local p4 = query_pipeline.parse_pipeline("miku | | ")
+      assert.are.equal("miku", p4.base_query)
+      assert.are.equal(0, #p4.stages)
+
+      -- Bare pipes
+      local p5 = query_pipeline.parse_pipeline("|||")
+      assert.are.equal("", p5.base_query)
+      assert.are.equal(0, #p5.stages)
+
+      -- Leading pipe
+      local p6 = query_pipeline.parse_pipeline("| sort:random")
+      assert.are.equal("", p6.base_query)
+      assert.are.equal(1, #p6.stages)
+      assert.are.equal("random", p6.stages[1].key)
+    end)
+
+    it("normalizes inverted range bounds across stages (sort:id:100..20)", function()
+      local p = query_pipeline.parse_pipeline("sort:id:100..20")
+      assert.are.equal(1, #p.stages)
+      assert.are.equal(20, p.stages[1].offset)
+      assert.are.equal(100, p.stages[1].limit)
+    end)
+
+    it("handles malformed or non-numeric range bounds gracefully without throwing", function()
+      local ok1, p1 = pcall(query_pipeline.parse_pipeline, "sort:id:abc..def")
+      assert.is_true(ok1)
+      assert.is_not_nil(p1)
+
+      local ok2, p2 = pcall(query_pipeline.parse_pipeline, "sort:id:..")
+      assert.is_true(ok2)
+      assert.is_not_nil(p2)
+    end)
   end)
+
 
   describe("execute_pipeline", function()
     local sample_posts
@@ -316,6 +392,12 @@ describe("gelbooru.query.pipeline: Multi-Stage Piped Execution", function()
       assert.are.equal(3, res[1].id)
       assert.are.equal(5, res[2].id)
       assert.are.equal(1, res[3].id)
+    end)
+
+    it("handles empty stages gracefully and returns posts unchanged", function()
+      local res = query_pipeline.execute_pipeline(sample_posts, {})
+      assert.are.equal(#sample_posts, #res)
+      assert.are.equal(sample_posts[1].id, res[1].id)
     end)
   end)
 end)

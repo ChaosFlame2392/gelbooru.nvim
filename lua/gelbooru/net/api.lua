@@ -5,6 +5,7 @@ local download = require("gelbooru.net.download")
 local tags = require("gelbooru.tags")
 local history = require("gelbooru.core.history")
 local image = require("gelbooru.ui.image")
+local constants = require("gelbooru.core.constants")
 
 local function ensure_array(v)
   if util.ensure_array then return util.ensure_array(v) end
@@ -14,7 +15,7 @@ local function ensure_array(v)
 end
 
 local SESSION_CACHE = {}
-local SESSION_CACHE_TTL = 300 -- 5 minutes in-session TTL
+local SESSION_CACHE_TTL = constants.SESSION_CACHE_TTL_SEC -- 5 minutes in-session TTL
 
 local function get_session_cache(key)
   if not key or not SESSION_CACHE[key] then
@@ -49,6 +50,53 @@ function M.clear_session_cache()
   if state.State and state.State.session_cache then
     state.State.session_cache = {}
   end
+end
+
+--- Query-time self-healing hook:
+--- When a single-tag search returns 0 results, asynchronously verify via the tag API.
+--- If the tag is confirmed dead or aliased, prunes it from memory and flags it for disk write.
+--- Non-blocking and user-transparent.
+---@param query_str string|nil
+---@param cb function|nil Optional callback for testing: cb(pruned: boolean)
+function M.check_self_heal(query_str, cb)
+  if not query_str or type(query_str) ~= "string" then
+    if cb then cb(false) end
+    return
+  end
+  local trimmed = vim.trim(query_str)
+  if trimmed == "" then
+    if cb then cb(false) end
+    return
+  end
+
+  local tokens = vim.split(trimmed, "%s+")
+  if #tokens ~= 1 then
+    if cb then cb(false) end
+    return
+  end
+
+  local token = tokens[1]
+  if token:find(":") or token:find("|") or token:find("^%-") then
+    if cb then cb(false) end
+    return
+  end
+
+  local clean_tag = token:gsub("^~", ""):lower()
+  if clean_tag == "" then
+    if cb then cb(false) end
+    return
+  end
+
+  local State = state.State
+  if State.tags_loaded and State.tags_by_name and not State.tags_by_name[clean_tag] then
+    if cb then cb(false) end
+    return
+  end
+
+  pcall(function()
+    local db = require("gelbooru.tags.db")
+    db.verify_and_prune_tag(clean_tag, cb)
+  end)
 end
 
 --- Normalizes query modifiers for Gelbooru API compatibility.
@@ -301,6 +349,7 @@ function M.fetch(direction, is_explicit)
         history.save_current_history()
         util.set_lines(UI.bufs.img, { "  No posts found" })
         util.set_lines(UI.bufs.meta, {})
+        M.check_self_heal(State.query)
         return
       end
       local posts = ensure_array(data.post)
@@ -310,6 +359,7 @@ function M.fetch(direction, is_explicit)
         history.save_current_history()
         util.set_lines(UI.bufs.img, { "  No posts found" })
         util.set_lines(UI.bufs.meta, {})
+        M.check_self_heal(State.query)
         return
       end
       if cache_key and #posts > 0 then
@@ -383,6 +433,7 @@ function M.fetch(direction, is_explicit)
             history.save_current_history()
             util.set_lines(UI.bufs.img, { "  No posts found" })
             util.set_lines(UI.bufs.meta, {})
+            M.check_self_heal(State.query)
             return
           end
 
@@ -597,7 +648,7 @@ function M.execute_piped_search(query, pipe)
   local stage1 = stages[1]
   local base_query = pipe.base_query or ""
 
-  local page_size = 100
+  local page_size = constants.PIPELINE_REMOTE_PAGE_SIZE
   local pid = 0
   local start_pid = 0
   if stage1 and stage1.offset and stage1.offset > 0 then
@@ -623,18 +674,18 @@ function M.execute_piped_search(query, pipe)
     local base_offset = start_pid * page_size
     local rel_start = stage1.offset - base_offset
     local needed = rel_start + config.options.per_page
-    pool_target = math.min(needed, 2000)
+    pool_target = math.min(needed, constants.PIPELINE_MAX_POOL_TARGET)
   elseif stage1 and stage1.offset and stage1.offset > 0 then
     local base_offset = start_pid * page_size
     local rel_start = stage1.offset - base_offset
     local count = (stage1.limit and stage1.limit > stage1.offset) and (stage1.limit - stage1.offset) or config.options.per_page
     local needed = rel_start + count
-    pool_target = math.min(needed, 2000)
+    pool_target = math.min(needed, constants.PIPELINE_MAX_POOL_TARGET)
   elseif stage1 and stage1.limit and stage1.limit > 0 then
-    pool_target = math.min(math.max(stage1.limit, max_stage_limit), 2000)
+    pool_target = math.min(math.max(stage1.limit, max_stage_limit), constants.PIPELINE_MAX_POOL_TARGET)
   else
     if max_stage_limit > 0 then
-      pool_target = math.min(2000, math.max(max_stage_limit, config.options.per_page))
+      pool_target = math.min(constants.PIPELINE_MAX_POOL_TARGET, math.max(max_stage_limit, config.options.per_page))
     else
       pool_target = config.options.per_page
     end
@@ -738,6 +789,7 @@ function M.execute_piped_search(query, pipe)
       history.save_current_history()
       util.set_lines(state.UI.bufs.img, { "  No posts found" })
       util.set_lines(state.UI.bufs.meta, {})
+      M.check_self_heal(pipe and pipe.base_query or query)
       return
     end
 
@@ -807,11 +859,13 @@ function M.execute_piped_search(query, pipe)
 
   if cached_pool and #cached_pool > 0 then
     if #cached_pool >= pool_target then
-      candidate_pool = vim.deepcopy(cached_pool)
+      candidate_pool = {}
+      for i = 1, #cached_pool do candidate_pool[i] = cached_pool[i] end
       finish_pipeline()
       return
     elseif not (remote_tags:lower():find("sort:random", 1, true) or remote_tags:lower():find("order:random", 1, true)) then
-      candidate_pool = vim.deepcopy(cached_pool)
+      candidate_pool = {}
+      for i = 1, #cached_pool do candidate_pool[i] = cached_pool[i] end
       pid = start_pid + math.floor(#candidate_pool / page_size)
     end
   end

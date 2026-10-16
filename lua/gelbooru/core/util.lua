@@ -1,4 +1,5 @@
 local config = require("gelbooru.core.config")
+local constants = require("gelbooru.core.constants")
 
 local M = {}
 
@@ -117,7 +118,7 @@ function M.float(buf, row, col, w, h, extra)
     height = h,
     style = "minimal",
     border = "none",
-    zindex = 51,
+    zindex = constants.ZINDEX_DEFAULT_FLOAT,
     focusable = true,
   }, extra or {})
   return vim.api.nvim_open_win(buf, false, cfg)
@@ -290,7 +291,7 @@ function M.shuffle(list)
     return list or {}
   end
   local uv = vim.uv or vim.loop
-  math.randomseed(os.time() + (uv.hrtime() % 1000000))
+  math.randomseed(os.time() + (uv.hrtime() % constants.SHUFFLE_SEED_MODULO))
   math.random()
   math.random()
   math.random()

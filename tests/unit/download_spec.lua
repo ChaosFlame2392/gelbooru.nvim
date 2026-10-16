@@ -864,4 +864,154 @@ describe("download.is_valid_media: header and trailer integrity validation", fun
     vim.wait(200, function() return cb_result ~= nil end)
     assert.is_false(cb_result)
   end)
+
+  it("rejects non-existent file path and empty file in is_valid_media", function()
+    assert.is_false(download.is_valid_media("/path/does/not/exist.jpg"))
+
+    local empty_file = tmp() .. ".jpg"
+    local f = io.open(empty_file, "wb")
+    f:close()
+    assert.is_false(download.is_valid_media(empty_file))
+    vim.fn.delete(empty_file)
+  end)
+
+  it("validates complete GIF87a and GIF89a and rejects truncated or tiny GIF", function()
+    local valid_gif89 = tmp() .. ".gif"
+    local f = io.open(valid_gif89, "wb")
+    f:write("GIF89a" .. string.rep("x", 256) .. ";")
+    f:close()
+    assert.is_true(download.is_valid_media(valid_gif89))
+    vim.fn.delete(valid_gif89)
+
+    local valid_gif87 = tmp() .. ".gif"
+    f = io.open(valid_gif87, "wb")
+    f:write("GIF87a" .. string.rep("x", 256) .. ";")
+    f:close()
+    assert.is_true(download.is_valid_media(valid_gif87))
+    vim.fn.delete(valid_gif87)
+
+    -- Truncated GIF missing ';'
+    local trunc_gif = tmp() .. ".gif"
+    f = io.open(trunc_gif, "wb")
+    f:write("GIF89a" .. string.rep("x", 256))
+    f:close()
+    assert.is_false(download.is_valid_media(trunc_gif))
+    vim.fn.delete(trunc_gif)
+
+    -- Short GIF (< 128 bytes)
+    local short_gif = tmp() .. ".gif"
+    f = io.open(short_gif, "wb")
+    f:write("GIF89a" .. string.rep("x", 50) .. ";")
+    f:close()
+    assert.is_false(download.is_valid_media(short_gif))
+    vim.fn.delete(short_gif)
+  end)
+
+  it("validates complete WEBP and rejects corrupt or short WEBP", function()
+    local valid_webp = tmp() .. ".webp"
+    local f = io.open(valid_webp, "wb")
+    f:write("RIFF\000\000\000\000WEBP" .. string.rep("x", 1024))
+    f:close()
+    assert.is_true(download.is_valid_media(valid_webp))
+    vim.fn.delete(valid_webp)
+
+    -- Corrupt WEBP: missing WEBP tag at bytes 9-12
+    local corrupt_webp = tmp() .. ".webp"
+    f = io.open(corrupt_webp, "wb")
+    f:write("RIFF\000\000\000\000NOPE" .. string.rep("x", 1024))
+    f:close()
+    assert.is_false(download.is_valid_media(corrupt_webp))
+    vim.fn.delete(corrupt_webp)
+
+    -- Short WEBP (< 512 bytes)
+    local short_webp = tmp() .. ".webp"
+    f = io.open(short_webp, "wb")
+    f:write("RIFF\000\000\000\000WEBP" .. string.rep("x", 200))
+    f:close()
+    assert.is_false(download.is_valid_media(short_webp))
+    vim.fn.delete(short_webp)
+  end)
+
+  it("validates complete MP4/MOV and rejects corrupt or tiny video", function()
+    local valid_mp4 = tmp() .. ".mp4"
+    local f = io.open(valid_mp4, "wb")
+    f:write("\000\000\000\020ftypmp42" .. string.rep("x", 2048))
+    f:close()
+    assert.is_true(download.is_valid_media(valid_mp4))
+    vim.fn.delete(valid_mp4)
+
+    -- Corrupt video missing 'ftyp'
+    local corrupt_mp4 = tmp() .. ".mp4"
+    f = io.open(corrupt_mp4, "wb")
+    f:write("\000\000\000\020nope" .. string.rep("x", 2048))
+    f:close()
+    assert.is_false(download.is_valid_media(corrupt_mp4))
+    vim.fn.delete(corrupt_mp4)
+
+    -- Short video (< 1024 bytes)
+    local short_mp4 = tmp() .. ".mp4"
+    f = io.open(short_mp4, "wb")
+    f:write("\000\000\000\020ftypmp42" .. string.rep("x", 500))
+    f:close()
+    assert.is_false(download.is_valid_media(short_mp4))
+    vim.fn.delete(short_mp4)
+  end)
+
+  it("rejects XML error page disguised with image extension", function()
+    local xml_file = tmp() .. ".png"
+    local f = io.open(xml_file, "wb")
+    f:write("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>AccessDenied</Code></Error>")
+    f:close()
+    assert.is_false(download.is_valid_media(xml_file))
+    vim.fn.delete(xml_file)
+  end)
+
+  it("resolves ref_path extension for in-flight .part files", function()
+    local target_dest = tmp() .. ".jpg"
+    local part_file = target_dest .. ".part"
+    local f = io.open(part_file, "wb")
+    f:write("\255\216" .. string.rep("x", 2048) .. "\255\217")
+    f:close()
+
+    assert.is_true(download.is_valid_media(part_file, target_dest))
+    vim.fn.delete(part_file)
+  end)
 end)
+
+describe("download.cancel_pending_resumes and download.cancel_prefetch_timers", function()
+  it("cancel_pending_resumes clears pending_resumes table and closes stored timers", function()
+    local uv = vim.uv or vim.loop
+    local timer = uv.new_timer()
+    timer:start(10000, 0, function() end)
+    download.pending_resumes = { [timer] = true }
+
+    download.cancel_pending_resumes()
+
+    assert.are.same({}, download.pending_resumes)
+    assert.is_true(timer:is_closing())
+  end)
+
+  it("cancel_prefetch_timers closes timers and optionally kills active prefetch handles", function()
+    local uv = vim.uv or vim.loop
+    local timer = uv.new_timer()
+    timer:start(10000, 0, function() end)
+    state.UI.prefetch_timers = { [1] = timer }
+    download.queued_prefetch_dests = { ["/tmp/prev.jpg"] = true }
+
+    local killed_sig = nil
+    local mock_handle = {
+      kill = function(self, sig)
+        killed_sig = sig
+      end,
+    }
+    download.active_prefetch_handles = { ["/tmp/prev.jpg"] = mock_handle }
+
+    download.cancel_prefetch_timers(true)
+
+    assert.are.same({}, state.UI.prefetch_timers)
+    assert.are.same({}, download.queued_prefetch_dests)
+    assert.are.same({}, download.active_prefetch_handles)
+    assert.are.equal(9, killed_sig)
+  end)
+end)
+

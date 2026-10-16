@@ -14,11 +14,19 @@ M.add_tag_to_index = db.add_tag_to_index
 M.parse_tag_file = db.parse_tag_file
 M.load_tags = db.load_tags
 
+M.prune_tag = db.prune_tag
+M.update_tag_in_index = db.update_tag_in_index
+M.verify_and_prune_tag = db.verify_and_prune_tag
+M.schedule_disk_prune = db.schedule_disk_prune
+M.prune_tags_from_disk = db.prune_tags_from_disk
+
 M.persist_discovered_tag = resolve.persist_discovered_tag
 M.save_discovered_now = resolve.save_discovered_now
 M.resolve_post_tags = resolve.resolve_post_tags
 M.fetch_api_tags = resolve.fetch_api_tags
 
 M.update_tags = fetcher.update_tags
+M.verify_tags = fetcher.verify_tags
+M.refresh_tags = fetcher.refresh_tags
 
 return M

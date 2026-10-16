@@ -1,3 +1,5 @@
+local constants = require("gelbooru.core.constants")
+
 local M = {}
 
 M.options = {
@@ -9,9 +11,9 @@ M.options = {
   log_file = vim.fn.stdpath("state") .. "/gelbooru.log",
   api_base = "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1",
   tags_api = "https://gelbooru.com/index.php?page=dapi&s=tag&q=index&json=1",
-  per_page = 42,
+  per_page = constants.DEFAULT_PER_PAGE,
   show_tags_in_list = false,
-  prefetch_radius = 5,
+  prefetch_radius = constants.DEFAULT_PREFETCH_RADIUS,
   media_player = nil,
 }
 
@@ -93,9 +95,9 @@ function M.setup(opts)
   M.options.log_file = get_opt("log_file", "LOG_FILE", M.options.log_file)
   M.options.api_base = get_opt("api_base", "API_BASE", M.options.api_base)
   M.options.tags_api = get_opt("tags_api", "TAGS_API", M.options.tags_api)
-  M.options.per_page = clamp(get_opt("per_page", "PER_PAGE", M.options.per_page), 1, 100)
+  M.options.per_page = clamp(get_opt("per_page", "PER_PAGE", M.options.per_page), constants.PER_PAGE_MIN, constants.PER_PAGE_MAX)
   M.options.show_tags_in_list = get_opt("show_tags_in_list", "SHOW_TAGS_IN_LIST", M.options.show_tags_in_list)
-  M.options.prefetch_radius = clamp(get_opt("prefetch_radius", "PREFETCH_RADIUS", M.options.prefetch_radius), 0, 20)
+  M.options.prefetch_radius = clamp(get_opt("prefetch_radius", "PREFETCH_RADIUS", M.options.prefetch_radius), constants.PREFETCH_RADIUS_MIN, constants.PREFETCH_RADIUS_MAX)
   M.options.media_player = get_opt("media_player", "MEDIA_PLAYER", M.options.media_player)
 end
 

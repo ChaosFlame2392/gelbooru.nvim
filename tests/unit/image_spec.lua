@@ -404,7 +404,7 @@ describe("image.sanitize_dpi: extreme DPI normalization", function()
     assert.are.equal(96, img.info.dpi.height)
   end)
 
-  it("preserves standard and reasonable in-range DPI (50 to 300) unchanged", function()
+  it("preserves standard and reasonable in-range DPI (50 to < 300) unchanged", function()
     local img_96 = { info = { dpi = { width = 96, height = 96 } } }
     image.sanitize_dpi(img_96)
     assert.are.equal(96, img_96.info.dpi.width)
@@ -415,10 +415,17 @@ describe("image.sanitize_dpi: extreme DPI normalization", function()
     assert.are.equal(72, img_72.info.dpi.width)
     assert.are.equal(72, img_72.info.dpi.height)
 
+    local img_150 = { info = { dpi = { width = 150, height = 150 } } }
+    image.sanitize_dpi(img_150)
+    assert.are.equal(150, img_150.info.dpi.width)
+    assert.are.equal(150, img_150.info.dpi.height)
+  end)
+
+  it("normalizes exactly 300 DPI images (standard export DPI) down to 96x96", function()
     local img_300 = { info = { dpi = { width = 300, height = 300 } } }
     image.sanitize_dpi(img_300)
-    assert.are.equal(300, img_300.info.dpi.width)
-    assert.are.equal(300, img_300.info.dpi.height)
+    assert.are.equal(96, img_300.info.dpi.width)
+    assert.are.equal(96, img_300.info.dpi.height)
   end)
 
   it("safely handles nil, empty tables, and missing DPI structures", function()

@@ -1,11 +1,12 @@
 local config = require("gelbooru.core.config")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
+local constants = require("gelbooru.core.constants")
 
 local M = {}
 
-local MAX_CONCURRENT = 2
-local PACING_MS = 100
+local MAX_CONCURRENT = constants.INDEXER_MAX_CONCURRENT
+local PACING_MS = constants.INDEXER_PACING_MS
 
 M.queue = {}
 M.queue_head = 1
@@ -29,7 +30,7 @@ function M.cursor_rush_prefetch(cur_idx, scroll_dir)
   end
 
   local api = require("gelbooru.net.api")
-  local radius = math.min(5, math.max(3, config.options.prefetch_radius or 5))
+  local radius = math.min(constants.RUSH_RADIUS_MAX, math.max(constants.RUSH_RADIUS_MIN, config.options.prefetch_radius or constants.DEFAULT_PREFETCH_RADIUS))
 
   local epoch = state.State.search_epoch
   for offset = 1, radius do
@@ -179,7 +180,7 @@ function M.process_next_batch()
               end
             end
             if State.local_query_tag_str and State.local_query_tag_str ~= "" and #new_filtered ~= prev_count then
-              ui.set_status(string.format("Found %d local posts matching '%s'", #new_filtered, State.local_query_tag_str), 2500)
+              ui.set_status(string.format("Found %d local posts matching '%s'", #new_filtered, State.local_query_tag_str), constants.STATUS_TIMEOUT_INDEXER_MS)
             end
           else
             local cur_post = State.posts[State.cur]

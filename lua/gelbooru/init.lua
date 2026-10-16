@@ -3,7 +3,7 @@
 --
 -- Commands:
 --   :Gelbooru       — open tag picker → image browser
---   :GelbooruTags   — download & cache popular tags for autocomplete
+--   :GelbooruTags   — download, refresh, or verify tags for autocomplete
 --
 -- Auth setup (do once, never commit to git):
 --   Create ~/.config/nvim/gelbooru_auth.json:
@@ -34,8 +34,16 @@ end
 
 M.local_browser = M.open_local
 
-function M.update_tags()
-  tags.update_tags()
+function M.update_tags(arg, opts)
+  tags.update_tags(arg, opts)
+end
+
+function M.verify_tags(opts)
+  tags.verify_tags(opts)
+end
+
+function M.refresh_tags(opts)
+  tags.refresh_tags(opts)
 end
 
 M.tags = M.update_tags

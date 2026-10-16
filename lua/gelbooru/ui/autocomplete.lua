@@ -2,6 +2,7 @@ local config = require("gelbooru.core.config")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
 local tags = require("gelbooru.tags")
+local constants = require("gelbooru.core.constants")
 
 local M = {}
 
@@ -67,7 +68,7 @@ function M.update_autocomplete(query)
       local t = State.all_tags[i]
       if is_local or not t.local_only then
         table.insert(State.autocomplete_filtered, t)
-        if #State.autocomplete_filtered >= 300 then
+        if #State.autocomplete_filtered >= constants.AC_EMPTY_QUERY_LIMIT then
           break
         end
       end
@@ -82,7 +83,7 @@ function M.update_autocomplete(query)
         return
       end
       local added = 0
-      local limit = max_per_bucket or 100
+      local limit = max_per_bucket or constants.AC_BUCKET_LIMIT
       for i = 1, #bucket do
         local t = bucket[i]
         local is_local_only = t.local_only or false
@@ -93,21 +94,21 @@ function M.update_autocomplete(query)
           if not seen_names[nl] then
             local base = 0
             if nl == search_target then
-              base = 35.0
+              base = constants.SCORE_BASE_EXACT
             elseif has_norm and t.norm == target_norm then
-              base = 30.0
+              base = constants.SCORE_BASE_NORM
             elseif vim.startswith(nl, search_target) then
-              base = 20.0
+              base = constants.SCORE_BASE_PREFIX
             elseif has_norm and vim.startswith(t.norm, target_norm) then
-              base = 15.0
+              base = constants.SCORE_BASE_PREFIX_NORM
             elseif not prefix_only and (nl:find(search_target, 1, true) or (has_norm and t.norm:find(target_norm, 1, true))) then
-              base = 5.0
+              base = constants.SCORE_BASE_SUBSTRING
             end
 
             if base > 0 then
               seen_names[nl] = true
-              local pop = (typ == 5) and 0 or (math.log10(count + 1) * 10.0)
-              local score = (typ == 5) and 1000.0 or (base + pop + (cat_nudge or 0))
+              local pop = (typ == 5) and 0 or (math.log10(count + 1) * constants.SCORE_POP_MULTIPLIER)
+              local score = (typ == 5) and constants.SCORE_META_PIN or (base + pop + (cat_nudge or 0))
               candidates[#candidates + 1] = {
                 item = t,
                 score = score,
@@ -124,10 +125,10 @@ function M.update_autocomplete(query)
     end
 
     -- 1. First-character bucket lookup
-    check_bucket(State.series_by_first[first_char], 2.0, false, 100)
-    check_bucket(State.chars_by_first[first_char], 1.0, false, 100)
-    check_bucket(State.general_by_first[first_char], 0.0, false, 100)
-    check_bucket(State.artists_by_first[first_char], 0.5, true, 100)
+    check_bucket(State.series_by_first[first_char], constants.CAT_NUDGE_SERIES, false, constants.AC_BUCKET_LIMIT)
+    check_bucket(State.chars_by_first[first_char], constants.CAT_NUDGE_CHARACTER, false, constants.AC_BUCKET_LIMIT)
+    check_bucket(State.general_by_first[first_char], constants.CAT_NUDGE_GENERAL, false, constants.AC_BUCKET_LIMIT)
+    check_bucket(State.artists_by_first[first_char], constants.CAT_NUDGE_ARTIST, true, constants.AC_BUCKET_LIMIT)
 
     -- META tags are a small fixed list, always injected at top priority
     for _, t in ipairs(config.META_TAGS) do
@@ -136,14 +137,14 @@ function M.update_autocomplete(query)
         if not seen_names[nl] then
           if nl == search_target or vim.startswith(nl, search_target) then
             seen_names[nl] = true
-            candidates[#candidates + 1] = { item = t, score = 1000.0, count = 0 }
+            candidates[#candidates + 1] = { item = t, score = constants.SCORE_META_PIN, count = 0 }
           end
         end
       end
     end
 
     -- 2. Substring fallback across full lists when few candidates found
-    if #candidates < 30 and #search_target >= 3 then
+    if #candidates < constants.AC_SUBSTRING_TRIGGER and #search_target >= constants.AC_MIN_TRIGGER_LEN then
       local function check_full_list(list, cat_nudge, max_needed)
         if not list then
           return false
@@ -157,8 +158,8 @@ function M.update_autocomplete(query)
             local nl = t.n_lower
             if nl:find(search_target, 1, true) or (has_norm and t.norm:find(target_norm, 1, true)) then
               seen_names[nl] = true
-              local pop = (typ == 5) and 0 or (math.log10(count + 1) * 10.0)
-              local score = (typ == 5) and 1000.0 or (5.0 + pop + (cat_nudge or 0))
+              local pop = (typ == 5) and 0 or (math.log10(count + 1) * constants.SCORE_POP_MULTIPLIER)
+              local score = (typ == 5) and constants.SCORE_META_PIN or (constants.SCORE_BASE_SUBSTRING + pop + (cat_nudge or 0))
               candidates[#candidates + 1] = {
                 item = t,
                 score = score,
@@ -173,12 +174,12 @@ function M.update_autocomplete(query)
         return false
       end
 
-      check_full_list(State.series, 2.0, 60)
+      check_full_list(State.series, constants.CAT_NUDGE_SERIES, 60)
       if #candidates < 60 then
-        check_full_list(State.characters, 1.0, 80)
+        check_full_list(State.characters, constants.CAT_NUDGE_CHARACTER, 80)
       end
       if #candidates < 80 then
-        check_full_list(State.general, 0.0, 100)
+        check_full_list(State.general, constants.CAT_NUDGE_GENERAL, 100)
       end
     end
 
@@ -192,12 +193,12 @@ function M.update_autocomplete(query)
       return (a.item.n or "") < (b.item.n or "")
     end)
 
-    for i = 1, math.min(150, #candidates) do
+    for i = 1, math.min(constants.AC_MAX_RENDERED_CANDIDATES, #candidates) do
       table.insert(State.autocomplete_filtered, candidates[i].item)
     end
 
     -- Trigger live API fallback if few results found
-    if #candidates < 10 and #search_target >= 3 and not is_syntax_directive(search_target) then
+    if #candidates < constants.AC_API_FALLBACK_COUNT and #search_target >= constants.AC_MIN_TRIGGER_LEN and not is_syntax_directive(search_target) then
       tags.fetch_api_tags(search_target)
     end
   end

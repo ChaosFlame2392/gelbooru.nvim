@@ -1,6 +1,7 @@
 local log = require("gelbooru.core.log")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
+local constants = require("gelbooru.core.constants")
 
 local M = {}
 
@@ -25,7 +26,7 @@ function M.save_current_history()
   end
 end
 
-local MAX_HISTORY = 30
+local MAX_HISTORY = constants.MAX_HISTORY_ENTRIES
 
 function M.push_history(query)
   local State = state.State
@@ -144,7 +145,7 @@ function M.restore_history(idx)
       #State.history,
       State.query ~= "" and State.query or "(empty)"
     ),
-    2000
+    constants.STATUS_TIMEOUT_HISTORY_MS
   )
 end
 
@@ -154,7 +155,7 @@ function M.history_prev()
     M.restore_history(State.history_idx - 1)
   else
     local ui = require("gelbooru.ui")
-    ui.set_status("At oldest search history entry", 1500)
+    ui.set_status("At oldest search history entry", constants.STATUS_TIMEOUT_NOTICE_MS)
   end
 end
 
@@ -164,7 +165,7 @@ function M.history_next()
     M.restore_history(State.history_idx + 1)
   else
     local ui = require("gelbooru.ui")
-    ui.set_status("At latest search history entry", 1500)
+    ui.set_status("At latest search history entry", constants.STATUS_TIMEOUT_NOTICE_MS)
   end
 end
 

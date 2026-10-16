@@ -716,5 +716,68 @@ describe("Pipeline & Concurrency Stress Testing Suite", function()
       indexer.stop()
       api.fetch_post_metadata = orig_fetch
     end)
+
+    it("verifies thorough timer cleanup and zero handle leaks across rapid open/close cycling (Issue 4)", function()
+      local uv = vim.uv or vim.loop
+
+      for cycle = 1, 15 do
+        ui.open()
+
+        -- Simulate active in-flight timers across all subsystems
+        local timers = {
+          scroll = uv.new_timer(),
+          status = uv.new_timer(),
+          api_tag = uv.new_timer(),
+          ac_debounce = uv.new_timer(),
+          resize = uv.new_timer(),
+          resume = uv.new_timer(),
+          save_discovered = uv.new_timer(),
+          prefetch = uv.new_timer(),
+        }
+
+        for _, t in pairs(timers) do
+          t:start(10000, 0, function() end)
+        end
+
+        state.UI.scroll_timer = timers.scroll
+        state.UI.status_timer = timers.status
+        state.UI.api_tag_timer = timers.api_tag
+        state.UI.ac_debounce_timer = timers.ac_debounce
+        state.UI.resize_timer = timers.resize
+        state.UI.resume_timer = timers.resume
+        state.UI.save_discovered_timer = timers.save_discovered
+        state.UI.prefetch_timers = { [1] = timers.prefetch }
+
+        -- Teardown UI
+        ui.teardown()
+
+        -- Verify all timers were stopped, closed, and nil'd out
+        assert.is_nil(state.UI.scroll_timer)
+        assert.is_nil(state.UI.status_timer)
+        assert.is_nil(state.UI.api_tag_timer)
+        assert.is_nil(state.UI.ac_debounce_timer)
+        assert.is_nil(state.UI.resize_timer)
+        assert.is_nil(state.UI.resume_timer)
+        assert.is_nil(state.UI.save_discovered_timer)
+        assert.are.same({}, state.UI.prefetch_timers)
+
+        for name, t in pairs(timers) do
+          assert.is_true(t:is_closing(), "Timer " .. name .. " must be closing after teardown")
+        end
+
+        assert.are.same({}, download.active_prefetch_handles)
+        assert.are.same({}, download.active_downloads)
+        assert.are.same({}, download.pending_resumes)
+        assert.is_true(state.State.torn_down)
+
+        -- Windows must be closed
+        for win_name, win_id in pairs(state.UI.wins or {}) do
+          if type(win_id) == "number" then
+            assert.is_false(vim.api.nvim_win_is_valid(win_id), "Window " .. win_name .. " must be closed")
+          end
+        end
+      end
+    end)
   end)
 end)
+

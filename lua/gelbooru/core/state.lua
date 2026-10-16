@@ -1,3 +1,5 @@
+local constants = require("gelbooru.core.constants")
+
 local M = {}
 
 M.State = {
@@ -33,11 +35,12 @@ M.State = {
   tags_loading = false,
   torn_down = false,
   prev_mouse = nil,
-  list_width_ratio = 0.25,
+  list_width_ratio = constants.DEFAULT_LIST_WIDTH_RATIO,
   zen_mode = false,
   saved_index = {},
   session_cache = {},
   pending_deletions = {},
+  pending_prunes = {},
   local_folder_posts = nil,
   local_filter = nil,
   local_query_tag_str = nil,
@@ -52,13 +55,16 @@ M.UI = {
   api_tag_timer = nil,
   ac_debounce_timer = nil,
   save_discovered_timer = nil,
+  prune_disk_timer = nil,
+  fetcher_timers = {},
+  tags_spinner_win = nil,
   resize_timer = nil,
   resume_timer = nil,
   prefetch_timers = {},
   indexer_timer = nil,
   current_placement = nil,
   confirm_prev_win = nil,
-  PREVIEW_COOLDOWN_MS = 150,
+  PREVIEW_COOLDOWN_MS = constants.PREVIEW_COOLDOWN_REMOTE_MS,
 }
 
 function M.reset_query_state()
@@ -78,10 +84,11 @@ function M.reset_query_state()
   M.State.scroll_dir = 1
   M.State.search_epoch = (M.State.search_epoch or 0) + 1
   M.State.torn_down = false
-  M.State.list_width_ratio = 0.25
+  M.State.list_width_ratio = constants.DEFAULT_LIST_WIDTH_RATIO
   M.State.zen_mode = false
   M.State.saved_index = {}
   M.State.pending_deletions = {}
+  M.State.pending_prunes = {}
   -- session_cache is preserved across query resets (TTL-managed in net/api.lua)
   M.State.local_folder_posts = nil
   M.State.local_filter = nil
@@ -100,6 +107,9 @@ function M.reset_ui()
   M.UI.api_tag_timer = nil
   M.UI.ac_debounce_timer = nil
   M.UI.save_discovered_timer = nil
+  M.UI.prune_disk_timer = nil
+  M.UI.fetcher_timers = {}
+  M.UI.tags_spinner_win = nil
   M.UI.resize_timer = nil
   M.UI.resume_timer = nil
   M.UI.prefetch_timers = {}

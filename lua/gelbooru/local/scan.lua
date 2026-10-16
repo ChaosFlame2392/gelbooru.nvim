@@ -11,12 +11,20 @@ function M.extract_post_id(file_path)
   -- 1. Exact numeric ID before extension: e.g. 11802758.jpg, 11802758.sample.png
   local id = fname:match("^(%d+)%..+$")
   if id then
-    return id
+    local n = tonumber(id)
+    if n and n >= 10000 then
+      return id
+    end
+    return nil
   end
   -- 2. Leading numeric ID followed by delimiter: e.g. 11802758_tag.jpg, 11802758 - tag.jpg
   id = fname:match("^(%d+)[_%s%-]")
   if id then
-    return id
+    local n = tonumber(id)
+    if n and n >= 10000 then
+      return id
+    end
+    return nil
   end
   -- 3. Explicit prefix: gelbooru_11802758.jpg, post_11802758.jpg, id_11802758.jpg
   id = fname:match("^[Gg]elbooru[ _%-]+(%d+)")

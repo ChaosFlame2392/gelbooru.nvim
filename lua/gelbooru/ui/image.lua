@@ -2,6 +2,7 @@ local config = require("gelbooru.core.config")
 local log = require("gelbooru.core.log")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
+local constants = require("gelbooru.core.constants")
 
 local M = {}
 
@@ -146,7 +147,7 @@ end
 function M.abort_all_ffmpeg()
   for h in pairs(M.active_ffmpeg_handles or {}) do
     if h and h.kill then
-      pcall(h.kill, h, 9)
+      pcall(h.kill, h, constants.SIGKILL)
     end
   end
   M.active_ffmpeg_handles = {}
@@ -412,7 +413,7 @@ end
 function M.extract_video_thumbnail(video_path, post_id, cb)
   if post_id then
     local cached_thumb = M.get_video_thumbnail_path(video_path, post_id)
-    if vim.fn.filereadable(cached_thumb) == 1 and (vim.fn.getfsize(cached_thumb) or 0) > 512 then
+    if vim.fn.filereadable(cached_thumb) == 1 and (vim.fn.getfsize(cached_thumb) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES then
       if cb then cb(cached_thumb) end
       return
     end
@@ -447,7 +448,7 @@ function M.extract_video_thumbnail(video_path, post_id, cb)
   end
 
   local thumb_dest = M.get_video_thumbnail_path(vpath, post_id)
-  if vim.fn.filereadable(thumb_dest) == 1 and (vim.fn.getfsize(thumb_dest) or 0) > 512 then
+  if vim.fn.filereadable(thumb_dest) == 1 and (vim.fn.getfsize(thumb_dest) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES then
     if cb then cb(thumb_dest) end
     return
   end
@@ -584,10 +585,10 @@ end
 function M.sanitize_dpi(img)
   if img and img.info and img.info.dpi then
     local dpi = img.info.dpi
-    if (dpi.width and (dpi.width > 300 or dpi.width < 50))
-      or (dpi.height and (dpi.height > 300 or dpi.height < 50)) then
-      dpi.width = 96
-      dpi.height = 96
+    if (dpi.width and (dpi.width >= constants.DPI_MAX_VALID or dpi.width < constants.DPI_MIN_VALID))
+      or (dpi.height and (dpi.height >= constants.DPI_MAX_VALID or dpi.height < constants.DPI_MIN_VALID)) then
+      dpi.width = constants.STANDARD_SCREEN_DPI
+      dpi.height = constants.STANDARD_SCREEN_DPI
     end
   end
 end

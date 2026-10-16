@@ -26,7 +26,7 @@ describe("Integration: Local Folder Browser Mode", function()
     tmp_dir = vim.fn.tempname()
     vim.fn.mkdir(tmp_dir, "p")
     -- Create dummy images (> 1024 bytes)
-    for _, name in ipairs({ "1001.jpg", "1002.png", "artwork_no_id.webp" }) do
+    for _, name in ipairs({ "10001.jpg", "10002.png", "artwork_no_id.webp" }) do
       local f = io.open(tmp_dir .. "/" .. name, "wb")
       if f then
         f:write(string.rep("B", 2048))
@@ -70,7 +70,7 @@ describe("Integration: Local Folder Browser Mode", function()
   it("enriches metadata for focused post with post ID from Gelbooru API", function()
     ui.open_local(tmp_dir)
 
-    -- Post 1 is 1001.jpg which has id = "1001". Mock net returns sample_posts[1].
+    -- Post 1 is 10001.jpg which has id = "10001". Mock net returns sample_posts[1].
     vim.wait(1000, function()
       local p = state.State.posts[1]
       return p and p._metadata_fetched == true
@@ -107,7 +107,7 @@ describe("Integration: Local Folder Browser Mode", function()
   end)
 
   it("supports opening a direct file path and focuses that file", function()
-    local target_file = tmp_dir .. "/1002.png"
+    local target_file = tmp_dir .. "/10002.png"
     ui.open_local(target_file)
 
     assert.is_truthy(state.UI.wins.frame)
@@ -250,7 +250,7 @@ describe("Integration: Local Folder Browser Mode", function()
 
   describe("Critical Safety: Local File Preservation", function()
     it("CRITICAL: 'R' (force refresh) DOES NOT delete or truncate the local file", function()
-      local test_file = tmp_dir .. "/1001.jpg"
+      local test_file = tmp_dir .. "/10001.jpg"
       local original_content = "ORIGINAL_LOCAL_IMAGE_PAYLOAD_PROTECTED_" .. string.rep("X", 2000)
       local f = io.open(test_file, "wb")
       f:write(original_content)
@@ -307,15 +307,15 @@ describe("Integration: Local Folder Browser Mode", function()
       local win_list = state.UI.wins.list
       vim.api.nvim_set_current_win(win_list)
 
-      -- Post 1 has ID 1001
+      -- Post 1 has ID 10001
       state.State.cur = 1
       local p1 = state.State.posts[1]
-      assert.are.equal("1001", tostring(p1.id))
+      assert.are.equal("10001", tostring(p1.id))
 
       -- 'o' triggers web page lookup for post with ID
       opened_url = nil
       vim.cmd("normal o")
-      assert.are.equal("https://gelbooru.com/index.php?page=post&s=view&id=1001", opened_url)
+      assert.are.equal("https://gelbooru.com/index.php?page=post&s=view&id=10001", opened_url)
 
       -- 'O' triggers local media viewer for post 1
       opened_url = nil
@@ -353,21 +353,21 @@ describe("Integration: Local Folder Browser Mode", function()
 
     it("force refresh 'R' strictly deletes ONLY the cache json and preserves media file bytes intact", function()
       local util = require("gelbooru.core.util")
-      local test_file = tmp_dir .. "/1001.jpg"
+      local test_file = tmp_dir .. "/10001.jpg"
       local original_content = "ORIGINAL_LOCAL_IMAGE_PAYLOAD_PROTECTED_" .. string.rep("X", 2000)
       local f = io.open(test_file, "wb")
       f:write(original_content)
       f:close()
 
-      -- Create disk cache for post 1001
-      local meta_path = util.meta_cache_path("1001")
-      util.write_json(meta_path, { id = 1001, tags = "initial_cached_tag" })
+      -- Create disk cache for post 10001
+      local meta_path = util.meta_cache_path("10001")
+      util.write_json(meta_path, { id = 10001, tags = "initial_cached_tag" })
       assert.are.equal(1, vim.fn.filereadable(meta_path))
 
       ui.open_local(tmp_dir)
       assert.are.equal(1, state.State.cur)
       local p = state.State.posts[1]
-      assert.are.equal("1001", p.id)
+      assert.are.equal("10001", p.id)
 
       -- Trigger 'R' force refresh via list window normal mode mapping
       local win_list = state.UI.wins.list
@@ -531,28 +531,28 @@ describe("Integration: Local Folder Browser Mode", function()
         return p and p._metadata_fetched == true
       end, 20)
 
-      assert.are.equal(1, calls_by_id["1001"])
+      assert.are.equal(1, calls_by_id["10001"])
 
-      -- Move away to post 2 (triggers fetch for 1002)
+      -- Move away to post 2 (triggers fetch for 10002)
       state.State.cur = 2
       ui.render_preview(false)
       vim.wait(300, function()
         local p2 = state.State.posts[2]
         return p2 and p2._metadata_fetched == true
       end, 20)
-      assert.are.equal(1, calls_by_id["1002"])
+      assert.are.equal(1, calls_by_id["10002"])
 
-      -- Move back to post 1: must NOT trigger a second fetch for 1001
+      -- Move back to post 1: must NOT trigger a second fetch for 10001
       state.State.cur = 1
       ui.render_preview(false)
       vim.wait(100, function() return false end, 10)
-      assert.are.equal(1, calls_by_id["1001"])
+      assert.are.equal(1, calls_by_id["10001"])
 
-      -- Move back to post 2: must NOT trigger a second fetch for 1002
+      -- Move back to post 2: must NOT trigger a second fetch for 10002
       state.State.cur = 2
       ui.render_preview(false)
       vim.wait(100, function() return false end, 10)
-      assert.are.equal(1, calls_by_id["1002"])
+      assert.are.equal(1, calls_by_id["10002"])
     end)
   end)
 
@@ -678,7 +678,7 @@ describe("Integration: Local Folder Browser Mode", function()
       -- Callback resolves AFTER teardown
       if in_flight_cb then
         in_flight_cb(vim.fn.json_encode({
-          post = { { id = 1001, tags = "should_be_ignored" } },
+          post = { { id = 10001, tags = "should_be_ignored" } },
         }))
       end
 
@@ -745,10 +745,10 @@ describe("Integration: Local Folder Browser Mode", function()
       ui.open_local(tmp_dir)
       assert.are.equal(3, #state.State.posts)
 
-      -- Query 2: filter for 1001
-      api.execute_search("local:" .. tmp_dir .. " 1001")
+      -- Query 2: filter for 10001
+      api.execute_search("local:" .. tmp_dir .. " 10001")
       assert.are.equal(1, #state.State.posts)
-      assert.are.equal("local:" .. tmp_dir .. " 1001", state.State.query)
+      assert.are.equal("local:" .. tmp_dir .. " 10001", state.State.query)
 
       -- Navigate back with history_prev ([)
       history.history_prev()
@@ -757,7 +757,7 @@ describe("Integration: Local Folder Browser Mode", function()
 
       -- Navigate forward with history_next (])
       history.history_next()
-      assert.are.equal("local:" .. tmp_dir .. " 1001", state.State.query)
+      assert.are.equal("local:" .. tmp_dir .. " 10001", state.State.query)
       assert.are.equal(1, #state.State.posts)
     end)
   end)
@@ -862,30 +862,30 @@ describe("Integration: Local Folder Browser Mode", function()
       vim.fn.mkdir(adv_dir, "p")
       -- Seed images with various tag and name patterns
       -- 1. Caterpillar post
-      local f1 = io.open(adv_dir .. "/101_caterpillar.png", "wb")
+      local f1 = io.open(adv_dir .. "/10101_caterpillar.png", "wb")
       if f1 then f1:write(string.rep("A", 2048)) f1:close() end
-      util.write_json(util.meta_cache_path("101"), {
-        id = "101",
+      util.write_json(util.meta_cache_path("10101"), {
+        id = "10101",
         tags = "caterpillar insect nature",
         rating = "general",
         score = 15,
       })
 
       -- 2. Cat post
-      local f2 = io.open(adv_dir .. "/102_cat.png", "wb")
+      local f2 = io.open(adv_dir .. "/10102_cat.png", "wb")
       if f2 then f2:write(string.rep("B", 2048)) f2:close() end
-      util.write_json(util.meta_cache_path("102"), {
-        id = "102",
+      util.write_json(util.meta_cache_path("10102"), {
+        id = "10102",
         tags = "cat feline animal black_cat",
         rating = "sensitive",
         score = -12,
       })
 
       -- 3. Complex special characters and negative score
-      local f3 = io.open(adv_dir .. "/103_special_c++.png", "wb")
+      local f3 = io.open(adv_dir .. "/10103_special_c++.png", "wb")
       if f3 then f3:write(string.rep("C", 2048)) f3:close() end
-      util.write_json(util.meta_cache_path("103"), {
-        id = "103",
+      util.write_json(util.meta_cache_path("10103"), {
+        id = "10103",
         tags = "tag(1) c++ [brackets] * ?",
         rating = "explicit",
         score = -25,
@@ -896,10 +896,10 @@ describe("Integration: Local Folder Browser Mode", function()
       if f4 then f4:write(string.rep("D", 2048)) f4:close() end
 
       -- 5. Video post .mp4
-      local f5 = io.open(adv_dir .. "/105_sample_anim.mp4", "wb")
+      local f5 = io.open(adv_dir .. "/10105_sample_anim.mp4", "wb")
       if f5 then f5:write(string.rep("E", 2048)) f5:close() end
-      util.write_json(util.meta_cache_path("105"), {
-        id = "105",
+      util.write_json(util.meta_cache_path("10105"), {
+        id = "10105",
         tags = "animation 3d video",
         rating = "questionable",
         score = 50,
@@ -917,14 +917,14 @@ describe("Integration: Local Folder Browser Mode", function()
 
       -- Only 102_cat.png should match 'cat'
       assert.are.equal(1, #state.State.posts)
-      assert.are.equal("102", state.State.posts[1].id)
+      assert.are.equal("10102", state.State.posts[1].id)
     end)
 
     it("handles negative scores (score:<-10) and boundary filters in execute_search", function()
       ui.open()
       api.execute_search("local:" .. adv_dir .. " score:<-10")
 
-      -- Posts with score < -10: 102 (-12) and 103 (-25)
+      -- Posts with score < -10: 10102 (-12) and 10103 (-25)
       assert.are.equal(2, #state.State.posts)
       for _, p in ipairs(state.State.posts) do
         assert.is_true(p.score < -10)
@@ -950,12 +950,12 @@ describe("Integration: Local Folder Browser Mode", function()
       api.execute_search("local:" .. adv_dir .. " c++")
 
       assert.are.equal(1, #state.State.posts)
-      assert.are.equal("103", state.State.posts[1].id)
+      assert.are.equal("10103", state.State.posts[1].id)
 
       -- Negative matching with special chars
       api.execute_search("local:" .. adv_dir .. " -c++")
       for _, p in ipairs(state.State.posts) do
-        assert.are.not_equal("103", p.id)
+        assert.are.not_equal("10103", p.id)
       end
     end)
 
@@ -971,14 +971,14 @@ describe("Integration: Local Folder Browser Mode", function()
       api.execute_search("local:" .. adv_dir .. " -rating:explicit")
 
       assert.are.equal("local:" .. adv_dir .. " -rating:explicit", state.State.query)
-      -- 101, 102, untagged, video are non-explicit
+      -- 10101, 10102, untagged, video are non-explicit
       assert.are.equal(4, #state.State.posts)
 
       -- History navigation backward works cleanly
       history.history_prev()
       assert.are.equal("local:" .. adv_dir .. " rating:explicit", state.State.query)
       assert.are.equal(1, #state.State.posts)
-      assert.are.equal("103", state.State.posts[1].id)
+      assert.are.equal("10103", state.State.posts[1].id)
     end)
 
     it("teardown safety during local query search and zero-result keypress flurry", function()
@@ -1024,7 +1024,7 @@ describe("Integration: Local Folder Browser Mode", function()
       -- Filter for video post
       api.execute_search("local:" .. adv_dir .. " animation")
       assert.are.equal(1, #state.State.posts)
-      assert.is_truthy(state.State.posts[1].file_url:find("105_sample_anim.mp4"))
+      assert.is_truthy(state.State.posts[1].file_url:find("10105_sample_anim.mp4"))
 
       -- List buffer has [VIDEO] badge
       local list_lines = harness.get_buf_lines(state.UI.bufs.list)
@@ -1058,7 +1058,7 @@ describe("Integration: Local Folder Browser Mode", function()
     end)
 
     it("render_list displays [SAVED] badge for online posts when present in save_dir and updates via mtime cache", function()
-      local saved_file = config.options.save_dir .. "/1001.jpg"
+      local saved_file = config.options.save_dir .. "/10001.jpg"
       local f = io.open(saved_file, "wb")
       if f then f:write(string.rep("S", 2048)) f:close() end
 
@@ -1066,8 +1066,8 @@ describe("Integration: Local Folder Browser Mode", function()
       vim.wait(300, function() return #state.State.posts > 0 end, 10)
 
       assert.are.equal(3, #state.State.posts)
-      assert.are.equal(1001, state.State.posts[1].id)
-      assert.are.equal(1002, state.State.posts[2].id)
+      assert.are.equal(10001, state.State.posts[1].id)
+      assert.are.equal(10002, state.State.posts[2].id)
 
       ui.render_list()
 
@@ -1087,12 +1087,12 @@ describe("Integration: Local Folder Browser Mode", function()
 
       state.State.cur = 2
       local p2 = state.State.posts[2]
-      assert.are.equal(1002, p2.id)
+      assert.are.equal(10002, p2.id)
 
       ui.render_list()
       local list_lines_before = harness.get_buf_lines(state.UI.bufs.list)
       assert.is_falsy(list_lines_before[2]:find("%[SAVED%]"))
-      assert.is_false(local_index.is_saved(1002))
+      assert.is_false(local_index.is_saved(10002))
 
       local rendered_image_path = nil
       local orig_render_image = image.render_image
@@ -1105,16 +1105,16 @@ describe("Integration: Local Folder Browser Mode", function()
       api.save_current(function(saved, dest)
         save_cb_called = true
         assert.is_true(saved)
-        assert.is_truthy(dest:find("1002"))
+        assert.is_truthy(dest:find("10002"))
       end)
 
       vim.wait(500, function() return save_cb_called end, 10)
       assert.is_true(save_cb_called)
 
-      assert.is_true(local_index.is_saved(1002))
+      assert.is_true(local_index.is_saved(10002))
 
       assert.is_not_nil(rendered_image_path)
-      assert.is_truthy(rendered_image_path:find("1002"))
+      assert.is_truthy(rendered_image_path:find("10002"))
       assert.are.equal(1, vim.fn.filereadable(rendered_image_path))
 
       local list_lines_after = harness.get_buf_lines(state.UI.bufs.list)
@@ -1230,12 +1230,12 @@ describe("Integration: Local Folder Browser Mode", function()
 
     it("cancels deletion when user selects Cancel in confirmation dialog", function()
       ui.open_local(tmp_dir)
-      local target_file = tmp_dir .. "/1001.jpg"
+      local target_file = tmp_dir .. "/10001.jpg"
       assert.are.equal(1, vim.fn.filereadable(target_file))
 
       local orig_select = vim.ui.select
       vim.ui.select = function(items, opts, on_choice)
-        assert.is_truthy(opts.prompt:find("Delete local file: 1001.jpg"))
+        assert.is_truthy(opts.prompt:find("Delete local file: 10001.jpg"))
         on_choice("Cancel")
       end
 
@@ -1253,18 +1253,18 @@ describe("Integration: Local Folder Browser Mode", function()
 
     it("deletes local file, removes cached metadata and thumbnail, unmarks saved_index, keeps user focused in viewer, and updates display", function()
       local local_index = require("gelbooru.local.index")
-      local target_file = tmp_dir .. "/1001.jpg"
+      local target_file = tmp_dir .. "/10001.jpg"
       assert.are.equal(1, vim.fn.filereadable(target_file))
 
       -- Create meta cache file and thumbnail file
-      local meta_path = util.meta_cache_path("1001")
+      local meta_path = util.meta_cache_path("10001")
       util.write_json(meta_path, {
-        id = "1001",
-        file_url = "https://example.com/1001.jpg",
+        id = "10001",
+        file_url = "https://example.com/10001.jpg",
         preview_url = "https://example.com/1001_prev.jpg",
         tags = "hatsune_miku 1girl",
       })
-      local vthumb_path = string.format("%s/vthumb_%s.jpg", config.options.cache_dir, "1001")
+      local vthumb_path = string.format("%s/vthumb_%s.jpg", config.options.cache_dir, "10001")
       local vf = io.open(vthumb_path, "wb")
       if vf then vf:write("dummy thumbnail") vf:close() end
 
@@ -1274,7 +1274,7 @@ describe("Integration: Local Folder Browser Mode", function()
 
       local orig_select = vim.ui.select
       vim.ui.select = function(items, opts, on_choice)
-        assert.is_truthy(opts.prompt:find("1001.jpg"))
+        assert.is_truthy(opts.prompt:find("10001.jpg"))
         on_choice("Yes, delete file")
       end
 
@@ -1283,17 +1283,17 @@ describe("Integration: Local Folder Browser Mode", function()
 
       -- 1. File remains readable on disk until UI teardown
       assert.are.equal(1, vim.fn.filereadable(target_file))
-      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+      assert.is_not_nil(state.State.pending_deletions["10001"] or state.State.pending_deletions[target_file])
       -- 2. Metadata cache and video thumbnail remain intact for inspection
       assert.are.equal(1, vim.fn.filereadable(meta_path))
       assert.are.equal(1, vim.fn.filereadable(vthumb_path))
       -- 3. Unmarked from saved_index immediately
-      assert.is_false(local_index.is_saved(1001))
+      assert.is_false(local_index.is_saved(10001))
       -- 4. User remains focused on the EXACT same post
       assert.are.equal(initial_count, #state.State.posts)
       assert.are.equal(1, state.State.cur)
       local current_post = state.State.posts[state.State.cur]
-      assert.are.equal("1001", tostring(current_post.id))
+      assert.are.equal("10001", tostring(current_post.id))
       -- 5. Post list display updated (no [SAVED] marker)
       local list_lines = harness.get_buf_lines(state.UI.bufs.list)
       assert.is_nil(list_lines[1]:find("%[SAVED%]"))
@@ -1312,12 +1312,12 @@ describe("Integration: Local Folder Browser Mode", function()
 
     it("allows cancelling confirmation dialog with no changes", function()
       local local_index = require("gelbooru.local.index")
-      local target_file = tmp_dir .. "/1001.jpg"
+      local target_file = tmp_dir .. "/10001.jpg"
 
       ui.open_local(tmp_dir)
       -- Mark saved AFTER open_local so the saved_index survives the directory rescan
-      local_index.mark_saved(1001, "jpg")
-      assert.is_true(local_index.is_saved(1001))
+      local_index.mark_saved(10001, "jpg")
+      assert.is_true(local_index.is_saved(10001))
 
       local orig_select = vim.ui.select
       vim.ui.select = function(items, opts, on_choice)
@@ -1328,17 +1328,17 @@ describe("Integration: Local Folder Browser Mode", function()
       d_cb()
 
       assert.are.equal(1, vim.fn.filereadable(target_file))
-      assert.is_nil(state.State.pending_deletions["1001"])
+      assert.is_nil(state.State.pending_deletions["10001"])
       -- Cancel means no pending deletion, so is_saved is still true
-      assert.is_true(local_index.is_saved(1001))
+      assert.is_true(local_index.is_saved(10001))
 
       vim.ui.select = orig_select
     end)
 
     it("allows restoring pending deletion via <CR> without network re-download", function()
       local local_index = require("gelbooru.local.index")
-      local target_file = tmp_dir .. "/1001.jpg"
-      local_index.mark_saved(1001, "jpg")
+      local target_file = tmp_dir .. "/10001.jpg"
+      local_index.mark_saved(10001, "jpg")
 
       ui.open_local(tmp_dir)
 
@@ -1351,8 +1351,8 @@ describe("Integration: Local Folder Browser Mode", function()
       d_cb()
 
       assert.are.equal(1, vim.fn.filereadable(target_file))
-      assert.is_false(local_index.is_saved(1001))
-      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+      assert.is_false(local_index.is_saved(10001))
+      assert.is_not_nil(state.State.pending_deletions["10001"] or state.State.pending_deletions[target_file])
 
       -- Press <CR> to restore before exit
       local restore_done = false
@@ -1362,8 +1362,8 @@ describe("Integration: Local Folder Browser Mode", function()
       end)
 
       assert.is_true(restore_done)
-      assert.is_true(local_index.is_saved(1001))
-      assert.is_nil(state.State.pending_deletions["1001"])
+      assert.is_true(local_index.is_saved(10001))
+      assert.is_nil(state.State.pending_deletions["10001"])
 
       -- On teardown, the file is NOT unlinked because deletion was aborted!
       ui.teardown()
@@ -1373,7 +1373,7 @@ describe("Integration: Local Folder Browser Mode", function()
     end)
 
     it("keymap 'D' and keymap 'd' from meta buffer schedule deferred deletion", function()
-      local target_file = tmp_dir .. "/1001.jpg"
+      local target_file = tmp_dir .. "/10001.jpg"
       ui.open_local(tmp_dir)
 
       -- 1. 'D' on list buffer
@@ -1405,15 +1405,15 @@ describe("Integration: Local Folder Browser Mode", function()
 
     it("deletes a downloaded online post on teardown and removes [SAVED] immediately", function()
       local local_index = require("gelbooru.local.index")
-      local saved_file = config.options.save_dir .. "/1001.jpg"
+      local saved_file = config.options.save_dir .. "/10001.jpg"
       local f = io.open(saved_file, "wb")
       if f then f:write(string.rep("Z", 2048)) f:close() end
-      local_index.mark_saved(1001, "jpg")
-      assert.is_true(local_index.is_saved(1001))
+      local_index.mark_saved(10001, "jpg")
+      assert.is_true(local_index.is_saved(10001))
 
       ui.open("hatsune_miku")
       state.State.posts = {
-        { id = 1001, file_url = "https://example.com/1001.jpg", rating = "g", score = 50, is_local = false },
+        { id = 10001, file_url = "https://example.com/10001.jpg", rating = "g", score = 50, is_local = false },
       }
       state.State.cur = 1
       ui.render_list()
@@ -1431,7 +1431,7 @@ describe("Integration: Local Folder Browser Mode", function()
 
       -- File remains on disk until teardown
       assert.are.equal(1, vim.fn.filereadable(saved_file))
-      assert.is_false(local_index.is_saved(1001))
+      assert.is_false(local_index.is_saved(10001))
       assert.are.equal(1, state.State.cur)
       assert.are.equal(1, #state.State.posts)
 
@@ -1447,7 +1447,7 @@ describe("Integration: Local Folder Browser Mode", function()
     end)
 
     it("shows 'already scheduled' status if d is pressed twice on same post", function()
-      local target_file = tmp_dir .. "/1001.jpg"
+      local target_file = tmp_dir .. "/10001.jpg"
       ui.open_local(tmp_dir)
 
       local orig_select = vim.ui.select
@@ -1468,7 +1468,7 @@ describe("Integration: Local Folder Browser Mode", function()
     end)
 
     it("floating confirmation modal allows navigation with j/k and confirm with <CR>", function()
-      local target_file = tmp_dir .. "/1001.jpg"
+      local target_file = tmp_dir .. "/10001.jpg"
       ui.open_local(tmp_dir)
 
       local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
@@ -1494,14 +1494,14 @@ describe("Integration: Local Folder Browser Mode", function()
       -- Press <CR> on Yes
       cr_cb()
       assert.is_nil(state.UI.wins.confirm_modal)
-      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+      assert.is_not_nil(state.State.pending_deletions["10001"] or state.State.pending_deletions[target_file])
 
       ui.teardown()
       assert.are.equal(0, vim.fn.filereadable(target_file))
     end)
 
     it("pending deletion survives history navigation without being cleared", function()
-      local target_file = tmp_dir .. "/1001.jpg"
+      local target_file = tmp_dir .. "/10001.jpg"
       ui.open_local(tmp_dir)
 
       local orig_select = vim.ui.select
@@ -1511,15 +1511,15 @@ describe("Integration: Local Folder Browser Mode", function()
 
       local d_cb = get_keymap_cb(state.UI.bufs.list, "n", "d")
       d_cb()
-      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+      assert.is_not_nil(state.State.pending_deletions["10001"] or state.State.pending_deletions[target_file])
 
       -- Navigate history
       local history = require("gelbooru.core.history")
       history.push_history("test_query")
-      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+      assert.is_not_nil(state.State.pending_deletions["10001"] or state.State.pending_deletions[target_file])
 
       history.history_prev()
-      assert.is_not_nil(state.State.pending_deletions["1001"] or state.State.pending_deletions[target_file])
+      assert.is_not_nil(state.State.pending_deletions["10001"] or state.State.pending_deletions[target_file])
 
       vim.ui.select = orig_select
       ui.teardown()
@@ -1527,7 +1527,7 @@ describe("Integration: Local Folder Browser Mode", function()
     end)
 
     it("clears State.pending_deletions table on ui.teardown()", function()
-      local target_file = tmp_dir .. "/1001.jpg"
+      local target_file = tmp_dir .. "/10001.jpg"
       ui.open_local(tmp_dir)
 
       local orig_select = vim.ui.select

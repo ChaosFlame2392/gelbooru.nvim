@@ -439,3 +439,195 @@ describe("util.shuffle", function()
     end
   end)
 end)
+
+describe("util.load_auth and util.auth_qs", function()
+  local tmp_auth
+  local config = require("gelbooru.core.config")
+  local orig_auth_file
+
+  before_each(function()
+    orig_auth_file = config.options.auth_file
+    tmp_auth = vim.fn.tempname() .. ".json"
+    config.options.auth_file = tmp_auth
+    util.invalidate_auth_cache()
+  end)
+
+  after_each(function()
+    config.options.auth_file = orig_auth_file
+    util.invalidate_auth_cache()
+    if vim.fn.filereadable(tmp_auth) == 1 then
+      vim.fn.delete(tmp_auth)
+    end
+  end)
+
+  it("returns empty table and empty auth_qs when auth_file does not exist", function()
+    local auth = util.load_auth()
+    assert.are.same({}, auth)
+    assert.are.equal("", util.auth_qs())
+  end)
+
+  it("loads credentials, caches them, and builds auth_qs when api_key is present", function()
+    local creds = { api_key = "secret_key_123", user_id = "user_456" }
+    vim.fn.writefile({ vim.fn.json_encode(creds) }, tmp_auth)
+
+    local auth = util.load_auth()
+    assert.are.equal("secret_key_123", auth.api_key)
+    assert.are.equal("user_456", auth.user_id)
+    assert.are.equal("&api_key=secret_key_123&user_id=user_456", util.auth_qs())
+
+    -- Delete file to prove in-memory caching
+    vim.fn.delete(tmp_auth)
+    local cached = util.load_auth()
+    assert.are.equal("secret_key_123", cached.api_key)
+
+    -- Invalidate cache and verify re-read observes missing file
+    util.invalidate_auth_cache()
+    local fresh = util.load_auth()
+    assert.are.same({}, fresh)
+    assert.are.equal("", util.auth_qs())
+  end)
+end)
+
+describe("util.ensure", function()
+  local tmp_base
+
+  before_each(function()
+    tmp_base = vim.fn.tempname()
+  end)
+
+  after_each(function()
+    if vim.fn.isdirectory(tmp_base) == 1 then
+      vim.fn.delete(tmp_base, "rf")
+    end
+  end)
+
+  it("creates nested directory path", function()
+    local nested = tmp_base .. "/sub/nested/dir"
+    assert.are.equal(0, vim.fn.isdirectory(nested))
+    util.ensure(nested)
+    assert.are.equal(1, vim.fn.isdirectory(nested))
+  end)
+end)
+
+describe("util.is_local_query", function()
+  it("detects local queries with various prefixes and positions", function()
+    assert.is_true(util.is_local_query("local:"))
+    assert.is_true(util.is_local_query("local: /path/to/dir"))
+    assert.is_true(util.is_local_query("tag1 local: tag2"))
+    assert.is_true(util.is_local_query("LOCAL: tag"))
+  end)
+
+  it("returns false for online queries, nil, or non-string", function()
+    assert.is_false(util.is_local_query("hatsune_miku rating:general"))
+    assert.is_false(util.is_local_query("is_local:true"))
+    assert.is_false(util.is_local_query("-local:tag"))
+    assert.is_false(util.is_local_query(nil))
+    assert.is_false(util.is_local_query(123))
+  end)
+end)
+
+describe("util buffer and window helpers (scratch, set_lines, float, shield_buffer)", function()
+  it("scratch creates an unlisted, non-modifiable buffer with wipe hidden", function()
+    local buf = util.scratch()
+    assert.is_true(vim.api.nvim_buf_is_valid(buf))
+    assert.are.equal("wipe", vim.bo[buf].bufhidden)
+    assert.is_false(vim.bo[buf].modifiable)
+    assert.is_false(vim.bo[buf].swapfile)
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  it("set_lines updates buffer content and restores non-modifiable status", function()
+    local buf = util.scratch()
+    util.set_lines(buf, { "hello", "world" })
+    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    assert.are.same({ "hello", "world" }, lines)
+    assert.is_false(vim.bo[buf].modifiable)
+
+    -- Safely handles invalid buffer without error
+    assert.has_no.errors(function()
+      util.set_lines(999999, { "line" })
+      util.set_lines(nil, { "line" })
+    end)
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  it("float creates a floating window with minimal configuration", function()
+    local buf = util.scratch()
+    local win = util.float(buf, 2, 4, 20, 10, { zindex = 60 })
+    assert.is_true(vim.api.nvim_win_is_valid(win))
+    local cfg = vim.api.nvim_win_get_config(win)
+    assert.are.equal(20, cfg.width)
+    assert.are.equal(10, cfg.height)
+    assert.are.equal(60, cfg.zindex)
+    vim.api.nvim_win_close(win, true)
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  end)
+
+  it("shield_buffer applies gelbooru filetype and neutralizes space / leader keys", function()
+    local buf = util.scratch()
+    util.shield_buffer(buf)
+
+    assert.are.equal("gelbooru", vim.bo[buf].filetype)
+    assert.is_true(vim.b[buf].which_key_ignore)
+    assert.is_true(vim.b[buf].whichkey_disable)
+    assert.is_true(vim.b[buf].miniclue_disable)
+
+    -- Safely handles nil and invalid buffers
+    assert.has_no.errors(function()
+      util.shield_buffer(nil)
+      util.shield_buffer(999999)
+    end)
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+end)
+
+describe("util.cache_post_metadata", function()
+  local tmp_cache
+  local config = require("gelbooru.core.config")
+  local orig_cache_dir
+
+  before_each(function()
+    orig_cache_dir = config.options.cache_dir
+    tmp_cache = vim.fn.tempname()
+    vim.fn.mkdir(tmp_cache, "p")
+    config.options.cache_dir = tmp_cache
+  end)
+
+  after_each(function()
+    config.options.cache_dir = orig_cache_dir
+    vim.fn.delete(tmp_cache, "rf")
+  end)
+
+  it("writes metadata JSON to cache directory for post with ID", function()
+    local post = {
+      id = "889900",
+      tags = "tag_a tag_b",
+      rating = "general",
+      score = 42,
+      width = 1920,
+      height = 1080,
+      source = "https://example.com",
+    }
+
+    local ok = util.cache_post_metadata(post)
+    assert.is_true(ok)
+
+    local expected_path = tmp_cache .. "/meta_889900.json"
+    assert.are.equal(1, vim.fn.filereadable(expected_path))
+
+    local loaded = util.read_json(expected_path)
+    assert.are.equal("889900", loaded.id)
+    assert.are.equal("tag_a tag_b", loaded.tags)
+    assert.are.equal(42, loaded.score)
+  end)
+
+  it("returns false and skips writing for post without valid ID", function()
+    assert.is_false(util.cache_post_metadata(nil))
+    assert.is_false(util.cache_post_metadata({}))
+    assert.is_false(util.cache_post_metadata({ id = "" }))
+    assert.is_false(util.cache_post_metadata({ id = "nil" }))
+  end)
+end)
+

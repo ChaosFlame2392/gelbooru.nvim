@@ -137,7 +137,7 @@ gelbooru.nvim/
 │       ├── pipeline_stress_spec.lua  # Pipeline multi-stage slicing, candidate pools, concurrency & race safety
 │       ├── regressions_spec.lua      # Guards against placement tearing, blanking, locks
 │       ├── search_spec.lua           # Search execution, cursor reset, list repainting
-│       ├── tag_menu_spec.lua         # Interactive tag picker modal (t/T), exclusion, Yank, confirm modal, focus
+│       ├── tag_menu_spec.lua         # (Planned) Interactive tag picker modal (t/T), exclusion, Yank, confirm modal, focus
 │       └── helpers/
 │           ├── harness.lua           # Headless environment setup/teardown & memory isolation
 │           ├── mock_net.lua          # Network API stubs for curl and async downloads
@@ -146,6 +146,7 @@ gelbooru.nvim/
     ├── init.lua                      # Top-level API entry point & user command bindings
     ├── core/
     │   ├── config.lua                # Configuration defaults, clamping, option normalization
+    │   ├── constants.lua             # Centralized layout clamps, scoring weights, timeouts & limits (130 lines)
     │   ├── state.lua                 # Global session state singleton (State & UI handles)
     │   ├── history.lua               # Bounded query navigation stack with reference sharing
     │   ├── util.lua                  # Pure helpers (encoding, HTML decode, auth cache, window helpers)
@@ -172,9 +173,13 @@ gelbooru.nvim/
     │   ├── fetcher.lua               # Background scraper (:GelbooruTags) with checkpointing & backoff
     │   └── resolve.lua               # Post tag batch resolution & runtime discovered.json cache
     └── ui/
-        ├── init.lua                  # Main UI coordinator (layout math, window lifecycle, keymaps)
+        ├── init.lua                  # Thin facade re-exporting all public symbols from the 4 submodules (145 lines)
         ├── autocomplete.lua          # Autocomplete engine (prefix bucketing, scoring, fallback)
-        └── image.lua                 # Image placement coordinator (snacks.image, cache paths)
+        ├── image.lua                 # Image placement coordinator (snacks.image, cache paths)
+        ├── layout.lua                # Window geometry calculation, responsive scaling, divider buffers (259 lines)
+        ├── keymaps.lua               # Buffer-local keymaps (list, meta, input, non-interactive shielding) (576 lines)
+        ├── render.lua                # Post list formatting, metadata panel rendering, confirm modal (755 lines)
+        └── lifecycle.lua             # Buffer/window creation, autocommands, teardown & cleanup (484 lines)
 ```
 
 ### 3.2 Module Responsibilities
@@ -185,10 +190,13 @@ Public entry point. Exposes `setup(opts)`, `open(initial_tags)`, `local_browser(
 #### `lua/gelbooru/core/config.lua`
 Holds the default configuration table. Normalizes user overrides, clamps numeric ranges using `math.max` and `math.min`, maps tag category IDs to badges and string names, and declares static `META_TAGS` (`id:`, `sort:score`, `rating:general`, etc.).
 
+#### `lua/gelbooru/core/constants.lua`
+Centralized configuration table (130 lines) consolidating 65+ named constants across 13 modules: layout dimension ratios, window z-indices, scoring weights, popularity multipliers, debounce intervals, network timeouts, and binary validation size floors across the plugin.
+
 #### `lua/gelbooru/core/state.lua`
 Declares the two foundational singletons:
-- `M.State`: Session runtime state (current query, posts array, pagination indices, current cursor, tag category lists, first-letter bucket indices, autocomplete buffers, history stack, saved index).
-- `M.UI`: Window IDs, buffer IDs, autocmd group, active placement handle, and libuv timers (`scroll_timer`, `status_timer`, `api_tag_timer`, `ac_debounce_timer`, `save_discovered_timer`, `prefetch_timers`, `resize_timer`).
+- `M.State`: Session runtime state (current query, posts array, pagination indices, current cursor, tag category lists, first-letter bucket indices, autocomplete buffers, history stack, saved index, pending deletions, pending tag prunes).
+- `M.UI`: Window IDs, buffer IDs, autocmd group, active placement handle, and libuv timers (`scroll_timer`, `status_timer`, `api_tag_timer`, `ac_debounce_timer`, `save_discovered_timer`, `prune_disk_timer`, `fetcher_timers`, `tags_spinner_win`, `prefetch_timers`, `resize_timer`).
 Provides lifecycle cleanup routines: `reset_query_state()`, `reset_ui()`, and `reset_tag_state()`.
 
 #### `lua/gelbooru/core/history.lua`
@@ -203,14 +211,17 @@ Handles Gelbooru REST API interactions:
 - `execute_search(query)`: Pushes history, clears post state, cancels active prefetch and background indexer, closes active image placement, resets canvas and metadata, normalizes bare numeric IDs, and executes search.
 - `save_current()`: Downloads full-size media to `save_dir`, writes metadata JSON to cache, and upgrades active canvas on completion.
 - `fetch_post_metadata(p, cb)`: Resolves full booru post details by numeric ID with disk caching and retry tolerance on network failure.
+- `execute_piped_search(query, pipe)`: Executes multi-stage pipeline queries, utilizing 5-minute TTL candidate pool caching (`pool::<tags>`) with shallow array reference copying (LuaJIT heap discipline) and offset page jumping.
+- `check_self_heal(query_str, cb)`: Query-time self-healing hook triggered when single-tag searches return 0 results to verify tag existence via API and evict dead/aliased tags from memory and disk.
 
 #### `lua/gelbooru/net/download.lua`
 Network transfer engine using `vim.system({"curl", ...})`:
 - `curl_async(url, cb)`: Lightweight async GET returning response body.
-- `download_async(url, dest, cb, opts)`: File downloader with deduplication (`active_downloads[dest]`), atomic writing via `.part` files, referer headers, retry logic, callback queue pruning, strict HTTP(S) URL validation, and post-download binary integrity validation (`is_valid_media`).
-- `is_valid_media(file_path, ref_path)`: High-performance (<0.02ms) binary validator checking SOI/EOI markers for JPEG (`\xFF\xD8` and `\xFF\xD9`), `IEND` chunk for PNG, trailer for GIF, WebP headers, and rejecting HTML/XML error bodies.
+- `download_async(url, dest, cb, opts)`: File downloader with deduplication (`active_downloads[dest]`), atomic writing via `.part` files, referer headers, retry logic, callback queue pruning, strict HTTP(S) protocol validation (`^https?://`), and post-download binary integrity validation (`is_valid_media`).
+- `is_valid_media(file_path, ref_path)`: High-performance (<0.02ms) binary validator checking SOI/EOI markers for JPEG (`\xFF\xD8` and `\xFF\xD9`), `IEND` chunk for PNG, trailer `;` (0x3B) for GIF87a/89a, `RIFF` and `WEBP` headers for WebP, `ftyp` box for MP4/MOV, rejecting HTML/XML error bodies, and enforcing format-specific size floors.
+- `resume_pending_saves()`: Resumes interrupted downloads using `.part` files on startup, normalizing single-post API responses with `util.ensure_array`.
 - `prefetch_around(idx)`: Calculates prefetch indices based on `prefetch_radius` and scroll direction, scheduling staggered async downloads into local preview cache with teardown guards and background ffmpeg thumbnail extraction for saved local videos.
-- `cancel_pending_resumes()`: Manages and cleans up deferred retry timers.
+- `cancel_pending_resumes()`, `cancel_prefetch_timers()`: Manages and cleans up deferred retry and prefetch timer handles.
 
 #### `lua/gelbooru/local/init.lua`
 Local folder browser subsystem facade: coordinates `scan_local_folder`, query parsing via `local/query.lua`, canvas clearing, history synchronization, and metadata hydration.
@@ -235,25 +246,41 @@ Dedicated query parser, filtering, pipeline execution, and sorting package:
 - `query/filter.lua`: Post matching engine (`matches_post` / `matches_query`) and collection filtering (`filter_posts`).
 
 #### `lua/gelbooru/local/scan.lua`
-Safe directory traversal and post ID extractor using `vim.loop.fs_scandir`. Safely parses filenames with unicode, spaces, multiple dots, and brackets without external shell subshells. Falls back to `fs_stat` when filesystem returns nil `ftype`.
+Safe directory traversal and post ID extractor using `vim.loop.fs_scandir`. Safely parses filenames with unicode, spaces, multiple dots, and brackets without external shell subshells. Falls back to `fs_stat` when filesystem returns nil `ftype`. Enforces a sequential filename collision guard (`id >= 10000` for bare numeric filenames like `1.png` or `42.jpg`) while preserving explicit booru prefixes (`gelbooru_`, `post_`, `id_`, `ID`, `prev_`).
 
 #### `lua/gelbooru/tags/db.lua`
-Local tag indexing and categorization: strict validation heuristic (`is_clean_tag`), memory indexing into first-letter bucket tables, and category composite list creation. Preserves `local_only` flags on metadata tags.
+Local tag indexing and categorization: strict validation heuristic (`is_clean_tag`), memory indexing into first-letter bucket tables, and category composite list creation. Preserves `local_only` flags on metadata tags. Supports in-place count and category synchronization (`update_tag_in_index`), tag eviction (`prune_tag`), query-time verification hook (`verify_and_prune_tag`), and debounced disk database purging (`schedule_disk_prune`, `prune_tags_from_disk`).
 
 #### `lua/gelbooru/tags/fetcher.lua`
-Tag database scraper (`:GelbooruTags`): concurrent worker loops, JSON response verification with exponential backoff on Cloudflare/429 HTML responses, live animated progress spinner, memory synchronization on tag absorption, and atomic checkpointing.
+Tag database maintenance engine (`:GelbooruTags`, `:GelbooruTags verify`, `:GelbooruTags refresh`):
+- `update_tags()`: Concurrent worker loops building full tag category databases with JSON response verification, exponential backoff on Cloudflare/429 HTML responses, live animated progress spinner, memory synchronization, and atomic checkpointing. Guarded by `M.is_running` against re-entrancy.
+- `verify_tags()`: High-speed batch verification checking existing tag databases against Gelbooru's multi-tag API in chunks of 50–100 names, synchronizing counts in-place, dynamically reclassifying changed tag categories, and purging dead tags.
+- `refresh_tags()`: Top-down count crawler scraping from page 0 downwards to update the top 50,000 most popular tags in-place without rebuilding databases from scratch.
+- Manages retry timers via `UI.fetcher_timers` and tracks progress window handle in `UI.tags_spinner_win` for clean teardown.
 
 #### `lua/gelbooru/tags/resolve.lua`
-Dynamic post tag categorization: extracts unindexed tags from posts, batches queries to the Gelbooru tag API, persists discovered tags to `discovered.json` (debounced 500ms), and provides live API fallback when local matches are sparse.
+Dynamic post tag categorization: extracts unindexed tags from posts, batches queries to the Gelbooru tag API, persists discovered tags to `discovered.json` (debounced 500ms), and provides live API fallback when local matches are sparse. Strictly clears `UI.api_tag_timer = nil` before closing timer handles to prevent stale handle leaks.
 
 #### `lua/gelbooru/ui/init.lua`
-The primary UI coordinator: floating window coordinate math (`calc_layout()`), responsive scaling handling (`VimResized`), window lifecycle, cursor motion synchronization (`gg`, `G`, `CursorMoved`), autocomplete commitment on `<CR>`, preview cooldown timers, video preview rendering (prioritizing high-quality local `ffmpeg` thumbnails in both local and online modes), and clean teardown.
+Thin facade (145 lines) providing a unified public entry point and backwards-compatible interface for the UI subsystem. Re-exports all public symbols, lifecycle functions, layout helpers, keymaps, and render functions from the four specialized submodules (`ui/layout.lua`, `ui/render.lua`, `ui/keymaps.lua`, and `ui/lifecycle.lua`), ensuring zero breaking changes for existing external consumers and tests.
 
 #### `lua/gelbooru/ui/autocomplete.lua`
 Real-time tag autocompletion engine: cursor-column token extraction, sub-3ms lookup using first-character bucket tables, empty token protection, popularity-weighted candidate scoring, category badge formatting, and context-aware scoping (suppressing `local_only` sorting tags in online queries with zero keystroke lag).
 
 #### `lua/gelbooru/ui/image.lua`
-Image presentation coordinator: preview URL hierarchy resolution (`sample_url` -> `preview_url` -> `file_url`), video detection (`.mp4`, `.webm`), strictly local `ffmpeg` frame extraction (`extract_video_thumbnail`), saved video lookup (`get_saved_video_path`), corrupt/extreme DPI header sanitization (`sanitize_dpi` clamping to 96 DPI), canvas resets, and `snacks.image.placement` management with non-modifiable buffers and defensive boundary keymaps.
+Image presentation coordinator: preview URL hierarchy resolution (`sample_url` -> `preview_url` -> `file_url`), video detection (`.mp4`, `.webm`), strictly local `ffmpeg` frame extraction (`extract_video_thumbnail`), saved video lookup (`get_saved_video_path`), corrupt/extreme DPI header sanitization (`sanitize_dpi` clamping `>= 300` and `< 50` to 96 DPI), canvas resets, pre-suppression of snacks extmark progress timers on `placement_mod` table, in-flight conversion abortion (`M.abort_convert` -> `img._convert:abort()`), and `snacks.image.placement` management with non-modifiable buffers and defensive boundary keymaps.
+
+#### `lua/gelbooru/ui/layout.lua`
+Floating window geometry calculation and responsive scaling (259 lines): computes terminal dimension bounds (`calc_layout`), handles responsive resizing clamps (`MIN_COLS`, `MIN_LINES`), manages list and preview window width ratios (`State.list_width_ratio`, Zen mode collapse), and generates decorative divider lines (`─`, `│`) for `div`, `vdiv`, `hdiv`, and outer `frame` buffers.
+
+#### `lua/gelbooru/ui/keymaps.lua`
+Buffer-local keybindings and mouse event routing (576 lines): binds interactive normal/insert mode actions across post list, metadata inspector, and query search bar; sets up defensive non-interactive buffer shielding (`util.shield_buffer`) to isolate leader keys and prevent menu leaks; attaches image buffer navigation fallbacks; handles confirmation modal inputs; and routes mouse click events safely.
+
+#### `lua/gelbooru/ui/render.lua`
+Visual display rendering and buffer formatting (755 lines): post list text formatting with cursor indicators and badges (`[SAVED]`, `[VIDEO]`), full metadata panel rendering with category color highlighting, preview cooldown timers and debounced dispatch, dynamic status line generation (active queries, modes, pagination), and floating deletion confirmation modal rendering.
+
+#### `lua/gelbooru/ui/lifecycle.lua`
+Window and buffer lifecycle management (484 lines): floating window and buffer creation (`ensure_ui`), public entry points (`open`, `open_local`, `browse`), window focus management and mode transitions, autocommand group registration (`VimResized`, `CursorMoved`, `InsertLeave`), search input submission and exit handling, and complete resource teardown (`teardown` cancelling timers, aborting downloads and child processes, and closing windows).
 
 ---
 
@@ -444,11 +471,12 @@ Maintainers and agents modifying `gelbooru.nvim` **MUST** strictly uphold the fo
 ### 2. Permanent Local Media File Preservation Invariant
 - Force refresh (`R`), cache invalidation, or metadata purging strictly **NEVER** touches, modifies, or deletes permanent files in `save_dir` or local user libraries.
 - Only volatile preview caches in `/tmp/gelbooru_cache/prev_<id>.<ext>` and metadata caches in `<cache_dir>/meta_<id>.json` may be invalidated.
-- Downloads must write atomically via `.part` files with `MIN_VALID_IMAGE_BYTES = 1024` guard before renaming.
+- Downloads must write atomically via `.part` files with `is_valid_media(file_path, ref_path)` validation before renaming/moving to target destination. Validates SOI/EOI markers for JPEG (`\xFF\xD8` and `\xFF\xD9`), `IEND` chunk for PNG, trailer `;` (0x3B) for GIF87a/89a, `RIFF` and `WEBP` headers for WebP, and `ftyp` box for MP4/MOV, while enforcing format-specific byte size floors (512B for JPEG/PNG/WebP, 128B for GIF, 1024B for MP4/media) and rejecting truncated or HTML/XML error payloads.
 
 ### 3. Libuv Timer Lifecycle & Process Safety
-- Every libuv timer handle created (`scroll_timer`, `status_timer`, `prefetch_timers`, `indexer_timer`, `resize_timer`, `pending_resumes`) must be stored in `UI` or module state tables.
-- On navigation, query change, or `teardown()`, timers must be stopped (`:stop()`), closed (`:close()`), and unreferenced via `cancel_prefetch_timers()` and `cancel_pending_resumes()`.
+- Every libuv timer handle created (`scroll_timer`, `status_timer`, `prefetch_timers`, `indexer_timer`, `resize_timer`, `pending_resumes`, `fetcher_timers`, `prune_disk_timer`, `save_discovered_timer`) must be stored in `UI` or module state tables.
+- Stored timer pointers (e.g. `UI.api_tag_timer`) must be set to `nil` before or atomically with `util.close_timer()`, preventing stale closed handles from lingering in state.
+- On navigation, query change, or `teardown()`, timers must be stopped (`:stop()`), closed (`:close()`), and unreferenced via `cancel_prefetch_timers()` and `cancel_pending_resumes()`. Scraper retry timers tracked in `UI.fetcher_timers` and spinner windows (`UI.tags_spinner_win`) must be cleaned up on teardown.
 - Async callbacks must check `if state.State.torn_down then return end` before mutating state or creating timers.
 - Subshell execution must be non-blocking; use `vim.uv.fs_utime` rather than blocking `system({"touch", ...})`.
 
@@ -463,16 +491,16 @@ Maintainers and agents modifying `gelbooru.nvim` **MUST** strictly uphold the fo
 - Layout geometry must guard against terminal dimensions $\le 7$ rows; never create 0-height floating windows.
 
 ### 6. LuaJIT Memory Allocation Pool Discipline & Bounded Capacity
-- Never call `vim.deepcopy` on `State.posts` or tag category arrays. Store and pass posts by reference across history and UI layers.
+- Strictly NEVER call `vim.deepcopy` on `State.posts`, `candidate_pool`, or tag category arrays. Store and pass posts by reference across history and UI layers, and duplicate candidate pools using shallow slice loops (`for i = 1, #source do copy[i] = source[i] end`) to preserve LuaJIT heap discipline and avoid GC allocation churn.
 - Bound `State.history` to a strict FIFO cap (`MAX_HISTORY = 30`).
 - Teardown must nil out state references and invoke `collectgarbage("collect")` twice.
 
 ### 7. Gelbooru API Array Normalization
-- When Gelbooru returns exactly one post or tag, JSON deserializes as a dictionary rather than an array. All code consuming `data.post` or `data.tag` must normalize via `util.ensure_array`.
+- When Gelbooru returns exactly one post or tag, JSON deserializes as a dictionary rather than an array (e.g., single-post queries by ID in `download.resume_pending_saves` or `api.execute_search`). All code consuming `data.post` or `data.tag` must normalize via `util.ensure_array`.
 
 ### 8. UI and Worker Re-Entrancy Guards
 - `ui.open()` must verify if the UI is already active and avoid duplicating floating window handles.
-- `:GelbooruTags` scraper must maintain module-level running flags and validate JSON responses with backoff retries rather than falsely terminating on Cloudflare/429 HTML pages.
+- `:GelbooruTags` scraper commands (`:GelbooruTags`, `:GelbooruTags verify`, `:GelbooruTags refresh`) must strictly maintain and verify module-level `M.is_running` flag with early returns and notifications when already active, preventing concurrent worker loops from interleaving file writes, corrupting tag databases, or creating spinner collisions.
 - Memory representations (`State.discovered`) must be synchronized when tags are absorbed on disk.
 
 ### 9. Prohibition of Global Monkey-Patching
@@ -504,13 +532,19 @@ Maintainers and agents modifying `gelbooru.nvim` **MUST** strictly uphold the fo
 ### 16. Window Transition Placement Invariant & Buffer Shielding
 - Switching windows (e.g. `m` / `M` toggling metadata inspector) or opening dialogs (e.g. `d` delete confirmation modal) strictly preserves the active image preview canvas. Snacks image extmarks in namespace `"snacks.image"` are never cleared manually.
 - Progress indicator suppression: Snacks' unmanaged progress timer (`placement:progress()`) must be suppressed on the `placement_mod` table *before* `placement_mod.new` runs (`if placement_mod.progress then placement_mod.progress = function() end end`). Because `placement_mod.new` synchronously invokes `self:progress()` when `self:ready()` is false, suppressing it on the instance afterwards is too late and leaves an unmanaged 80ms timer writing persistent `convert loading …` extmarks.
-- In-flight convert abortion: When closing or replacing a placement (`close_current_placement`), Gelbooru must invoke `img._convert:abort()` on `current_placement` to terminate running `magick`/`convert` child processes and free snacks' concurrent queue (`MAX_PROCS = 3`), preventing pipeline starvation during rapid navigation.
+- In-flight convert abortion: When closing or replacing a placement (`close_current_placement`), Gelbooru must invoke `img._convert:abort()` via `image.abort_convert(placement)` to terminate running `magick`/`convert` child processes and free snacks' concurrent queue (`MAX_PROCS = 3`), preventing pipeline starvation during rapid navigation.
 - All plugin scratch buffers are assigned `filetype = "gelbooru"` and registered in which-key disabled filetypes (`which-key.config.disable.ft`), ensuring `<Space>` and other leader sequences do not trigger external menus or intercept plugin keystrokes.
 - Window cursor isolation in `CursorMoved` prevents mouse clicks in non-list windows (such as image placement, status, or dividers) from displacing the active post list selection.
 
 ### 17. Multi-Stage Cascading Pipeline & Open-Ended Range Bounds
 - Pipeline queries (`tag1 | sort:id:1000..1200 | sort:score:50 | sort:random`) support leading (`..200` parsed as offset=1, limit=200, `is_range=true`) and trailing (`50..` parsed as offset=50, limit=nil, `is_range=true`) open-ended range expressions across both local and remote engines.
 - In remote piped search, ranges starting at offset 1 (`..200`) calculate `rel_start = 1` without dropping post #1. Slicing gracefully handles empty stages (`tag | | sort:score`), trailing pipes (`tag |`), bare pipes (`|`), whitespace stages, and inverted bounds (`50..10`).
+
+### 18. HTTP/S URL Protocol Validation & Transfer Safety
+- All network transfer entry points (`download.download_async`) must strictly validate URLs against `^https?://` prior to spawning child `curl` processes. Invalid or empty URLs must be rejected immediately with failure callbacks scheduled asynchronously, preventing curl error 3 ("URL using bad/illegal format or missing URL") from corrupting callback queues.
+
+### 19. Local Filename Numeric Disambiguation
+- Unprefixed bare numeric filenames (e.g. `1.png`, `42.jpg`, `999.jpg`) encountered during local directory scans must satisfy numeric threshold $\ge 10000$ to be extracted as valid Gelbooru post IDs. This prevents sequential non-booru local files from triggering spurious remote Gelbooru metadata queries and false `[SAVED]` badges. Explicit booru prefixes (`gelbooru_`, `post_`, `id_`, `ID`, `prev_`) bypass this threshold and extract IDs regardless of magnitude.
 
 ---
 
@@ -588,6 +622,24 @@ This branch introduces unified local library browsing, offline booru metadata en
 - **Child Process Lifecycle Management for `ffmpeg`**: Active process handles tracked in `image.active_ffmpeg_handles` and cleanly terminated with SIGKILL (9) on placement close and teardown.
 - **Zen Mode List Focus Preservation & Artifact Elimination**: Full canvas allocation (`list.width = 1`, `hide = true`) while maintaining focus on `UI.wins.list` and disabling `cursorline`, eliminating terminal block cursor artifacts on the canvas and preserving motion navigation (`j`/`k`/`gg`/`G`).
 - **Comprehensive Pipeline & Concurrency Stress Verification Suite**: Added `pipeline_stress_spec.lua` covering multi-stage pipeline execution, open-ended ranges, candidate pool bounds, rapid user race safety (search switching, rapid pagination, j/k flurry, open/close cycling), and concurrent Tier 2 background indexing during navigation.
+- **Tag Database Engine Overhaul (Batch Verify, Top-Down Refresh & Query-Time Self-Healing)**:
+  - **Batch Tag Verification (`:GelbooruTags verify`)**: Batch-verifies existing tag databases against Gelbooru's multi-tag API (`&names=tag1+tag2+...`) in chunks of 50–100 names per request. Synchronizes counts in-place, dynamically reclassifies tags whose types changed across category databases (`series.json`, `characters.json`, `artists.json`, `general.json`), and purges dead tags (`count == 0` or omitted by API) from memory and disk while displaying real-time animated spinner progress.
+  - **Top-Down Count Refresh (`:GelbooruTags refresh`)**: Crawls Gelbooru from page 0 downwards (`&orderby=count&limit=100`) updating the top 50,000 most popular tags in-place without requiring a full database rebuild. Incorporates newly popular tags and updates counts/types in memory and on disk.
+  - **Query-Time Self-Healing**: Transparently hooks into online search execution (`net/api.lua`). When a single-tag search yields 0 posts, it triggers an asynchronous, non-blocking check against the tag API via `M.check_self_heal`. If confirmed dead or aliased, the tag is immediately evicted from memory and scheduled for debounced disk purging.
+- **Binary Media Integrity Validation (`is_valid_media`)**: High-performance (<0.02ms) binary validator in `net/download.lua` checking SOI/EOI markers for JPEG (`\xFF\xD8` and `\xFF\xD9`), `IEND` chunk for PNG, trailer `;` (0x3B) for GIF87a/89a, `RIFF` and `WEBP` headers for WebP, and `ftyp` box for MP4/MOV, while enforcing format-specific byte size floors (512B for JPEG/PNG/WebP, 128B for GIF, 1024B for MP4/media) and rejecting truncated or HTML/XML error payloads before renaming/moving `.part` files to final cache/save destinations.
+- **HTTP/S URL Validation in `download_async` (Curl Error 3 Prevention)**: Added strict protocol validation regex `^https?://` in `net/download.lua` before spawning curl. Prevents empty or malformed URLs from generating curl exit code 3 ("URL malformed") and safely invokes failure callbacks on the next tick.
+- **Snacks Image Progress Pre-Suppression**: Pre-suppressed `placement_mod.progress = function() end` directly on the `snacks.image.placement` module table prior to calling `placement_mod.new()`. Eliminates unmanaged 80ms progress timers spawned synchronously during instantiation that left persistent `convert loading …` extmarks on row 0.
+- **In-Flight `_convert:abort()` on Placement Close via `abort_convert`**: Introduced `image.abort_convert(placement)` in `ui/image.lua` to invoke `img._convert:abort()` on active placements during buffer replacement, canvas reset, and teardown. Terminates running `magick`/`convert` child processes and frees snacks' concurrent execution queue (`MAX_PROCS = 3`), eliminating pipeline starvation during rapid user navigation.
+- **API Array Normalization in `resume_pending_saves` (`ensure_array`)**: Applied `util.ensure_array` in `net/download.lua` when deserializing single-post API responses (`data.post`). Resolves silent aborts where Gelbooru DAPI returns a single object dictionary instead of a list when queried with `&id=...`.
+- **Shallow Reference Array Slicing for Candidate Pools (LuaJIT Heap Discipline)**: Replaced `vim.deepcopy(cached_pool)` in `net/api.lua` (lines 858 & 864) with shallow array iteration loops (`candidate_pool = {}; for i = 1, #cached_pool do candidate_pool[i] = cached_pool[i] end`). Eliminates deep duplication of thousands of Lua tables and strings on the LuaJIT GC heap across large 2,000-post pipeline candidate pools.
+- **Timer Handle Leak Fix in `tags/resolve.lua`**: Fixed pointer check order in `tags/resolve.lua` line 216: now clears `UI.api_tag_timer = nil` before calling `timer = util.close_timer(timer)`. Prevents closed libuv timer handles from lingering in `UI.api_tag_timer`.
+- **Scraper Re-Entrancy Guard & Managed Timers in `tags/fetcher.lua`**: Added `M.is_running = false` flag guarding `:GelbooruTags`, `:GelbooruTags verify`, and `:GelbooruTags refresh`. Rejects concurrent scraper invocations with friendly notifications. Replaced unmanaged `vim.defer_fn` retry timers with managed `defer()` storing timer handles in `UI.fetcher_timers`, cleanly closed on teardown.
+- **DPI Normalization Threshold Refinement (`>= 300`)**: Updated DPI boundary in `ui/image.lua` (`sanitize_dpi`) from strict inequality `> 300` to inclusive inequality `>= 300` (and `< 50`). Prevents digital art exported at exactly 300 DPI from shrinking down to 32% size in `snacks.image`.
+- **Ghost Keymap Hint Removal from Status Line**: Removed unmapped `t: tags` shortcut from the default status bar string in `ui/init.lua` line 157, aligning displayed hints with active buffer keymaps.
+- **Sequential Filename Collision Guard in `local/scan.lua`**: Enforced `n >= 10000` threshold for bare numeric filenames (`%d+..ext`) in `local/scan.lua`. Prevents sequential non-booru local files (e.g. `1.png`, `42.jpg`) from triggering unintended remote Gelbooru metadata lookups and spurious `[SAVED]` badges. Preserves explicit booru prefixes (`gelbooru_`, `post_`, `id_`, `ID`, `prev_`).
+- **UI Orchestrator Modularization (`ui/init.lua` Splitting)**: Deconstructed the monolithic `ui/init.lua` (1,981 lines down to 145 lines) into four single-responsibility submodules: `ui/layout.lua` (259 lines; geometry calculation and dividers), `ui/render.lua` (755 lines; post list formatting, metadata view, status line, and confirmation modal), `ui/keymaps.lua` (576 lines; buffer-local bindings, boundary click routing, and shield protection), and `ui/lifecycle.lua` (484 lines; window/buffer instantiation, public entry points, autocommands, and teardown). `ui/init.lua` remains a thin, zero-overhead facade re-exporting all public symbols for 100% backwards compatibility.
+- **Centralized Named Constants Table (`core/constants.lua`)**: Extracted and consolidated 65+ scattered magic numbers across 13 modules into `lua/gelbooru/core/constants.lua` (130 lines). Standardized layout dimensions/clamps (`LAYOUT_SCALE_FACTOR`, `MIN_COLS`, `MIN_LINES`), window z-indices, scoring weights and popularity multipliers, debounce/cooldown intervals, network retry/backoff timeouts, and media binary format size floors.
+- **Comprehensive Test Suite Expansion (582 Total Tests, +70 New Specs)**: Expanded the test suite from 512 to 582 tests (+70 new tests) across 16 test files. Added comprehensive coverage for timer cleanup, handle leaks, search epoch invalidation, single-post dictionary array normalization via `ensure_array`, candidate pool caching/TTL, force refresh `R`, multi-format binary media integrity validation, config constants, and util helpers.
 
 ---
 
@@ -595,50 +647,32 @@ This branch introduces unified local library browsing, offline booru metadata en
 
 ### 9.1 High Severity (Reliability, Network & Query Mechanics)
 
-#### 1. Tag Database Engine Overhaul (Live API Verification, Dead Tag Pruning & Top-Down Count Refresh)
-- **Problem**: Tag counts in local databases (`series.json`, `characters.json`, etc.) remain frozen from the initial scrape, distorting autocomplete popularity ranking (`log10(count + 1)`). Furthermore, aliased or renamed booru tags leave phantom entries locally that return 0 results when selected from autocomplete. This remains the primary pending architectural task for the tag subsystem.
-- **Resolution**:
-  - Implement batch verification (`:GelbooruTags verify`) utilizing Gelbooru's multi-tag API (`&names=tag1+tag2+...`) in batches of 50–100 names per request to synchronize counts and reclassify changed tag types across thousands of tags in seconds.
-  - Purge dead or aliased tags (tags returning `count == 0` or absent from API responses) from memory and disk.
-  - Implement top-down count refresh (`:GelbooruTags refresh`) scraping from page 0 downward to update the top 50,000 most popular tags in place.
-  - Implement query-time self-healing: when a single-tag search returns 0 results, query the tag API asynchronously and prune the tag if confirmed dead or aliased.
+#### 1. Tag Database Engine Overhaul [COMPLETED]
+- **Status**: Implemented in `lua/gelbooru/tags/fetcher.lua`, `lua/gelbooru/tags/db.lua`, `lua/gelbooru/tags/init.lua`, and `lua/gelbooru/net/api.lua`. Verified via 26 passing tests in `tests/unit/db_spec.lua`.
 
-#### 2. Tiny Image Canvas Scaling & Minimum Dimension Guard
-- **Problem**: Certain images with small native pixel dimensions or unusual aspect ratios render miniature or stamp-sized on the canvas instead of scaling up to fill available window space.
-- **Root Cause (Diagnostic Findings)**:
+#### 2. Tiny Image Canvas Scaling & Minimum Dimension Guard [IN PROGRESS]
+- **Status**: Partially resolved in this session. The DPI boundary check was fixed in `ui/image.lua` (`sanitize_dpi` updated from `> 300` to `>= 300`), eliminating the 300 DPI shrinkage bug.
+- **Remaining Root Cause & Scope**:
   1. **Gelbooru URL Selection**: Posts $\le 1200\text{px}$ omit `sample_url` (`sample: 0`). When `sample_url` is absent, the fallback chain selects `preview_url` (150px–250px thumbnail) instead of `file_url`, permanently rendering low-resolution thumbnails without upgrading.
   2. **Snacks No-Upscaling Early Return**: In `Snacks.image.util.fit`, line 65 contains `if img_cells.width <= cells.width and img_cells.height <= cells.height then return img_cells end`, strictly preventing any upscaling beyond 1:1 pixel size.
-  3. **DPI Poisoning**: Art exported with standard 300 DPI headers bypasses strict inequality `dpi.width > 300` sanitization and gets divided by $300/96$, shrinking image cell area down to 32%.
-- **Resolution**:
+- **Pending Resolution**:
   - Prioritize `file_url` when `sample_url` is empty for image posts.
   - Provide an upscale wrapper or override in `image.render_image` to calculate canvas fill aspect ratio when `img_cells` are smaller than the floating window.
-  - Unconditionally normalize DPI to 96 DPI for all screen raster rendering.
 
 ### 9.2 Medium Severity (Performance, Memory & UI Polish)
 
-#### 3. UI Orchestrator Modularization (`ui/init.lua`)
-- **Problem**: `lua/gelbooru/ui/init.lua` is over 1,750 lines long, tightly coupling floating window coordinate math, buffer-local keymap dispatch, preview cooldown timers, and window lifecycle orchestration into a single file.
-- **Resolution**:
-  - Split `ui/init.lua` into four specialized submodules:
-    - `ui/layout.lua`: Layout geometry math (`calc_layout`), responsive scaling, and floating window coordinate calculation.
-    - `ui/keymaps.lua`: Buffer-local keymaps for list, meta, input, and placement buffers.
-    - `ui/render.lua`: Post list text formatting, metadata panel rendering, and canvas display.
-    - `ui/lifecycle.lua`: Open, close, teardown, and autocommand management.
-  - Retain `ui/init.lua` as a thin facade re-exporting the submodules without breaking external call sites.
+#### 3. UI Orchestrator Modularization (`ui/init.lua`) [COMPLETED]
+- **Status**: Implemented in `lua/gelbooru/ui/` with modular split into `layout.lua` (259 lines), `render.lua` (755 lines), `keymaps.lua` (576 lines), and `lifecycle.lua` (484 lines), with `ui/init.lua` (145 lines) acting as a thin backwards-compatible facade. Verified via complete test suite.
 
-#### 4. Centralized Named Constants Table (`core/constants.lua`)
-- **Problem**: Hardcoded magic numbers for layout ratios, debounce timeouts, curl limits, and scoring weights are scattered across modules.
-- **Resolution**:
-  - Consolidate all constants into a centralized `core/constants.lua` table (`LAYOUT_SCALE = 0.95`, `MIN_WIDTH = 80`, `AC_DEBOUNCE_MS = 50`, `PREVIEW_CACHED_MS = 30`, `PREVIEW_REMOTE_MS = 150`, `TAG_BATCH_SIZE = 40`, `SCORE_EXACT = 35.0`, `POP_MULTIPLIER = 10.0`).
+#### 4. Centralized Named Constants Table (`core/constants.lua`) [COMPLETED]
+- **Status**: Implemented in `lua/gelbooru/core/constants.lua` (130 lines), consolidating 65+ magic numbers across 13 modules (`LAYOUT_SCALE_FACTOR`, `AC_INPUT_DEBOUNCE_MS`, `SCORE_BASE_*`, `CURL_*`, `TAG_*`, etc.) with zero regressions across all 582 tests.
 
 ### 9.3 Low Severity (Edge Cases & Distribution)
 
-#### 5. Sequential Filename Collision Guard in Local Scanner (`local/scan.lua`)
-- **Problem**: In `lua/gelbooru/local/scan.lua`, `extract_post_id` matches bare numeric filenames (`filename:match("^(%d+)%..+$")`). If a user opens a folder with sequential non-booru files (e.g. `001.jpg`, `1.png`), the scanner extracts IDs `1`, `2`, and queries Gelbooru for unrelated historic posts.
-- **Resolution**:
-  - Require a minimum post ID threshold (e.g. numeric ID $\ge 10000$ or minimum 5 digits) for bare numeric filenames to be considered Gelbooru post IDs, or check for known booru prefix patterns.
+#### 5. Sequential Filename Collision Guard in Local Scanner (`local/scan.lua`) [COMPLETED]
+- **Status**: Implemented in `lua/gelbooru/local/scan.lua`. Bare numeric filenames must have numeric value $\ge 10000$ to be extracted as post IDs, while explicit prefixes (`gelbooru_`, `post_`, `id_`, `ID`, `prev_`) bypass the threshold. Fully verified in `tests/unit/local_spec.lua`.
 
-#### 6. Distribution Packaging & Metadata Exclusions (`.gitattributes`)
+#### 6. Distribution Packaging & Metadata Exclusions (`.gitattributes`) [PENDING]
 - **Problem**: Package managers download developer test suites, makefiles, and documentation artifacts into user runtimes.
 - **Resolution**:
   - Add `.gitattributes` configuring `export-ignore` for `tests/`, `Makefile`, and `AGENTS.md` to ensure lightweight installation for end users.

@@ -10,6 +10,7 @@ local util = require("gelbooru.core.util")
 local query = require("gelbooru.query")
 local index = require("gelbooru.local.index")
 local indexer = require("gelbooru.local.indexer")
+local constants = require("gelbooru.core.constants")
 
 M.extract_post_id = scan.extract_post_id
 M.scan_local_folder = scan.scan_local_folder
@@ -96,16 +97,16 @@ function M.open_local(query_or_dir)
   ui.render_preview(false)
   indexer.start_background_indexing(posts)
   if vim.fn.isdirectory(resolved_dir) == 0 then
-    ui.set_status(string.format("Directory not found: %s", resolved_dir), 3000)
+    ui.set_status(string.format("Directory not found: %s", resolved_dir), constants.STATUS_TIMEOUT_LOCAL_MS)
   elseif #posts == 0 then
-    ui.set_status(string.format("No images found in %s", resolved_dir), 3000)
+    ui.set_status(string.format("No images found in %s", resolved_dir), constants.STATUS_TIMEOUT_LOCAL_MS)
   elseif #filtered_posts == 0 then
-    ui.set_status(string.format("No posts matching '%s' in %s", tag_str, resolved_dir), 3000)
+    ui.set_status(string.format("No posts matching '%s' in %s", tag_str, resolved_dir), constants.STATUS_TIMEOUT_LOCAL_MS)
   else
     if tag_str and tag_str ~= "" then
-      ui.set_status(string.format("Found %d local posts matching '%s' in %s", #filtered_posts, tag_str, resolved_dir), 3000)
+      ui.set_status(string.format("Found %d local posts matching '%s' in %s", #filtered_posts, tag_str, resolved_dir), constants.STATUS_TIMEOUT_LOCAL_MS)
     else
-      ui.set_status(string.format("Loaded %d local images from %s", #filtered_posts, resolved_dir), 3000)
+      ui.set_status(string.format("Loaded %d local images from %s", #filtered_posts, resolved_dir), constants.STATUS_TIMEOUT_LOCAL_MS)
     end
   end
 end

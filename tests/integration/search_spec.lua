@@ -1253,5 +1253,141 @@ describe("Integration: Search & List flow", function()
 
       vim.fn.delete(tmp)
     end)
+
+    it("handles single post dictionary API response via ensure_array (Issue 6)", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_curl = download.curl_async
+
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          -- Gelbooru API returns a JSON dictionary table for single post, NOT an array
+          local single_dict = {
+            id = 5566,
+            rating = "general",
+            score = 123,
+            width = 1280,
+            height = 720,
+            tags = "single_tag_solo vocaloid",
+            file_url = "https://example.com/5566.jpg",
+            preview_url = "https://example.com/5566_prev.jpg",
+          }
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = single_dict }))
+          end)
+        else
+          orig_curl(url, cb)
+        end
+      end
+
+      api.execute_search("id:5566")
+
+      vim.wait(200, function()
+        return #state.State.posts > 0
+      end)
+
+      assert.are.equal(1, #state.State.posts)
+      assert.are.equal(5566, state.State.posts[1].id)
+      assert.are.equal("single_tag_solo vocaloid", state.State.posts[1].tags)
+      assert.are.equal(1, state.State.cur)
+
+      download.curl_async = orig_curl
+    end)
+
+    it("multi-flight epoch invalidation discards responses from all earlier queries (Issue 5)", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local captured = {}
+      local orig_curl = download.curl_async
+
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          table.insert(captured, { url = url, cb = cb })
+        else
+          orig_curl(url, cb)
+        end
+      end
+
+      -- Launch three rapid consecutive queries: Q1, Q2, Q3
+      api.execute_search("search_alpha")
+      local epoch1 = state.State.search_epoch
+
+      api.execute_search("search_beta")
+      local epoch2 = state.State.search_epoch
+
+      api.execute_search("search_gamma")
+      local epoch3 = state.State.search_epoch
+
+      assert.is_true(epoch2 > epoch1)
+      assert.is_true(epoch3 > epoch2)
+      assert.are.equal(3, #captured)
+
+      -- Q3 responds first
+      local p3 = { id = 3000, score = 300, tags = "gamma_tag", file_url = "https://example.com/3000.jpg" }
+      captured[3].cb(vim.fn.json_encode({ post = { p3 } }))
+
+      assert.are.equal("search_gamma", state.State.query)
+      assert.are.equal(1, #state.State.posts)
+      assert.are.equal(3000, state.State.posts[1].id)
+
+      -- Q1 and Q2 respond late
+      local p1 = { id = 1000, score = 100, tags = "alpha_tag", file_url = "https://example.com/1000.jpg" }
+      local p2 = { id = 2000, score = 200, tags = "beta_tag", file_url = "https://example.com/2000.jpg" }
+      captured[1].cb(vim.fn.json_encode({ post = { p1 } }))
+      captured[2].cb(vim.fn.json_encode({ post = { p2 } }))
+
+      -- Confirm state and post list remain strictly on Q3
+      assert.are.equal("search_gamma", state.State.query)
+      assert.are.equal(1, #state.State.posts)
+      assert.are.equal(3000, state.State.posts[1].id)
+
+      download.curl_async = orig_curl
+    end)
+
+    it("candidate pool caches query and R forces cache clearance and fresh network fetch (Issue 7)", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_curl = download.curl_async
+      local fetch_count = 0
+
+      download.curl_async = function(url, cb)
+        if url:find("s=post") then
+          fetch_count = fetch_count + 1
+          local posts = {
+            { id = 901, score = 90, tags = "ttl_pool", file_url = "https://example.com/901.jpg" },
+            { id = 902, score = 80, tags = "ttl_pool", file_url = "https://example.com/902.jpg" },
+          }
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = posts }))
+          end)
+        else
+          orig_curl(url, cb)
+        end
+      end
+
+      -- First piped search fetches candidate pool from network
+      api.execute_search("ttl_pool | sort:score:10")
+      vim.wait(300, function() return #state.State.posts > 0 end)
+      assert.is_true(fetch_count >= 1)
+      local first_fetches = fetch_count
+      assert.are.equal(2, #state.State.posts)
+
+      -- Second piped search with downstream slice hits session cache (0 extra curl calls)
+      api.execute_search("ttl_pool | sort:score:1")
+      assert.are.equal(first_fetches, fetch_count)
+      assert.are.equal(1, #state.State.posts)
+
+      -- Trigger force refresh 'R'
+      ui.force_refresh()
+
+      -- Next search must bypass cache and issue fresh network request
+      api.execute_search("ttl_pool | sort:score:10")
+      vim.wait(300, function() return fetch_count > first_fetches and #state.State.posts > 0 end)
+      assert.is_true(fetch_count > first_fetches)
+      assert.are.equal(2, #state.State.posts)
+
+      download.curl_async = orig_curl
+    end)
   end)
 end)
+

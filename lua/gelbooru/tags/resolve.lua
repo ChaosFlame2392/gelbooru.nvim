@@ -4,6 +4,7 @@ local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
 local download = require("gelbooru.net.download")
 local db = require("gelbooru.tags.db")
+local constants = require("gelbooru.core.constants")
 
 local M = {}
 
@@ -93,7 +94,7 @@ function M.persist_discovered_tag(item)
   end
   UI.save_discovered_timer:stop()
   UI.save_discovered_timer:start(
-    500,
+    constants.DISCOVERED_FLUSH_DEBOUNCE_MS,
     0,
     vim.schedule_wrap(function()
       if UI.save_discovered_timer then
@@ -129,7 +130,7 @@ function M.resolve_post_tags(p, on_complete)
   log("DEBUG", "TAG_RESOLVE", "Resolving %d unknown tags for post %s", #missing, tostring(p.id))
   local chunks = {}
   local queried_tags = {}
-  for i = 1, math.min(#missing, 40) do
+  for i = 1, math.min(#missing, constants.TAG_RESOLVE_BATCH_SIZE) do
     local tag = missing[i]
     chunks[#chunks + 1] = util.url_encode(tag)
     queried_tags[#queried_tags + 1] = tag
@@ -210,15 +211,15 @@ function M.fetch_api_tags(query)
   local timer = vim.loop.new_timer()
   UI.api_tag_timer = timer
   timer:start(
-    300,
+    constants.TAG_API_FETCH_DEBOUNCE_MS,
     0,
     vim.schedule_wrap(function()
-      timer = util.close_timer(timer)
       if UI.api_tag_timer == timer then
         UI.api_tag_timer = nil
       end
+      timer = util.close_timer(timer)
 
-      local url = string.format("%s&name_pattern=%%%s%%&orderby=count&limit=25%s", config.options.tags_api, util.url_encode(query), util.auth_qs())
+      local url = string.format("%s&name_pattern=%%%s%%&orderby=count&limit=%d%s", config.options.tags_api, util.url_encode(query), constants.TAG_API_FETCH_LIMIT, util.auth_qs())
       download.curl_async(url, function(body)
         if state.State.torn_down then
           return
