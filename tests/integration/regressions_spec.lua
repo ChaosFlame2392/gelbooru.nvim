@@ -1218,4 +1218,61 @@ describe("Regression Tests for UI & Search bugs", function()
       ui.teardown()
     end)
   end)
+
+  describe("Force refresh and save_dir protection regressions", function()
+    it("never deletes or downloads files in save_dir when force_refresh ('R') is triggered", function()
+      local config = require("gelbooru.core.config")
+      local download = require("gelbooru.net.download")
+      local local_index = require("gelbooru.local.index")
+
+      local save_dir = config.options.save_dir
+      vim.fn.mkdir(save_dir, "p")
+      local test_file = save_dir .. "/9999999.jpg"
+      local f = io.open(test_file, "wb")
+      assert.is_not_nil(f)
+      -- Write valid JPEG header and data (> 1024 bytes)
+      f:write("\255\216\255\224\000\016JFIF\000\001\001\000\000\001\000\001\000\000")
+      f:write(string.rep("A", 2048))
+      f:write("\255\217")
+      f:close()
+
+      local_index.mark_saved(9999999, "jpg")
+
+      local post = {
+        id = 9999999,
+        file_url = "https://example.com/images/9999999.jpg",
+        preview_url = "https://example.com/thumbnails/9999999.jpg",
+        sample_url = "https://example.com/samples/9999999.jpg",
+        tags = "test_tag",
+      }
+
+      state.State.posts = { post }
+      state.State.cur = 1
+
+      ui.open()
+
+      local dl_called = false
+      local orig_dl = download.download_async
+      download.download_async = function(url, dest, cb, opts)
+        dl_called = true
+        return orig_dl(url, dest, cb, opts)
+      end
+
+      -- Simulate user pressing 'R' (force_refresh)
+      ui.force_refresh()
+
+      -- Wait for debounced preview
+      vim.wait(300, function() return false end, 50)
+
+      -- Verify download_async was NEVER called because media is in save_dir
+      assert.is_false(dl_called, "download_async should NOT be called for files already in save_dir")
+
+      -- Verify the permanent saved file was NEVER deleted
+      assert.are.equal(1, vim.fn.filereadable(test_file), "Permanent saved file in save_dir was deleted by force_refresh!")
+
+      download.download_async = orig_dl
+      pcall(vim.fn.delete, test_file)
+      ui.teardown()
+    end)
+  end)
 end)

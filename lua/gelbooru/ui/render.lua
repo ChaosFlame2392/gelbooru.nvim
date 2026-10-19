@@ -110,6 +110,7 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
   url_idx = math.max(1, math.min(url_idx, #urls))
   retry_count = retry_count or 0
   local preview_url = urls[url_idx]
+  local is_saved = image.is_in_save_dir(dest)
 
   if image.is_video_post(p) then
     if force_download and p.id then
@@ -126,14 +127,14 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
 
     local video_to_extract = nil
     if p.is_local then
-      video_to_extract = dest or p.file_url
+      video_to_extract = (p.file_url and vim.fn.filereadable(p.file_url) == 1) and p.file_url or nil
     else
       video_to_extract = image.get_saved_video_path(p.id)
     end
 
-    if p.is_local or video_to_extract then
+    if video_to_extract and vim.fn.filereadable(video_to_extract) == 1 then
       M.set_status("Video post • extracting thumbnail…", constants.STATUS_TIMEOUT_HISTORY_MS)
-      image.extract_video_thumbnail(video_to_extract or dest or p.file_url, p.id, function(extracted_path)
+      image.extract_video_thumbnail(video_to_extract, p.id, function(extracted_path)
         if state.State.torn_down then
           return
         end
@@ -210,7 +211,7 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
     end
 
     local size = vim.fn.getfsize(dest)
-    if not p.is_local and size > -1 and size < constants.MIN_VALID_MEDIA_BYTES then
+    if not p.is_local and not is_saved and size > -1 and size < constants.MIN_VALID_MEDIA_BYTES then
       log("DEBUG", "RENDER", "file too small (%d bytes), re-fetching (post %s)", size, tostring(p.id or p.file_url))
       if retry_count < 1 then
         M.load_and_render_image(p, url_idx, retry_count + 1, true)
@@ -224,9 +225,11 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
 
     local ok = image.render_image(UI.wins.img, dest)
     if not ok then
-      if not p.is_local and retry_count < 1 then
+      if p.is_local or is_saved then
+        fail_preview("Image Conversion Failed - File may be corrupted or unsupported", p)
+      elseif retry_count < 1 then
         M.load_and_render_image(p, url_idx, retry_count + 1, true)
-      elseif not p.is_local and url_idx < #urls then
+      elseif url_idx < #urls then
         M.load_and_render_image(p, url_idx + 1, 0, true)
       else
         fail_preview("Image Conversion Failed - File may be corrupted or unsupported", p)
@@ -234,7 +237,7 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
     end
   end
 
-  if p.is_local then
+  if p.is_local or is_saved then
     if force_download and p.id then
       image.clear_snacks_cache_for(p.id)
     end
@@ -243,7 +246,7 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
   end
 
   -- Integrity check for cached preview files
-  if not p.is_local and vim.fn.filereadable(dest) == 1 and not force_download then
+  if not p.is_local and not is_saved and vim.fn.filereadable(dest) == 1 and not force_download then
     if not download.is_valid_media(dest) then
       log("WARN", "PREVIEW", "Cached preview file corrupted on disk, deleting and re-fetching: %s", dest)
       vim.fn.delete(dest)
@@ -252,12 +255,20 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
     end
   end
 
-  if not p.is_local and (vim.fn.filereadable(dest) == 0 or force_download) then
+  if not p.is_local and not is_saved and (vim.fn.filereadable(dest) == 0 or force_download) then
     if force_download and vim.fn.filereadable(dest) == 1 then
       vim.fn.delete(dest)
       image.clear_snacks_cache_for(p.id)
     end
     M.set_status("Downloading preview…")
+    if not preview_url or not preview_url:match("^https?://") then
+      if url_idx < #urls then
+        M.load_and_render_image(p, url_idx + 1, 0, force_download)
+      else
+        fail_preview("Invalid preview URL", p)
+      end
+      return
+    end
     download.download_async(preview_url, dest, function(ok)
       if ok then
         do_render()
@@ -272,7 +283,15 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
         end
       end
     end)
-  elseif download.active_downloads[dest] then
+  elseif not p.is_local and not is_saved and download.active_downloads[dest] then
+    if not preview_url or not preview_url:match("^https?://") then
+      if url_idx < #urls then
+        M.load_and_render_image(p, url_idx + 1, 0, force_download)
+      else
+        fail_preview("Invalid preview URL", p)
+      end
+      return
+    end
     download.download_async(preview_url, dest, function(ok)
       if ok then
         do_render()
@@ -409,7 +428,8 @@ function M.render_preview(force_download)
   end
 
   local _, dest = image.get_preview_targets(p)
-  local is_cached = not force_download and dest and vim.fn.filereadable(dest) == 1 and not download.active_downloads[dest]
+  local is_saved = image.is_in_save_dir(dest)
+  local is_cached = (not force_download or is_saved or p.is_local) and dest and vim.fn.filereadable(dest) == 1 and not download.active_downloads[dest]
   if not is_cached and not force_download and image.is_video_post(p) then
     local thumb_path = image.get_video_thumbnail_path(p.file_url, p.id)
     if vim.fn.filereadable(thumb_path) == 1 and (vim.fn.getfsize(thumb_path) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES then

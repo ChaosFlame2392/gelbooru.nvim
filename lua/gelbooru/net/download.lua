@@ -16,6 +16,19 @@ M.active_prefetch_handles = {}
 M.queued_prefetch_dests = {}
 M.last_prefetch_dir = nil
 
+local function is_in_save_dir(path)
+  if not path or type(path) ~= "string" or path == "" then
+    return false
+  end
+  local save_dir = config.options.save_dir and vim.fn.expand(config.options.save_dir)
+  if not save_dir or save_dir == "" then
+    return false
+  end
+  save_dir = save_dir:gsub("/+$", "")
+  local prefix = save_dir .. "/"
+  return path == save_dir or path:sub(1, #prefix) == prefix
+end
+
 function M.is_valid_media(file_path, ref_path)
   if not file_path or vim.fn.filereadable(file_path) ~= 1 then
     return false
@@ -212,8 +225,12 @@ function M.download_async(url, dest, cb, opts)
       end
       return
     else
-      log("WARN", "DOWNLOAD", "Existing cached file corrupted on disk, deleting: %s", dest)
-      vim.fn.delete(dest)
+      if not is_in_save_dir(dest) then
+        log("WARN", "DOWNLOAD", "Existing cached file corrupted on disk, deleting: %s", dest)
+        vim.fn.delete(dest)
+      else
+        log("WARN", "DOWNLOAD", "File in save_dir failed media validation; keeping permanent file intact: %s", dest)
+      end
     end
   end
 
@@ -306,7 +323,9 @@ function M.download_async(url, dest, cb, opts)
       if out.code == 0 and vim.fn.filereadable(tmp_dest) == 1 and M.is_valid_media(tmp_dest, dest) then
         ok = vim.fn.rename(tmp_dest, dest) == 0
         if not ok and vim.fn.filereadable(dest) == 1 then
-          vim.fn.delete(dest)
+          if not is_in_save_dir(dest) then
+            vim.fn.delete(dest)
+          end
           ok = vim.fn.rename(tmp_dest, dest) == 0
         end
       end

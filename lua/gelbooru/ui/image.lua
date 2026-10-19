@@ -90,6 +90,19 @@ function M.get_saved_media_path(post_id, fallback_url)
   return nil
 end
 
+function M.is_in_save_dir(path)
+  if not path or type(path) ~= "string" or path == "" then
+    return false
+  end
+  local save_dir = config.options.save_dir and vim.fn.expand(config.options.save_dir)
+  if not save_dir or save_dir == "" then
+    return false
+  end
+  save_dir = save_dir:gsub("/+$", "")
+  local prefix = save_dir .. "/"
+  return path == save_dir or path:sub(1, #prefix) == prefix
+end
+
 function M.get_preview_targets(p, url_idx)
   if not p then
     return {}, nil
