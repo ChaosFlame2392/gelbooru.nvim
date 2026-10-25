@@ -529,4 +529,63 @@ function M.read_image_dimensions(path)
   return nil, nil
 end
 
+function M.is_image_complete(path)
+  if not path or type(path) ~= "string" or path == "" then
+    return false
+  end
+  local sz = vim.fn.getfsize(path)
+  if not sz or sz <= 0 then
+    return false
+  end
+  local f = io.open(path, "rb")
+  if not f then
+    return false
+  end
+
+  local magic = f:read(4)
+  if not magic or #magic < 4 then
+    f:close()
+    return false
+  end
+
+  local b1, b2, b3, b4 = string.byte(magic, 1, 4)
+  if b1 == 137 and b2 == 80 and b3 == 78 and b4 == 71 then
+    -- PNG: must be at least 36 bytes and end with IEND chunk in its tail
+    if sz < 36 then
+      f:close()
+      return false
+    end
+    f:seek("end", -12)
+    local tail = f:read(12) or ""
+    f:close()
+    return tail:find("IEND") ~= nil
+  elseif b1 == 255 and b2 == 216 then
+    -- JPEG: must end with EOI (0xFF 0xD9) within the last 128 bytes
+    local seek_back = math.min(sz, 128)
+    f:seek("end", -seek_back)
+    local tail = f:read(seek_back) or ""
+    f:close()
+    return tail:find("\255\217") ~= nil
+  elseif magic:sub(1, 3) == "GIF" then
+    -- GIF: trailer byte is 0x3B (';')
+    f:seek("end", -1)
+    local tail = f:read(1) or ""
+    f:close()
+    return tail == ";"
+  elseif magic == "RIFF" then
+    -- WebP: declared file size at offset 4
+    local s = f:read(4)
+    f:close()
+    if not s or #s < 4 then
+      return false
+    end
+    local s1, s2, s3, s4 = string.byte(s, 1, 4)
+    local riff_len = s1 + s2 * 256 + s3 * 65536 + s4 * 16777216
+    return sz >= (riff_len + 8)
+  end
+
+  f:close()
+  return true
+end
+
 return M

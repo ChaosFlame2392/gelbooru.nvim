@@ -885,5 +885,56 @@ describe("util.read_image_dimensions", function()
       assert.are.equal(50, h)
     end)
   end)
+
+  describe("util.is_image_complete: format completeness & truncation validation", function()
+    it("returns false for nil, empty, or non-existent file", function()
+      assert.is_false(util.is_image_complete(nil))
+      assert.is_false(util.is_image_complete(""))
+      assert.is_false(util.is_image_complete("/tmp/definitely_nonexistent_file_12345.png"))
+    end)
+
+    it("verifies PNG completeness via IEND chunk presence", function()
+      local ihdr = string.char(137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13)
+        .. "IHDR"
+        .. string.char(0, 0, 0, 10, 0, 0, 0, 10, 8, 2, 0, 0, 0, 0, 0, 0, 0)
+      local iend = string.char(0, 0, 0, 0) .. "IEND" .. string.char(174, 66, 96, 130)
+
+      local valid_p = write_file("complete.png", ihdr .. iend)
+      local trunc_p = write_file("truncated.png", ihdr .. string.rep("X", 500))
+
+      assert.is_true(util.is_image_complete(valid_p))
+      assert.is_false(util.is_image_complete(trunc_p))
+    end)
+
+    it("verifies JPEG completeness via EOI marker presence", function()
+      local soi = string.char(255, 216)
+      local eoi = string.char(255, 217)
+      local valid_jpg = write_file("complete.jpg", soi .. string.rep("A", 200) .. eoi)
+      local trunc_jpg = write_file("truncated.jpg", soi .. string.rep("A", 200))
+
+      assert.is_true(util.is_image_complete(valid_jpg))
+      assert.is_false(util.is_image_complete(trunc_jpg))
+    end)
+
+    it("verifies GIF completeness via trailer byte (0x3B)", function()
+      local valid_gif = write_file("complete.gif", "GIF89a" .. string.char(10, 0, 10, 0) .. ";")
+      local trunc_gif = write_file("truncated.gif", "GIF89a" .. string.char(10, 0, 10, 0))
+
+      assert.is_true(util.is_image_complete(valid_gif))
+      assert.is_false(util.is_image_complete(trunc_gif))
+    end)
+
+    it("verifies WebP completeness via declared RIFF length", function()
+      -- Declared payload length is 100 bytes, so total file size must be at least 108
+      local riff_valid = "RIFF" .. string.char(100, 0, 0, 0) .. "WEBP" .. string.rep("W", 100)
+      local riff_trunc = "RIFF" .. string.char(100, 0, 0, 0) .. "WEBP" .. string.rep("W", 10)
+
+      local valid_webp = write_file("complete.webp", riff_valid)
+      local trunc_webp = write_file("truncated.webp", riff_trunc)
+
+      assert.is_true(util.is_image_complete(valid_webp))
+      assert.is_false(util.is_image_complete(trunc_webp))
+    end)
+  end)
 end)
 

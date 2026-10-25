@@ -240,6 +240,7 @@ function M.abort_convert(placement)
   end
 
   -- Unlink any partial or 0-byte step files on disk when aborted mid-flight
+  local step_files_to_clean = {}
   if type(convert.steps) == "table" then
     for _, step in ipairs(convert.steps) do
       if step and step.file then
@@ -249,6 +250,7 @@ function M.abort_convert(placement)
 
         if sz == 0 or (is_aborted_step and not is_done) then
           delete_step_file(step.file)
+          table.insert(step_files_to_clean, step.file)
         elseif sz > 0 then
           local info_file = step.file .. ".info"
           local info_corrupt = false
@@ -259,8 +261,9 @@ function M.abort_convert(placement)
               info_corrupt = true
             end
           end
-          if info_corrupt or is_aborted_step then
+          if info_corrupt or is_aborted_step or not util.is_image_complete(step.file) then
             delete_step_file(step.file)
+            table.insert(step_files_to_clean, step.file)
           end
         end
       end
@@ -269,9 +272,29 @@ function M.abort_convert(placement)
 
   if convert.file then
     local sz = (vim.fn.filereadable(convert.file) == 1) and (vim.fn.getfsize(convert.file) or 0) or -1
-    if sz <= 0 then
+    if sz <= 0 or not util.is_image_complete(convert.file) then
       delete_step_file(convert.file)
+      table.insert(step_files_to_clean, convert.file)
     end
+  end
+
+  if #step_files_to_clean > 0 then
+    vim.defer_fn(function()
+      for _, f in ipairs(step_files_to_clean) do
+        if vim.fn.filereadable(f) == 1 and not util.is_image_complete(f) then
+          pcall(vim.fn.delete, f)
+          local info_file = f .. ".info"
+          if vim.fn.filereadable(info_file) == 1 then
+            pcall(vim.fn.delete, info_file)
+          end
+        end
+      end
+    end, 50)
+  end
+
+  local ok, img_mod = pcall(require, "snacks.image.image")
+  if ok and img_mod and type(img_mod.clear) == "function" then
+    pcall(img_mod.clear)
   end
 end
 
@@ -812,6 +835,7 @@ function M.clean_corrupt_snacks_cache(target)
     return
   end
   local candidate_files = M.find_snacks_cache_candidates(target)
+  local any_cleaned = false
   for _, f in ipairs(candidate_files) do
     if vim.fn.filereadable(f) == 1 then
       local size = vim.fn.getfsize(f) or 0
@@ -850,6 +874,10 @@ function M.clean_corrupt_snacks_cache(target)
           end
         end
 
+        if not is_corrupt and not util.is_image_complete(f) then
+          is_corrupt = true
+        end
+
         local info_file = f .. ".info"
         if not is_corrupt and vim.fn.filereadable(info_file) == 1 then
           local isz = vim.fn.getfsize(info_file) or 0
@@ -871,6 +899,7 @@ function M.clean_corrupt_snacks_cache(target)
       end
 
       if is_corrupt then
+        any_cleaned = true
         pcall(vim.fn.delete, f)
         if not f:match("%.info$") then
           local info_file = f .. ".info"
@@ -885,13 +914,20 @@ function M.clean_corrupt_snacks_cache(target)
               pcall(vim.fn.delete, img_file)
             else
               local iw, ih = util.read_image_dimensions(img_file)
-              if not (iw and ih and iw > 0 and ih > 0) then
+              if not (iw and ih and iw > 0 and ih > 0) or not util.is_image_complete(img_file) then
                 pcall(vim.fn.delete, img_file)
               end
             end
           end
         end
       end
+    end
+  end
+
+  if any_cleaned then
+    local ok, img_mod = pcall(require, "snacks.image.image")
+    if ok and img_mod and type(img_mod.clear) == "function" then
+      pcall(img_mod.clear)
     end
   end
 end
@@ -916,6 +952,10 @@ function M.clear_snacks_cache_for(post_id_or_path)
   end
 
   M.clean_corrupt_snacks_cache(post_id_or_path)
+  local ok, img_mod = pcall(require, "snacks.image.image")
+  if ok and img_mod and type(img_mod.clear) == "function" then
+    pcall(img_mod.clear)
+  end
 end
 
 function M.sanitize_dpi(img)
@@ -1009,6 +1049,14 @@ function M.render_image(win, path)
     sanitize_dpi(self and self.img)
     if orig_update then
       pcall(orig_update, self)
+    end
+  end
+  local orig_error = placement.error
+  placement.error = function(self)
+    log("WARN", "RENDER", "Snacks image conversion failed for %s", path)
+    M.clear_snacks_cache_for(path)
+    if orig_error then
+      pcall(orig_error, self)
     end
   end
 

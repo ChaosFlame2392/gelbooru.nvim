@@ -697,6 +697,7 @@ describe("image: self-healing cache lifecycle & in-flight conversion abort clean
     local valid_png_bytes = string.char(137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13)
       .. "IHDR"
       .. string.char(0, 0, 0, 10, 0, 0, 0, 10, 8, 2, 0, 0, 0, 0, 0, 0, 0)
+      .. string.char(0, 0, 0, 0) .. "IEND" .. string.char(174, 66, 96, 130)
     local fd = io.open(f_valid_png, "wb")
     assert.is_truthy(fd)
     fd:write(valid_png_bytes)
@@ -732,6 +733,35 @@ describe("image: self-healing cache lifecycle & in-flight conversion abort clean
 
     -- Unrelated cache file remains untouched
     assert.are.equal(1, vim.fn.filereadable(f_unrelated))
+  end)
+
+  it("clean_corrupt_snacks_cache detects and unlinks truncated PNG cache files that lack IEND chunk or valid .info", function()
+    local target_path = "/media/artwork/aborted_post.jpg"
+    local norm = vim.fs.normalize(vim.fn.fnamemodify(target_path, ":p"))
+    local base = "aborted_post"
+    local prefix = vim.fn.sha256(norm .. "0"):sub(1, 8) .. "-" .. base
+
+    -- Simulate an aborted conversion: ImageMagick wrote 7659 bytes of PNG data
+    -- (starting with valid PNG header + IHDR chunk), but was killed before completing
+    -- so it lacks the IEND chunk and the companion .info file was never created.
+    local f_truncated_png = sandbox_snacks_cache .. "/" .. prefix .. ".png"
+    local ihdr_bytes = string.char(137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13)
+      .. "IHDR"
+      .. string.char(0, 0, 0, 10, 0, 0, 0, 10, 8, 2, 0, 0, 0, 0, 0, 0, 0)
+    local fd = io.open(f_truncated_png, "wb")
+    assert.is_truthy(fd)
+    fd:write(ihdr_bytes .. string.rep("x", 7000))
+    fd:close()
+    assert.are.equal(1, vim.fn.filereadable(f_truncated_png))
+
+    -- Notice: no .info file exists because conversion was killed mid-flight
+    local f_info = f_truncated_png .. ".info"
+    assert.are.equal(0, vim.fn.filereadable(f_info))
+
+    -- clean_corrupt_snacks_cache MUST detect this truncated/aborted file and unlink it
+    image.clean_corrupt_snacks_cache(target_path)
+
+    assert.are.equal(0, vim.fn.filereadable(f_truncated_png))
   end)
 
   it("clean_corrupt_snacks_cache unlinks corrupted .info text files containing error messages", function()
