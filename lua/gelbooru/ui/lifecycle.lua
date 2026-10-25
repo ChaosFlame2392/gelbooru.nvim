@@ -88,7 +88,7 @@ function M.teardown()
           if vim.fn.filereadable(direct_vthumb) == 1 then
             pcall(vim.fn.delete, direct_vthumb)
           end
-          image.clear_snacks_cache_for(item.id)
+          image.clear_snacks_cache_for(item.id or item.file_url)
         end
       end
     end

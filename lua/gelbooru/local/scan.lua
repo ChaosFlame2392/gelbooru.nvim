@@ -1,18 +1,26 @@
 local M = {}
 
 local config = require("gelbooru.core.config")
+local constants = require("gelbooru.core.constants")
 local util = require("gelbooru.core.util")
+
+local function is_valid_numeric_id(id_str)
+  local n = tonumber(id_str)
+  return n and n >= constants.BARE_NUMERIC_ID_MIN and n <= constants.GELBOORU_ID_CEILING
+end
 
 function M.extract_post_id(file_path)
   if not file_path or file_path == "" then
     return nil
   end
   local fname = vim.fn.fnamemodify(file_path, ":t")
+  if fname:find("_p%d+") then
+    return nil
+  end
   -- 1. Exact numeric ID before extension: e.g. 11802758.jpg, 11802758.sample.png
   local id = fname:match("^(%d+)%..+$")
   if id then
-    local n = tonumber(id)
-    if n and n >= 10000 then
+    if is_valid_numeric_id(id) then
       return id
     end
     return nil
@@ -20,8 +28,7 @@ function M.extract_post_id(file_path)
   -- 2. Leading numeric ID followed by delimiter: e.g. 11802758_tag.jpg, 11802758 - tag.jpg
   id = fname:match("^(%d+)[_%s%-]")
   if id then
-    local n = tonumber(id)
-    if n and n >= 10000 then
+    if is_valid_numeric_id(id) then
       return id
     end
     return nil

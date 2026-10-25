@@ -157,6 +157,31 @@ function M.get_preview_targets(p, url_idx)
   return urls, string.format("%s/prev_%s.%s", cache_dir, p.id, ext:lower())
 end
 
+function M.resolve_post_dimensions(p, opt_path)
+  if not p then
+    return nil, nil
+  end
+  if p.width and p.height and p.width > 0 and p.height > 0 then
+    return p.width, p.height
+  end
+  local path = opt_path or p.file_url or p.sample_url or p.preview_url
+  if not (path and type(path) == "string" and vim.fn.filereadable(path) == 1) then
+    local _, dest = M.get_preview_targets(p)
+    if dest and vim.fn.filereadable(dest) == 1 then
+      path = dest
+    end
+  end
+  if path and type(path) == "string" and vim.fn.filereadable(path) == 1 then
+    local w, h = util.read_image_dimensions(path)
+    if w and h and w > 0 and h > 0 then
+      p.width = w
+      p.height = h
+      return w, h
+    end
+  end
+  return p.width, p.height
+end
+
 function M.abort_all_ffmpeg()
   for h in pairs(M.active_ffmpeg_handles or {}) do
     if h and h.kill then
@@ -171,8 +196,82 @@ function M.abort_convert(placement)
     return
   end
   local img = placement.img
-  if img and img._convert and type(img._convert.abort) == "function" then
-    pcall(img._convert.abort, img._convert)
+  local convert = (img and img._convert) or placement._convert
+  if not convert then
+    return
+  end
+
+  local aborted_step = nil
+  if type(convert.current) == "function" then
+    local ok, cur = pcall(convert.current, convert)
+    if ok and cur then
+      aborted_step = cur
+    end
+  end
+  if not aborted_step and type(convert.steps) == "table" then
+    local step_idx = convert._step or convert.step
+    if type(step_idx) == "number" and convert.steps[step_idx] then
+      aborted_step = convert.steps[step_idx]
+    else
+      for _, s in ipairs(convert.steps) do
+        if s and s.proc then
+          aborted_step = s
+          break
+        end
+      end
+    end
+  end
+
+  if type(convert.abort) == "function" then
+    pcall(convert.abort, convert)
+  end
+
+  local function delete_step_file(file)
+    if not file or file == "" then
+      return
+    end
+    if vim.fn.filereadable(file) == 1 then
+      pcall(vim.fn.delete, file)
+    end
+    local info_file = file .. ".info"
+    if vim.fn.filereadable(info_file) == 1 then
+      pcall(vim.fn.delete, info_file)
+    end
+  end
+
+  -- Unlink any partial or 0-byte step files on disk when aborted mid-flight
+  if type(convert.steps) == "table" then
+    for _, step in ipairs(convert.steps) do
+      if step and step.file then
+        local is_aborted_step = (step == aborted_step)
+        local is_done = step.done == true
+        local sz = (vim.fn.filereadable(step.file) == 1) and (vim.fn.getfsize(step.file) or 0) or -1
+
+        if sz == 0 or (is_aborted_step and not is_done) then
+          delete_step_file(step.file)
+        elseif sz > 0 then
+          local info_file = step.file .. ".info"
+          local info_corrupt = false
+          if vim.fn.filereadable(info_file) == 1 then
+            local lines = vim.fn.readfile(info_file)
+            local content = vim.trim(table.concat(lines or {}, " ")):lower()
+            if content:find("identify:") or content:find("improper") or content:find("error") or content:find("failed") then
+              info_corrupt = true
+            end
+          end
+          if info_corrupt or is_aborted_step then
+            delete_step_file(step.file)
+          end
+        end
+      end
+    end
+  end
+
+  if convert.file then
+    local sz = (vim.fn.filereadable(convert.file) == 1) and (vim.fn.getfsize(convert.file) or 0) or -1
+    if sz <= 0 then
+      delete_step_file(convert.file)
+    end
   end
 end
 
@@ -544,6 +643,16 @@ function M.render_video_placeholder(p, message)
     "",
     "  File       : " .. filename,
   }
+  if p and (not p.width or p.width <= 0) then
+    local path = p.file_url or p.sample_url
+    if path and type(path) == "string" and vim.fn.filereadable(path) == 1 then
+      local w, h = util.read_image_dimensions(path)
+      if w and h and w > 0 and h > 0 then
+        p.width = w
+        p.height = h
+      end
+    end
+  end
   if p and p.width and p.height and p.width > 0 and p.height > 0 then
     lines[#lines + 1] = string.format("  Dimensions : %dx%d", p.width, p.height)
   end
@@ -569,30 +678,244 @@ function M.render_video_placeholder(p, message)
   end
 end
 
-function M.clear_snacks_cache_for(post_id)
-  if not post_id or tostring(post_id) == "" or tostring(post_id) == "nil" then
-    return
+function M.get_snacks_cache_dir()
+  if M._snacks_cache_dir and type(M._snacks_cache_dir) == "string" and M._snacks_cache_dir ~= "" then
+    return M._snacks_cache_dir
+  end
+  if _G.Snacks and _G.Snacks.image and _G.Snacks.image.config and type(_G.Snacks.image.config.cache) == "string" and _G.Snacks.image.config.cache ~= "" then
+    return _G.Snacks.image.config.cache
   end
   local ok, cache_dir = pcall(vim.fn.stdpath, "cache")
-  local snacks_cache = (ok and type(cache_dir) == "string" and cache_dir ~= "") and (cache_dir .. "/snacks/image/")
-    or vim.fn.expand("~/.cache/nvim/snacks/image/")
+  local snacks_cache = (ok and type(cache_dir) == "string" and cache_dir ~= "") and (cache_dir .. "/snacks/image")
+    or vim.fn.expand("~/.cache/nvim/snacks/image")
   if vim.fn.isdirectory(snacks_cache) == 0 then
-    local fallback = vim.fn.expand("~/.cache/nvim/snacks/image/")
+    local fallback = vim.fn.expand("~/.cache/nvim/snacks/image")
     if vim.fn.isdirectory(fallback) == 1 then
       snacks_cache = fallback
     end
   end
-  local pattern = "%f[%d]" .. post_id .. "%f[%D]"
-  for _, f in ipairs(vim.fn.glob(snacks_cache .. "*", false, true)) do
-    if f:find(pattern) then
-      vim.fn.delete(f)
+  return snacks_cache
+end
+
+function M.find_snacks_cache_candidates(target)
+  if not target or target == "" or tostring(target) == "nil" then
+    return {}
+  end
+  local snacks_cache = M.get_snacks_cache_dir()
+  if vim.fn.isdirectory(snacks_cache) ~= 1 then
+    return {}
+  end
+
+  local str_target = tostring(target)
+  local candidate_files = {}
+  local seen = {}
+  local function add_cand(f)
+    if f and f ~= "" and not seen[f] then
+      seen[f] = true
+      table.insert(candidate_files, f)
     end
   end
-  local config_cache = config.options.cache_dir
-  local vthumb = string.format("%s/vthumb_%s.jpg", config_cache, tostring(post_id))
-  if vim.fn.filereadable(vthumb) == 1 then
-    pcall(vim.fn.delete, vthumb)
+
+  local is_url = str_target:match("^https?://") ~= nil
+  local is_path = not is_url and (str_target:find("/") ~= nil or vim.fn.filereadable(str_target) == 1)
+
+  if is_url then
+    local clean_url = str_target:match("^([^?#]+)") or str_target
+    local fname = clean_url:match("([^/]+)$") or clean_url
+    local base = vim.fn.fnamemodify(fname, ":r")
+    local sanitized_base = base:gsub("[^%w%.]+", "-")
+    local bases = { base }
+    if sanitized_base ~= base then
+      table.insert(bases, sanitized_base)
+    end
+
+    local ok_sha, hash = pcall(vim.fn.sha256, clean_url .. "0")
+    if ok_sha and hash then
+      local h8 = hash:sub(1, 8)
+      for _, b in ipairs(bases) do
+        local prefix = h8 .. "-" .. b
+        for _, f in ipairs(vim.fn.glob(snacks_cache .. "/" .. prefix .. "*", false, true)) do
+          add_cand(f)
+        end
+      end
+    end
+    for _, b in ipairs(bases) do
+      for _, f in ipairs(vim.fn.glob(snacks_cache .. "/*-" .. b .. ".*", false, true)) do
+        add_cand(f)
+      end
+      for _, f in ipairs(vim.fn.glob(snacks_cache .. "/*-" .. b .. "-*.*", false, true)) do
+        add_cand(f)
+      end
+      for _, f in ipairs(vim.fn.glob(snacks_cache .. "/*" .. b .. "*", false, true)) do
+        add_cand(f)
+      end
+    end
+  elseif is_path then
+    local norm_src = vim.fs.normalize(vim.fn.fnamemodify(str_target, ":p"))
+    local base = vim.fn.fnamemodify(norm_src, ":t:r")
+    local sanitized_base = base:gsub("[^%w%.]+", "-")
+    local bases = { base }
+    if sanitized_base ~= base then
+      table.insert(bases, sanitized_base)
+    end
+
+    local ok_sha, hash = pcall(vim.fn.sha256, norm_src .. "0")
+    if ok_sha and hash then
+      local h8 = hash:sub(1, 8)
+      for _, b in ipairs(bases) do
+        local prefix = h8 .. "-" .. b
+        for _, f in ipairs(vim.fn.glob(snacks_cache .. "/" .. prefix .. "*", false, true)) do
+          add_cand(f)
+        end
+      end
+    end
+    for _, b in ipairs(bases) do
+      for _, f in ipairs(vim.fn.glob(snacks_cache .. "/*-" .. b .. ".*", false, true)) do
+        add_cand(f)
+      end
+      for _, f in ipairs(vim.fn.glob(snacks_cache .. "/*-" .. b .. "-*.*", false, true)) do
+        add_cand(f)
+      end
+    end
+  else
+    local base = vim.fn.fnamemodify(str_target, ":t:r")
+    local sanitized_base = base:gsub("[^%w%.]+", "-")
+    local bases = { base }
+    if sanitized_base ~= base then
+      table.insert(bases, sanitized_base)
+    end
+
+    if str_target:match("^%d+$") then
+      local pattern = "%f[%d]" .. str_target .. "%f[%D]"
+      for _, f in ipairs(vim.fn.glob(snacks_cache .. "/*", false, true)) do
+        if f:find(pattern) then
+          add_cand(f)
+        end
+      end
+    else
+      for _, b in ipairs(bases) do
+        for _, f in ipairs(vim.fn.glob(snacks_cache .. "/*-" .. b .. ".*", false, true)) do
+          add_cand(f)
+        end
+        for _, f in ipairs(vim.fn.glob(snacks_cache .. "/*" .. b .. "*", false, true)) do
+          add_cand(f)
+        end
+      end
+    end
   end
+
+  return candidate_files
+end
+
+function M.clean_corrupt_snacks_cache(target)
+  if not target or target == "" or tostring(target) == "nil" then
+    return
+  end
+  local candidate_files = M.find_snacks_cache_candidates(target)
+  for _, f in ipairs(candidate_files) do
+    if vim.fn.filereadable(f) == 1 then
+      local size = vim.fn.getfsize(f) or 0
+      local is_corrupt = false
+      if size <= 0 then
+        is_corrupt = true
+      elseif f:match("%.info$") then
+        local lines = vim.fn.readfile(f)
+        local content = vim.trim(table.concat(lines or {}, " ")):lower()
+        if content == ""
+          or content:find("identify:")
+          or content:find("improper image header")
+          or content:find("error")
+          or content:find("failed")
+          or content:find("corrupt") then
+          is_corrupt = true
+        end
+      else
+        local fd = io.open(f, "rb")
+        if fd then
+          local head = fd:read(64) or ""
+          fd:close()
+          local lhead = head:lower()
+          if lhead:find("identify:")
+            or lhead:find("improper")
+            or lhead:find("<!doctype")
+            or lhead:find("<html") then
+            is_corrupt = true
+          end
+        end
+
+        if not is_corrupt then
+          local w, h = util.read_image_dimensions(f)
+          if not (w and h and w > 0 and h > 0) then
+            is_corrupt = true
+          end
+        end
+
+        local info_file = f .. ".info"
+        if not is_corrupt and vim.fn.filereadable(info_file) == 1 then
+          local isz = vim.fn.getfsize(info_file) or 0
+          if isz <= 0 then
+            is_corrupt = true
+          else
+            local lines = vim.fn.readfile(info_file)
+            local content = vim.trim(table.concat(lines or {}, " ")):lower()
+            if content == ""
+              or content:find("identify:")
+              or content:find("improper image header")
+              or content:find("error")
+              or content:find("failed")
+              or content:find("corrupt") then
+              is_corrupt = true
+            end
+          end
+        end
+      end
+
+      if is_corrupt then
+        pcall(vim.fn.delete, f)
+        if not f:match("%.info$") then
+          local info_file = f .. ".info"
+          if vim.fn.filereadable(info_file) == 1 then
+            pcall(vim.fn.delete, info_file)
+          end
+        else
+          local img_file = f:gsub("%.info$", "")
+          if vim.fn.filereadable(img_file) == 1 then
+            local isz = vim.fn.getfsize(img_file) or 0
+            if isz <= 0 then
+              pcall(vim.fn.delete, img_file)
+            else
+              local iw, ih = util.read_image_dimensions(img_file)
+              if not (iw and ih and iw > 0 and ih > 0) then
+                pcall(vim.fn.delete, img_file)
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+function M.clear_snacks_cache_for(post_id_or_path)
+  if not post_id_or_path or tostring(post_id_or_path) == "" or tostring(post_id_or_path) == "nil" then
+    return
+  end
+  local candidate_files = M.find_snacks_cache_candidates(post_id_or_path)
+  for _, f in ipairs(candidate_files) do
+    pcall(vim.fn.delete, f)
+  end
+
+  local str_target = tostring(post_id_or_path)
+  local num_id = str_target:match("(%d+)")
+  if num_id then
+    local config_cache = config.options.cache_dir
+    local vthumb = string.format("%s/vthumb_%s.jpg", config_cache, num_id)
+    if vim.fn.filereadable(vthumb) == 1 then
+      pcall(vim.fn.delete, vthumb)
+    end
+  end
+
+  M.clean_corrupt_snacks_cache(post_id_or_path)
 end
 
 function M.sanitize_dpi(img)
@@ -658,10 +981,9 @@ function M.render_image(win, path)
     return true
   end
 
-  -- New image: create a fresh placement with auto_resize so snacks wires its
-  -- own WinResized handler and recomputes dimensions automatically. We do NOT
-  -- pass max_width/max_height — the window itself is the constraint and snacks
-  -- reads its live dimensions on every update().
+  -- Purge any 0-byte or corrupted cache entries before attempting to render
+  M.clean_corrupt_snacks_cache(path)
+
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].modifiable = false

@@ -559,3 +559,327 @@ describe("image: ffmpeg process management & rapid cycling (Issue 13)", function
     assert.are.equal(0, vim.tbl_count(image.active_ffmpeg_handles))
   end)
 end)
+
+describe("image: self-healing cache lifecycle & in-flight conversion abort cleanup (Ticket 02)", function()
+  local sandbox_root
+  local sandbox_snacks_cache
+  local sandbox_config_cache
+  local orig_cache_dir
+  local orig_snacks_override
+
+  before_each(function()
+    sandbox_root = vim.fn.tempname()
+    sandbox_snacks_cache = sandbox_root .. "/snacks/image"
+    sandbox_config_cache = sandbox_root .. "/gelbooru_cache"
+    vim.fn.mkdir(sandbox_snacks_cache, "p")
+    vim.fn.mkdir(sandbox_config_cache, "p")
+
+    orig_cache_dir = config.options.cache_dir
+    config.options.cache_dir = sandbox_config_cache
+
+    orig_snacks_override = image._snacks_cache_dir
+    image._snacks_cache_dir = sandbox_snacks_cache
+  end)
+
+  after_each(function()
+    config.options.cache_dir = orig_cache_dir
+    image._snacks_cache_dir = orig_snacks_override
+    if sandbox_root and vim.fn.isdirectory(sandbox_root) == 1 then
+      vim.fn.delete(sandbox_root, "rf")
+    end
+  end)
+
+  it("get_snacks_cache_dir returns isolated sandbox directory when set", function()
+    assert.are.equal(sandbox_snacks_cache, image.get_snacks_cache_dir())
+  end)
+
+  it("abort_convert(placement) unlinks partial 0-byte step files on disk when aborted mid-flight", function()
+    local step1_file = sandbox_root .. "/step1_incomplete.png"
+    local step1_info = step1_file .. ".info"
+    local step2_file = sandbox_root .. "/step2_complete.png"
+
+    -- step1 is 0 bytes (interrupted mid-flight)
+    vim.fn.writefile({}, step1_file)
+    vim.fn.writefile({}, step1_info)
+    assert.are.equal(1, vim.fn.filereadable(step1_file))
+    assert.are.equal(1, vim.fn.filereadable(step1_info))
+
+    -- step2 has valid content (>0 bytes)
+    vim.fn.writefile({ "complete data payload" }, step2_file)
+    assert.are.equal(1, vim.fn.filereadable(step2_file))
+
+    local abort_called = false
+    local mock_placement = {
+      img = {
+        _convert = {
+          abort = function(self)
+            self.aborted = true
+            abort_called = true
+          end,
+          steps = {
+            { file = step1_file },
+            { file = step2_file },
+          },
+        },
+      },
+    }
+
+    image.abort_convert(mock_placement)
+
+    assert.is_true(abort_called)
+    -- 0-byte step files must be unlinked
+    assert.are.equal(0, vim.fn.filereadable(step1_file))
+    assert.are.equal(0, vim.fn.filereadable(step1_info))
+    -- Valid completed step files must be preserved
+    assert.are.equal(1, vim.fn.filereadable(step2_file))
+
+    -- Safe no-op on nil / empty placement
+    assert.has_no.errors(function()
+      image.abort_convert(nil)
+      image.abort_convert({})
+      image.abort_convert({ img = {} })
+      image.abort_convert({ img = { _convert = {} } })
+    end)
+  end)
+
+  it("abort_convert unlinks partial file associated with the in-flight aborted step", function()
+    local step_file = sandbox_snacks_cache .. "/test_inflight_step.png"
+    local step_info = step_file .. ".info"
+    local comp_file = sandbox_snacks_cache .. "/test_completed_step.png"
+
+    vim.fn.writefile({ "partial truncated byte stream" }, step_file)
+    vim.fn.writefile({ "info stream" }, step_info)
+    vim.fn.writefile({ "completed step data" }, comp_file)
+
+    local aborted = false
+    local mock_placement = {
+      img = {
+        _convert = {
+          _step = 1,
+          abort = function(self)
+            aborted = true
+          end,
+          steps = {
+            { file = step_file, done = false },
+            { file = comp_file, done = true },
+          },
+        },
+      },
+    }
+
+    image.abort_convert(mock_placement)
+    assert.is_true(aborted)
+    -- In-flight step file and info should be unlinked
+    assert.are.equal(0, vim.fn.filereadable(step_file))
+    assert.are.equal(0, vim.fn.filereadable(step_info))
+    -- Completed step file should remain preserved
+    assert.are.equal(1, vim.fn.filereadable(comp_file))
+  end)
+
+  it("clean_corrupt_snacks_cache(target) detects and unlinks 0-byte or corrupted cache files for the target", function()
+    local target_path = "/media/artwork/character_portrait.png"
+    local norm = vim.fs.normalize(vim.fn.fnamemodify(target_path, ":p"))
+    local base = "character_portrait"
+    local prefix = vim.fn.sha256(norm .. "0"):sub(1, 8) .. "-" .. base
+
+    -- Create 0-byte cache file for target
+    local f_zero_png = sandbox_snacks_cache .. "/" .. prefix .. ".png"
+    vim.fn.writefile({}, f_zero_png)
+    assert.are.equal(1, vim.fn.filereadable(f_zero_png))
+
+    -- Create 0-byte .info file for target
+    local f_zero_info = sandbox_snacks_cache .. "/" .. prefix .. ".png.info"
+    vim.fn.writefile({}, f_zero_info)
+    assert.are.equal(1, vim.fn.filereadable(f_zero_info))
+
+    -- Create valid non-empty cache file for target (valid PNG bytes)
+    local f_valid_png = sandbox_snacks_cache .. "/" .. prefix .. "_sample.png"
+    local valid_png_bytes = string.char(137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13)
+      .. "IHDR"
+      .. string.char(0, 0, 0, 10, 0, 0, 0, 10, 8, 2, 0, 0, 0, 0, 0, 0, 0)
+    local fd = io.open(f_valid_png, "wb")
+    assert.is_truthy(fd)
+    fd:write(valid_png_bytes)
+    fd:close()
+    assert.are.equal(1, vim.fn.filereadable(f_valid_png))
+
+    -- Create truncated/corrupt cache file for target (>0 bytes but unparseable image dimensions)
+    local f_corrupt_png = sandbox_snacks_cache .. "/" .. prefix .. "_corrupt.png"
+    local f_corrupt_info = f_corrupt_png .. ".info"
+    vim.fn.writefile({ "incomplete-truncated-image-header" }, f_corrupt_png)
+    vim.fn.writefile({ "format png 0x0" }, f_corrupt_info)
+    assert.are.equal(1, vim.fn.filereadable(f_corrupt_png))
+    assert.are.equal(1, vim.fn.filereadable(f_corrupt_info))
+
+    -- Create 0-byte cache file for an UNRELATED target (must not be unlinked by targeted clean)
+    local f_unrelated = sandbox_snacks_cache .. "/99887766-unrelated_post.png"
+    vim.fn.writefile({}, f_unrelated)
+    assert.are.equal(1, vim.fn.filereadable(f_unrelated))
+
+    -- Invoke targeted clean
+    image.clean_corrupt_snacks_cache(target_path)
+
+    -- Corrupted 0-byte cache files for target are unlinked
+    assert.are.equal(0, vim.fn.filereadable(f_zero_png))
+    assert.are.equal(0, vim.fn.filereadable(f_zero_info))
+
+    -- Truncated/corrupted image file and its companion .info are unlinked
+    assert.are.equal(0, vim.fn.filereadable(f_corrupt_png))
+    assert.are.equal(0, vim.fn.filereadable(f_corrupt_info))
+
+    -- Valid cache file for target is preserved
+    assert.are.equal(1, vim.fn.filereadable(f_valid_png))
+
+    -- Unrelated cache file remains untouched
+    assert.are.equal(1, vim.fn.filereadable(f_unrelated))
+  end)
+
+  it("clean_corrupt_snacks_cache unlinks corrupted .info text files containing error messages", function()
+    local target_path = "/media/artwork/corrupt_header.jpg"
+    local norm = vim.fs.normalize(vim.fn.fnamemodify(target_path, ":p"))
+    local base = "corrupt_header"
+    local prefix = vim.fn.sha256(norm .. "0"):sub(1, 8) .. "-" .. base
+
+    local f_bad_info = sandbox_snacks_cache .. "/" .. prefix .. ".info"
+    vim.fn.writefile({ "identify: improper image header", "convert: corrupt file" }, f_bad_info)
+    assert.are.equal(1, vim.fn.filereadable(f_bad_info))
+
+    image.clean_corrupt_snacks_cache(target_path)
+
+    assert.are.equal(0, vim.fn.filereadable(f_bad_info))
+  end)
+
+  it("clear_snacks_cache_for invalidates cache by numeric post ID and calls clean_corrupt_snacks_cache", function()
+    local post_id = "54321"
+    local f_cache = sandbox_snacks_cache .. "/12345678-prev_" .. post_id .. ".png"
+    local vthumb = sandbox_config_cache .. "/vthumb_" .. post_id .. ".jpg"
+
+    vim.fn.writefile({ "some cache data" }, f_cache)
+    vim.fn.writefile({ "thumb data" }, vthumb)
+
+    assert.are.equal(1, vim.fn.filereadable(f_cache))
+    assert.are.equal(1, vim.fn.filereadable(vthumb))
+
+    image.clear_snacks_cache_for(post_id)
+
+    assert.are.equal(0, vim.fn.filereadable(f_cache))
+    assert.are.equal(0, vim.fn.filereadable(vthumb))
+  end)
+
+  it("clear_snacks_cache_for invalidates cache by local file path and basename", function()
+    local full_path = "/storage/images/my_favorite_art.png"
+    local base = "my_favorite_art"
+    local f_cache1 = sandbox_snacks_cache .. "/87654321-" .. base .. ".png"
+    local f_cache2 = sandbox_snacks_cache .. "/87654321-" .. base .. ".png.info"
+
+    -- Test by full path
+    vim.fn.writefile({ "cache payload" }, f_cache1)
+    vim.fn.writefile({ "info payload" }, f_cache2)
+    assert.are.equal(1, vim.fn.filereadable(f_cache1))
+    assert.are.equal(1, vim.fn.filereadable(f_cache2))
+
+    image.clear_snacks_cache_for(full_path)
+
+    assert.are.equal(0, vim.fn.filereadable(f_cache1))
+    assert.are.equal(0, vim.fn.filereadable(f_cache2))
+
+    -- Test by basename
+    local f_cache3 = sandbox_snacks_cache .. "/abcdef12-" .. base .. ".png"
+    vim.fn.writefile({ "cache payload 3" }, f_cache3)
+    assert.are.equal(1, vim.fn.filereadable(f_cache3))
+
+    image.clear_snacks_cache_for("my_favorite_art.png")
+
+    assert.are.equal(0, vim.fn.filereadable(f_cache3))
+
+    -- Safe no-op for nil, empty, and 'nil'
+    assert.has_no.errors(function()
+      image.clear_snacks_cache_for(nil)
+      image.clear_snacks_cache_for("")
+      image.clear_snacks_cache_for("nil")
+    end)
+  end)
+
+  it("handles remote HTTP/HTTPS URLs without prepending cwd", function()
+    local url = "https://img.gelbooru.com/samples/ab/cd/sample_99999.jpg?12345"
+    local base = "sample_99999"
+    local clean_url = "https://img.gelbooru.com/samples/ab/cd/sample_99999.jpg"
+    local prefix = vim.fn.sha256(clean_url .. "0"):sub(1, 8) .. "-" .. base
+    local f_cache = sandbox_snacks_cache .. "/" .. prefix .. ".png"
+    local f_info = f_cache .. ".info"
+
+    vim.fn.writefile({}, f_cache)
+    vim.fn.writefile({}, f_info)
+    assert.are.equal(1, vim.fn.filereadable(f_cache))
+    assert.are.equal(1, vim.fn.filereadable(f_info))
+
+    -- clean_corrupt_snacks_cache should find and clean 0-byte cache files for the remote URL
+    image.clean_corrupt_snacks_cache(url)
+    assert.are.equal(0, vim.fn.filereadable(f_cache))
+    assert.are.equal(0, vim.fn.filereadable(f_info))
+
+    -- clear_snacks_cache_for should also find and delete cache files for remote URL
+    local f_cache2 = sandbox_snacks_cache .. "/" .. prefix .. "-scaled.png"
+    vim.fn.writefile({ "some data" }, f_cache2)
+    assert.are.equal(1, vim.fn.filereadable(f_cache2))
+    image.clear_snacks_cache_for(url)
+    assert.are.equal(0, vim.fn.filereadable(f_cache2))
+  end)
+
+  it("find_snacks_cache_candidates resolves candidate files across formats without duplication", function()
+    local full_path = "/storage/images/my_art_test.png"
+    local base = "my_art_test"
+    local f_cand1 = sandbox_snacks_cache .. "/11223344-" .. base .. ".png"
+    local f_cand2 = sandbox_snacks_cache .. "/11223344-" .. base .. ".png.info"
+    vim.fn.writefile({ "cand1" }, f_cand1)
+    vim.fn.writefile({ "cand2" }, f_cand2)
+
+    local cands = image.find_snacks_cache_candidates(full_path)
+    assert.is_table(cands)
+    assert.is_true(#cands >= 2)
+
+    -- Cleanup
+    vim.fn.delete(f_cand1)
+    vim.fn.delete(f_cand2)
+  end)
+end)
+
+describe("image.resolve_post_dimensions", function()
+  it("returns nil, nil for nil or missing post", function()
+    local w, h = image.resolve_post_dimensions(nil)
+    assert.is_nil(w)
+    assert.is_nil(h)
+  end)
+
+  it("returns cached dimensions immediately if p.width and p.height > 0", function()
+    local p = { width = 1920, height = 1080 }
+    local w, h = image.resolve_post_dimensions(p)
+    assert.are.equal(1920, w)
+    assert.are.equal(1080, h)
+  end)
+
+  it("lazily resolves dimensions from valid image file and caches on post object", function()
+    local tmp_png = vim.fn.tempname() .. ".png"
+    local sig = string.char(137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13)
+      .. "IHDR"
+      .. string.char(0, 0, 1, 0, 0, 0, 0, 128, 8, 2, 0, 0, 0, 0, 0, 0, 0) -- 256 x 128
+    local fd = io.open(tmp_png, "wb")
+    assert.is_truthy(fd)
+    fd:write(sig)
+    fd:close()
+
+    local p = { file_url = tmp_png }
+    local w, h = image.resolve_post_dimensions(p)
+    assert.are.equal(256, w)
+    assert.are.equal(128, h)
+    assert.are.equal(256, p.width)
+    assert.are.equal(128, p.height)
+
+    -- Cleans up file; subsequent call returns cached values
+    vim.fn.delete(tmp_png)
+    local w2, h2 = image.resolve_post_dimensions(p)
+    assert.are.equal(256, w2)
+    assert.are.equal(128, h2)
+  end)
+end)
+

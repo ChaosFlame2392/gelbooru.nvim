@@ -97,6 +97,9 @@ end
 M.delete_current = function(...)
   return render.delete_current(...)
 end
+M.resolve_post_dimensions = function(...)
+  return image.resolve_post_dimensions(...)
+end
 
 -- Keymaps & Action Handlers
 M.on_cursor_change = function(...)

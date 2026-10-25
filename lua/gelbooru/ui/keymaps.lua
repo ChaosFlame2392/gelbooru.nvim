@@ -76,6 +76,9 @@ function M.force_refresh()
     end
     p._metadata_fetched = nil
   end
+  if p and (p.id or p.file_url) then
+    image.clear_snacks_cache_for(p.id or p.file_url)
+  end
   pcall(function()
     require("gelbooru.net.api").clear_session_cache()
   end)

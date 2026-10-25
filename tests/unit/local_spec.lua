@@ -2782,6 +2782,72 @@ describe("Multi-Stage Piped Sorting Pipeline (parse_pipeline & execute_pipeline)
       assert.are.equal("11802758", scan_mod.extract_post_id("11802758.jpg"))
       assert.are.equal("11802758", scan_mod.extract_post_id("11802758 - tag.jpg"))
     end)
+
+    describe("Strict Booru ID Disambiguation & Pixiv Filename Filtering", function()
+      local constants = require("gelbooru.core.constants")
+
+      it("centralizes GELBOORU_ID_CEILING constant", function()
+        assert.is_not_nil(constants.GELBOORU_ID_CEILING)
+        assert.are.equal(25000000, constants.GELBOORU_ID_CEILING)
+      end)
+
+      it("discards Pixiv filenames with _p%d+ convention", function()
+        assert.is_nil(scan_mod.extract_post_id("131102272_p0.jpg"))
+        assert.is_nil(scan_mod.extract_post_id("140506898_p1.png"))
+        assert.is_nil(scan_mod.extract_post_id("11802758_p0.jpg"))
+        assert.is_nil(scan_mod.extract_post_id("131102272_p0_master1200.jpg"))
+        assert.is_nil(scan_mod.extract_post_id("illust_123456_p0.jpg"))
+        assert.is_nil(scan_mod.extract_post_id("sample_p12.png"))
+      end)
+
+      it("rejects bare numeric IDs exceeding GELBOORU_ID_CEILING", function()
+        assert.is_nil(scan_mod.extract_post_id("25000001.jpg"))
+        assert.is_nil(scan_mod.extract_post_id("99999999.png"))
+        assert.is_nil(scan_mod.extract_post_id("131102272.jpg"))
+        assert.is_nil(scan_mod.extract_post_id("25000001_tag.jpg"))
+        assert.is_nil(scan_mod.extract_post_id("99999999 - tag.jpg"))
+      end)
+
+      it("preserves valid IDs between 10000 and GELBOORU_ID_CEILING (25000000)", function()
+        assert.are.equal("10000", scan_mod.extract_post_id("10000.jpg"))
+        assert.are.equal("10001", scan_mod.extract_post_id("10001_tag.png"))
+        assert.are.equal("11802758", scan_mod.extract_post_id("11802758.jpg"))
+        assert.are.equal("11802758", scan_mod.extract_post_id("11802758_hatsune_miku.jpg"))
+        assert.are.equal("25000000", scan_mod.extract_post_id("25000000.png"))
+        assert.are.equal("25000000", scan_mod.extract_post_id("25000000_sample.jpg"))
+      end)
+
+      it("preserves explicit booru prefixes (post_, id_, ID, gelbooru_) even when exceeding ceiling", function()
+        assert.are.equal("99999999", scan_mod.extract_post_id("gelbooru_99999999.jpg"))
+        assert.are.equal("99999999", scan_mod.extract_post_id("Gelbooru-99999999.png"))
+        assert.are.equal("99999999", scan_mod.extract_post_id("post_99999999.jpg"))
+        assert.are.equal("99999999", scan_mod.extract_post_id("Post 99999999.jpg"))
+        assert.are.equal("99999999", scan_mod.extract_post_id("id_99999999.jpg"))
+        assert.are.equal("99999999", scan_mod.extract_post_id("ID99999999.png"))
+        assert.are.equal("30000000", scan_mod.extract_post_id("gelbooru_30000000.jpg"))
+      end)
+
+      it("scan_local_folder assigns nil id to Pixiv and over-ceiling bare files while extracting valid IDs", function()
+        vim.fn.writefile({ "dummy" }, tmp_scan_dir .. "/131102272_p0.jpg")
+        vim.fn.writefile({ "dummy" }, tmp_scan_dir .. "/140506898_p1.png")
+        vim.fn.writefile({ "dummy" }, tmp_scan_dir .. "/99999999.jpg")
+        vim.fn.writefile({ "dummy" }, tmp_scan_dir .. "/11802758.jpg")
+        vim.fn.writefile({ "dummy" }, tmp_scan_dir .. "/post_99999999.jpg")
+
+        local posts = scan_mod.scan_local_folder(tmp_scan_dir)
+        local post_map = {}
+        for _, p in ipairs(posts) do
+          local name = vim.fn.fnamemodify(p.file_url, ":t")
+          post_map[name] = p
+        end
+
+        assert.is_nil(post_map["131102272_p0.jpg"].id)
+        assert.is_nil(post_map["140506898_p1.png"].id)
+        assert.is_nil(post_map["99999999.jpg"].id)
+        assert.are.equal("11802758", post_map["11802758.jpg"].id)
+        assert.are.equal("99999999", post_map["post_99999999.jpg"].id)
+      end)
+    end)
   end)
 end)
 

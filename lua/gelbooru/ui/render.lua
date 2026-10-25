@@ -37,6 +37,8 @@ function M.set_status(msg, reset_ms)
   end
 end
 
+M.resolve_post_dimensions = image.resolve_post_dimensions
+
 function M.render_list()
   local State = state.State
   local UI = state.UI
@@ -47,6 +49,9 @@ function M.render_list()
   local_index.update_saved_index()
 
   for i, p in ipairs(State.posts) do
+    if i == State.cur and (not p.width or p.width <= 0) then
+      image.resolve_post_dimensions(p)
+    end
     local prefix = (i == State.cur) and "▶ " or "  "
     local r = (p.rating or "?"):sub(1, 1):upper()
     local score = tostring(p.score or 0)
@@ -113,8 +118,8 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
   local is_saved = image.is_in_save_dir(dest)
 
   if image.is_video_post(p) then
-    if force_download and p.id then
-      image.clear_snacks_cache_for(p.id)
+    if force_download and (p.id or p.file_url) then
+      image.clear_snacks_cache_for(p.id or p.file_url)
     end
     local thumb_path = image.get_video_thumbnail_path(p.file_url, p.id)
     if not force_download and vim.fn.filereadable(thumb_path) == 1 and (vim.fn.getfsize(thumb_path) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES then
@@ -234,12 +239,20 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
       else
         fail_preview("Image Conversion Failed - File may be corrupted or unsupported", p)
       end
+    else
+      if not p.width or p.width <= 0 then
+        local w, h = image.resolve_post_dimensions(p, dest)
+        if w and h then
+          M.render_metadata(p)
+          M.render_list()
+        end
+      end
     end
   end
 
   if p.is_local or is_saved then
-    if force_download and p.id then
-      image.clear_snacks_cache_for(p.id)
+    if force_download and (p.id or p.file_url) then
+      image.clear_snacks_cache_for(p.id or p.file_url)
     end
     do_render()
     return
@@ -250,7 +263,7 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
     if not download.is_valid_media(dest) then
       log("WARN", "PREVIEW", "Cached preview file corrupted on disk, deleting and re-fetching: %s", dest)
       vim.fn.delete(dest)
-      image.clear_snacks_cache_for(p.id)
+      image.clear_snacks_cache_for(p.id or dest or p.file_url)
       force_download = true
     end
   end
@@ -258,7 +271,7 @@ function M.load_and_render_image(p, url_idx, retry_count, force_download)
   if not p.is_local and not is_saved and (vim.fn.filereadable(dest) == 0 or force_download) then
     if force_download and vim.fn.filereadable(dest) == 1 then
       vim.fn.delete(dest)
-      image.clear_snacks_cache_for(p.id)
+      image.clear_snacks_cache_for(p.id or dest or p.file_url)
     end
     M.set_status("Downloading preview…")
     if not preview_url or not preview_url:match("^https?://") then
@@ -318,6 +331,8 @@ function M.render_metadata(p)
     return
   end
 
+  image.resolve_post_dimensions(p)
+
   local ext_info = image.file_ext_from_url(p.file_url)
   local is_vid = image.is_video_post(p)
   local meta = {
@@ -369,6 +384,12 @@ function M.render_preview(force_download)
       or (#State.posts == 0 and "  No posts found" or "  No post selected")
     image.reset_canvas(no_img_msg)
     return
+  end
+
+  local had_dims = (p.width and p.height and p.width > 0 and p.height > 0)
+  image.resolve_post_dimensions(p)
+  if not had_dims and (p.width and p.width > 0) then
+    M.render_list()
   end
 
   local item_key = p.is_local and p.file_url or p.id

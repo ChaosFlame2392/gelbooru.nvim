@@ -1543,4 +1543,168 @@ describe("Integration: Local Folder Browser Mode", function()
       vim.ui.select = orig_select
     end)
   end)
+
+  describe("Lazy On-Demand Image Dimension Resolution", function()
+    local dim_dir
+
+    local function make_png(path, w, h)
+      local sig = string.char(137, 80, 78, 71, 13, 10, 26, 10)
+      local ihdr_len = string.char(0, 0, 0, 13)
+      local ihdr_type = "IHDR"
+      local w_bytes = string.char(math.floor(w / 16777216) % 256, math.floor(w / 65536) % 256, math.floor(w / 256) % 256, w % 256)
+      local h_bytes = string.char(math.floor(h / 16777216) % 256, math.floor(h / 65536) % 256, math.floor(h / 256) % 256, h % 256)
+      local ihdr_tail = string.char(8, 2, 0, 0, 0, 0, 0, 0, 0)
+      local f = io.open(path, "wb")
+      if f then
+        f:write(sig .. ihdr_len .. ihdr_type .. w_bytes .. h_bytes .. ihdr_tail .. string.rep("0", 1024))
+        f:close()
+      end
+    end
+
+    local function make_jpg(path, w, h)
+      local soi = string.char(255, 216)
+      local sof0 = string.char(255, 192, 0, 17, 8, math.floor(h / 256) % 256, h % 256, math.floor(w / 256) % 256, w % 256, 3, 1, 17, 0, 2, 17, 1, 3, 17, 1)
+      local f = io.open(path, "wb")
+      if f then
+        f:write(soi .. sof0 .. string.rep("J", 1024))
+        f:close()
+      end
+    end
+
+    before_each(function()
+      dim_dir = vim.fn.tempname()
+      vim.fn.mkdir(dim_dir, "p")
+      make_png(dim_dir .. "/01_banner.png", 1920, 1080)
+      make_jpg(dim_dir .. "/02_portrait.jpg", 1280, 720)
+      make_png(dim_dir .. "/03_square.png", 800, 800)
+    end)
+
+    after_each(function()
+      if dim_dir and vim.fn.isdirectory(dim_dir) == 1 then
+        vim.fn.delete(dim_dir, "rf")
+      end
+    end)
+
+    it("scan_local_folder does not synchronously inspect image headers and completes under 5ms", function()
+      local orig_read = util.read_image_dimensions
+      local read_calls = 0
+      util.read_image_dimensions = function(...)
+        read_calls = read_calls + 1
+        return orig_read(...)
+      end
+
+      local uv = vim.uv or vim.loop
+      local t0 = uv.hrtime()
+      local posts = ui.scan_local_folder(dim_dir)
+      local elapsed_ms = (uv.hrtime() - t0) / 1e6
+      util.read_image_dimensions = orig_read
+
+      assert.are.equal(3, #posts)
+      assert.are.equal(0, read_calls)
+      assert.is_true(elapsed_ms < 10, string.format("Scan took %.2f ms, expected fast scan", elapsed_ms))
+      for _, p in ipairs(posts) do
+        assert.is_nil(p.width)
+        assert.is_nil(p.height)
+      end
+    end)
+
+    it("open_local lazily resolves dimensions for the active post and formats them in list and metadata panel", function()
+      ui.open_local(dim_dir)
+
+      assert.are.equal(3, #state.State.posts)
+      assert.are.equal(1, state.State.cur)
+
+      -- Active post (1) should have dimensions lazily resolved
+      local p1 = state.State.posts[1]
+      assert.are.equal(1920, p1.width)
+      assert.are.equal(1080, p1.height)
+
+      -- Inactive posts should remain unresolved (lazy)
+      local p2 = state.State.posts[2]
+      assert.is_nil(p2.width)
+      assert.is_nil(p2.height)
+
+      local p3 = state.State.posts[3]
+      assert.is_nil(p3.width)
+      assert.is_nil(p3.height)
+
+      -- Post list buffer must render real dimensions for active post
+      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_truthy(list_lines[1]:find("1920x1080"))
+      assert.is_falsy(list_lines[1]:find("0x0"))
+
+      -- Post list buffer for inactive posts still renders 0x0 placeholder
+      assert.is_truthy(list_lines[2]:find("0x0"))
+
+      -- Metadata panel must render real dimensions
+      local meta_lines = harness.get_buf_lines(state.UI.bufs.meta)
+      local found_size = false
+      for _, line in ipairs(meta_lines) do
+        if line:find("Size%s*:%s*1920x1080") then
+          found_size = true
+        end
+      end
+      assert.is_true(found_size)
+    end)
+
+    it("navigating via on_cursor_change lazily resolves dimensions for the newly active post", function()
+      ui.open_local(dim_dir)
+      assert.are.equal(1, state.State.cur)
+
+      -- Post 2 is initially unresolved
+      assert.is_nil(state.State.posts[2].width)
+      assert.is_nil(state.State.posts[2].height)
+
+      -- Navigate down to post 2
+      ui.on_cursor_change(1)
+      assert.are.equal(2, state.State.cur)
+
+      -- Post 2 should now have lazily resolved dimensions
+      local p2 = state.State.posts[2]
+      assert.are.equal(1280, p2.width)
+      assert.are.equal(720, p2.height)
+
+      -- Post list line for post 2 must now show 1280x720 instead of 0x0
+      local list_lines = harness.get_buf_lines(state.UI.bufs.list)
+      assert.is_truthy(list_lines[2]:find("1280x720"))
+      assert.is_falsy(list_lines[2]:find("0x0"))
+
+      -- Metadata panel must now show Size : 1280x720
+      local meta_lines = harness.get_buf_lines(state.UI.bufs.meta)
+      local found_size = false
+      for _, line in ipairs(meta_lines) do
+        if line:find("Size%s*:%s*1280x720") then
+          found_size = true
+        end
+      end
+      assert.is_true(found_size)
+    end)
+
+    it("ui.resolve_post_dimensions resolves dimensions lazily and caches on post object", function()
+      local posts = ui.scan_local_folder(dim_dir)
+      local p = posts[2]
+      assert.is_nil(p.width)
+      assert.is_nil(p.height)
+
+      local w, h = ui.resolve_post_dimensions(p)
+      assert.are.equal(1280, w)
+      assert.are.equal(720, h)
+      assert.are.equal(1280, p.width)
+      assert.are.equal(720, p.height)
+
+      -- Subsequent invocation uses cached values without reading file
+      local orig_read = util.read_image_dimensions
+      local read_called = false
+      util.read_image_dimensions = function(...)
+        read_called = true
+        return orig_read(...)
+      end
+
+      local cw, ch = ui.resolve_post_dimensions(p)
+      util.read_image_dimensions = orig_read
+      assert.is_false(read_called)
+      assert.are.equal(1280, cw)
+      assert.are.equal(720, ch)
+    end)
+  end)
 end)
