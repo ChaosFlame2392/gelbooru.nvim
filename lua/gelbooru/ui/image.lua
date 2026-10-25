@@ -8,6 +8,13 @@ local M = {}
 
 M.active_ffmpeg_handles = {}
 
+local function clear_snacks_image_cache()
+  local ok, img_mod = pcall(require, "snacks.image.image")
+  if ok and img_mod and type(img_mod.clear) == "function" then
+    pcall(img_mod.clear)
+  end
+end
+
 function M.file_ext_from_url(url)
   local ext = util.file_ext(url)
   return ext ~= "" and ext or "jpg"
@@ -241,12 +248,17 @@ function M.abort_convert(placement)
 
   -- Unlink any partial or 0-byte step files on disk when aborted mid-flight
   local step_files_to_clean = {}
+  local had_aborted_in_flight = false
   if type(convert.steps) == "table" then
     for _, step in ipairs(convert.steps) do
       if step and step.file then
         local is_aborted_step = (step == aborted_step)
         local is_done = step.done == true
         local sz = (vim.fn.filereadable(step.file) == 1) and (vim.fn.getfsize(step.file) or 0) or -1
+
+        if is_aborted_step and not is_done then
+          had_aborted_in_flight = true
+        end
 
         if sz == 0 or (is_aborted_step and not is_done) then
           delete_step_file(step.file)
@@ -261,7 +273,7 @@ function M.abort_convert(placement)
               info_corrupt = true
             end
           end
-          if info_corrupt or is_aborted_step or not util.is_image_complete(step.file) then
+          if info_corrupt or (is_aborted_step and not is_done and not util.is_image_complete(step.file)) then
             delete_step_file(step.file)
             table.insert(step_files_to_clean, step.file)
           end
@@ -272,29 +284,35 @@ function M.abort_convert(placement)
 
   if convert.file then
     local sz = (vim.fn.filereadable(convert.file) == 1) and (vim.fn.getfsize(convert.file) or 0) or -1
-    if sz <= 0 or not util.is_image_complete(convert.file) then
+    if sz == 0 or (had_aborted_in_flight and sz > 0 and not util.is_image_complete(convert.file)) then
       delete_step_file(convert.file)
       table.insert(step_files_to_clean, convert.file)
+      had_aborted_in_flight = true
     end
   end
 
   if #step_files_to_clean > 0 then
-    vim.defer_fn(function()
-      for _, f in ipairs(step_files_to_clean) do
-        if vim.fn.filereadable(f) == 1 and not util.is_image_complete(f) then
-          pcall(vim.fn.delete, f)
-          local info_file = f .. ".info"
-          if vim.fn.filereadable(info_file) == 1 then
-            pcall(vim.fn.delete, info_file)
+    state.UI.abort_cleanup_timer = util.close_timer(state.UI.abort_cleanup_timer)
+    local uv = vim.uv or vim.loop
+    local timer = uv.new_timer()
+    state.UI.abort_cleanup_timer = timer
+    if timer then
+      timer:start(constants.ABORT_CLEANUP_DELAY_MS, 0, vim.schedule_wrap(function()
+        state.UI.abort_cleanup_timer = util.close_timer(state.UI.abort_cleanup_timer)
+        if state.State.torn_down then
+          return
+        end
+        for _, f in ipairs(step_files_to_clean) do
+          if vim.fn.filereadable(f) == 1 and not util.is_image_complete(f) then
+            delete_step_file(f)
           end
         end
-      end
-    end, 50)
+      end))
+    end
   end
 
-  local ok, img_mod = pcall(require, "snacks.image.image")
-  if ok and img_mod and type(img_mod.clear) == "function" then
-    pcall(img_mod.clear)
+  if had_aborted_in_flight then
+    clear_snacks_image_cache()
   end
 end
 
@@ -925,10 +943,7 @@ function M.clean_corrupt_snacks_cache(target)
   end
 
   if any_cleaned then
-    local ok, img_mod = pcall(require, "snacks.image.image")
-    if ok and img_mod and type(img_mod.clear) == "function" then
-      pcall(img_mod.clear)
-    end
+    clear_snacks_image_cache()
   end
 end
 
@@ -937,8 +952,12 @@ function M.clear_snacks_cache_for(post_id_or_path)
     return
   end
   local candidate_files = M.find_snacks_cache_candidates(post_id_or_path)
+  local any_deleted = false
   for _, f in ipairs(candidate_files) do
-    pcall(vim.fn.delete, f)
+    if vim.fn.filereadable(f) == 1 then
+      pcall(vim.fn.delete, f)
+      any_deleted = true
+    end
   end
 
   local str_target = tostring(post_id_or_path)
@@ -948,13 +967,13 @@ function M.clear_snacks_cache_for(post_id_or_path)
     local vthumb = string.format("%s/vthumb_%s.jpg", config_cache, num_id)
     if vim.fn.filereadable(vthumb) == 1 then
       pcall(vim.fn.delete, vthumb)
+      any_deleted = true
     end
   end
 
   M.clean_corrupt_snacks_cache(post_id_or_path)
-  local ok, img_mod = pcall(require, "snacks.image.image")
-  if ok and img_mod and type(img_mod.clear) == "function" then
-    pcall(img_mod.clear)
+  if any_deleted then
+    clear_snacks_image_cache()
   end
 end
 
@@ -1058,6 +1077,16 @@ function M.render_image(win, path)
     if orig_error then
       pcall(orig_error, self)
     end
+    vim.schedule(function()
+      if state.State.torn_down then
+        return
+      end
+      local cur_post = state.State.posts and state.State.posts[state.State.cur]
+      local render_mod = package.loaded["gelbooru.ui.render"]
+      if render_mod and render_mod.fail_preview then
+        render_mod.fail_preview("Image Conversion Failed - File may be corrupted or unsupported", cur_post)
+      end
+    end)
   end
 
   local old_buf = current and current.buf

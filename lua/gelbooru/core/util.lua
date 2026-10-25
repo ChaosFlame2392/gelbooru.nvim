@@ -542,50 +542,79 @@ function M.is_image_complete(path)
     return false
   end
 
-  local magic = f:read(4)
-  if not magic or #magic < 4 then
+  local head = f:read(16) or ""
+  local hlen = #head
+  if hlen < 4 then
     f:close()
     return false
   end
 
-  local b1, b2, b3, b4 = string.byte(magic, 1, 4)
+  local lower_head = head:lower()
+  if lower_head:find("<!doctype", 1, true)
+    or lower_head:find("<html", 1, true)
+    or lower_head:find("<?xml", 1, true) then
+    f:close()
+    return false
+  end
+
+  local b1, b2, b3, b4 = string.byte(head, 1, 4)
+
+  -- PNG: 8-byte signature (\137PNG\r\n\026\n) and IEND chunk in the last 64 bytes
   if b1 == 137 and b2 == 80 and b3 == 78 and b4 == 71 then
-    -- PNG: must be at least 36 bytes and end with IEND chunk in its tail
-    if sz < 36 then
+    if hlen < 8 or head:sub(1, 8) ~= "\137PNG\r\n\026\n" or sz < 36 then
       f:close()
       return false
     end
-    f:seek("end", -12)
-    local tail = f:read(12) or ""
+    local seek_back = math.min(sz, 64)
+    f:seek("end", -seek_back)
+    local tail = f:read(seek_back) or ""
     f:close()
-    return tail:find("IEND") ~= nil
-  elseif b1 == 255 and b2 == 216 then
-    -- JPEG: must end with EOI (0xFF 0xD9) within the last 128 bytes
+    return tail:find("IEND", 1, true) ~= nil
+  end
+
+  -- JPEG: SOI (\255\216) and EOI (\255\217) in the last 128 bytes
+  if b1 == 255 and b2 == 216 then
+    if sz < 4 then
+      f:close()
+      return false
+    end
     local seek_back = math.min(sz, 128)
     f:seek("end", -seek_back)
     local tail = f:read(seek_back) or ""
     f:close()
-    return tail:find("\255\217") ~= nil
-  elseif magic:sub(1, 3) == "GIF" then
-    -- GIF: trailer byte is 0x3B (';')
-    f:seek("end", -1)
-    local tail = f:read(1) or ""
-    f:close()
-    return tail == ";"
-  elseif magic == "RIFF" then
-    -- WebP: declared file size at offset 4
-    local s = f:read(4)
-    f:close()
-    if not s or #s < 4 then
+    return tail:find("\255\217", 1, true) ~= nil
+  end
+
+  -- GIF: GIF87a / GIF89a header and trailer ';' (0x3B)
+  if head:sub(1, 3) == "GIF" then
+    if hlen < 6 or (head:sub(1, 6) ~= "GIF87a" and head:sub(1, 6) ~= "GIF89a") or sz < 6 then
+      f:close()
       return false
     end
-    local s1, s2, s3, s4 = string.byte(s, 1, 4)
+    local seek_back = math.min(sz, 4)
+    f:seek("end", -seek_back)
+    local tail = f:read(seek_back) or ""
+    f:close()
+    return tail:find(";", 1, true) ~= nil
+  end
+
+  -- WebP: RIFF header, WEBP fourcc at bytes 9-12, declared payload size
+  if head:sub(1, 4) == "RIFF" then
+    if hlen < 12 or head:sub(9, 12) ~= "WEBP" then
+      f:close()
+      return false
+    end
+    local s1, s2, s3, s4 = string.byte(head, 5, 8)
     local riff_len = s1 + s2 * 256 + s3 * 65536 + s4 * 16777216
+    f:close()
     return sz >= (riff_len + 8)
   end
 
   f:close()
-  return true
+
+  -- Fallback for unhandled/other formats: validate dimensions
+  local w, h = M.read_image_dimensions(path)
+  return (w ~= nil and h ~= nil and w > 0 and h > 0)
 end
 
 return M

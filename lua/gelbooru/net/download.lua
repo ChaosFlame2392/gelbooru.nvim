@@ -57,75 +57,37 @@ function M.is_valid_media(file_path, ref_path)
 
   local head = f:read(16) or ""
   local hlen = #head
+  f:close()
 
-  -- JPEG validation: SOI \xFF\xD8 and EOI \xFF\xD9
-  if ext == "jpg" or ext == "jpeg" or (hlen >= 2 and head:byte(1) == 0xFF and head:byte(2) == 0xD8) then
-    if hlen < 2 or head:byte(1) ~= 0xFF or head:byte(2) ~= 0xD8 then
-      f:close()
-      return false
-    end
-    if size < constants.MIN_VALID_IMAGE_BYTES then
-      f:close()
-      return false
-    end
-    f:seek("set", math.max(0, size - 16))
-    local tail = f:read(16) or ""
-    f:close()
-    return tail:find("\255\217", 1, true) ~= nil
-  end
-
-  -- PNG validation: \137PNG\r\n\026\n and IEND chunk
-  if ext == "png" or (hlen >= 8 and head:sub(1, 8) == "\137PNG\r\n\026\n") then
-    if hlen < 8 or head:sub(1, 8) ~= "\137PNG\r\n\026\n" then
-      f:close()
-      return false
-    end
-    if size < constants.MIN_VALID_IMAGE_BYTES then
-      f:close()
-      return false
-    end
-    f:seek("set", math.max(0, size - 32))
-    local tail = f:read(32) or ""
-    f:close()
-    return tail:find("IEND", 1, true) ~= nil
-  end
-
-  -- GIF validation: GIF87a/GIF89a and trailer ';' (0x3B)
-  if ext == "gif" or (hlen >= 6 and (head:sub(1, 6) == "GIF87a" or head:sub(1, 6) == "GIF89a")) then
-    if hlen < 6 or (head:sub(1, 6) ~= "GIF87a" and head:sub(1, 6) ~= "GIF89a") then
-      f:close()
-      return false
-    end
-    if size < constants.MIN_VALID_GIF_BYTES then
-      f:close()
-      return false
-    end
-    f:seek("set", math.max(0, size - 4))
-    local tail = f:read(4) or ""
-    f:close()
-    return tail:find(";", 1, true) ~= nil
-  end
-
-  -- WEBP validation: RIFF....WEBP
-  if ext == "webp" or (hlen >= 12 and head:sub(1, 4) == "RIFF" and head:sub(9, 12) == "WEBP") then
-    f:close()
-    if hlen < 12 or head:sub(1, 4) ~= "RIFF" or head:sub(9, 12) ~= "WEBP" then
-      return false
-    end
-    return size >= constants.MIN_VALID_IMAGE_BYTES
+  -- Reject HTML/XML error bodies (Cloudflare, API 500/404 pages)
+  local lower_head = head:lower()
+  if lower_head:find("<!doctype", 1, true)
+    or lower_head:find("<html", 1, true)
+    or lower_head:find("<?xml", 1, true) then
+    return false
   end
 
   -- Video files (mp4, mov, m4v)
   if ext == "mp4" or ext == "mov" or ext == "m4v" then
-    f:close()
     return size >= constants.MIN_VALID_MEDIA_BYTES and (hlen >= 8 and head:sub(5, 8) == "ftyp")
   end
 
-  f:close()
-  -- Reject HTML/XML error bodies (Cloudflare, API 500/404 pages)
-  local lower_head = head:lower()
-  if lower_head:find("<!doctype") or lower_head:find("<html") or lower_head:find("<?xml") then
-    return false
+  local is_known_image = (ext == "gif" or head:sub(1, 3) == "GIF"
+    or ext == "jpg" or ext == "jpeg" or (hlen >= 2 and head:byte(1) == 0xFF and head:byte(2) == 0xD8)
+    or ext == "png" or (hlen >= 8 and head:sub(1, 8) == "\137PNG\r\n\026\n")
+    or ext == "webp" or (hlen >= 12 and head:sub(1, 4) == "RIFF" and head:sub(9, 12) == "WEBP"))
+
+  if is_known_image then
+    if ext == "gif" or head:sub(1, 3) == "GIF" then
+      if size < constants.MIN_VALID_GIF_BYTES then
+        return false
+      end
+    else
+      if size < constants.MIN_VALID_IMAGE_BYTES then
+        return false
+      end
+    end
+    return util.is_image_complete(file_path)
   end
 
   -- Generic fallback (unit test mocks, text or raw payloads): size > MIN_VALID_MEDIA_BYTES bytes

@@ -667,6 +667,7 @@ describe("image: self-healing cache lifecycle & in-flight conversion abort clean
       },
     }
 
+    local state = require("gelbooru.core.state")
     image.abort_convert(mock_placement)
     assert.is_true(aborted)
     -- In-flight step file and info should be unlinked
@@ -674,6 +675,49 @@ describe("image: self-healing cache lifecycle & in-flight conversion abort clean
     assert.are.equal(0, vim.fn.filereadable(step_info))
     -- Completed step file should remain preserved
     assert.are.equal(1, vim.fn.filereadable(comp_file))
+    -- Timer is tracked in state.UI
+    assert.is_not_nil(state.UI.abort_cleanup_timer)
+    -- Wait for timer to finish and clean up
+    vim.wait(150, function() return state.UI.abort_cleanup_timer == nil end)
+    assert.is_nil(state.UI.abort_cleanup_timer)
+  end)
+
+  it("abort_convert does not start timer or flag aborted in-flight when all steps are completed", function()
+    local state = require("gelbooru.core.state")
+    local comp_file = sandbox_snacks_cache .. "/test_already_done.png"
+    vim.fn.writefile({ "valid complete png" }, comp_file)
+
+    local aborted = false
+    local mock_placement = {
+      img = {
+        _convert = {
+          _step = 1,
+          abort = function(self)
+            aborted = true
+          end,
+          steps = {
+            { file = comp_file, done = true },
+          },
+        },
+      },
+    }
+
+    image.abort_convert(mock_placement)
+    assert.is_true(aborted)
+    assert.is_nil(state.UI.abort_cleanup_timer)
+  end)
+
+  it("teardown cancels and closes state.UI.abort_cleanup_timer safely", function()
+    local state = require("gelbooru.core.state")
+    local lifecycle = require("gelbooru.ui.lifecycle")
+    local uv = vim.uv or vim.loop
+    local dummy_timer = uv.new_timer()
+    dummy_timer:start(10000, 0, function() end)
+    state.UI.abort_cleanup_timer = dummy_timer
+
+    lifecycle.teardown()
+    assert.is_nil(state.UI.abort_cleanup_timer)
+    assert.is_true(dummy_timer:is_closing() or not dummy_timer:is_active())
   end)
 
   it("clean_corrupt_snacks_cache(target) detects and unlinks 0-byte or corrupted cache files for the target", function()
@@ -910,6 +954,32 @@ describe("image.resolve_post_dimensions", function()
     local w2, h2 = image.resolve_post_dimensions(p)
     assert.are.equal(256, w2)
     assert.are.equal(128, h2)
+  end)
+
+  it("render_image sets placement.error hook to clean cache and trigger fail_preview", function()
+    local state = require("gelbooru.core.state")
+    local render = require("gelbooru.ui.render")
+    local failed_msg = nil
+    local orig_fail = render.fail_preview
+    render.fail_preview = function(msg, p)
+      failed_msg = msg
+    end
+
+    local test_target = "/media/test/mock_error_post.jpg"
+    state.State.posts = { { file_url = test_target, id = 777 } }
+    state.State.cur = 1
+    state.State.torn_down = false
+
+    local win = vim.api.nvim_get_current_win()
+    local ok = image.render_image(win, test_target)
+    if ok and state.UI.current_placement and state.UI.current_placement.error then
+      state.UI.current_placement:error()
+      vim.wait(150, function() return failed_msg ~= nil end)
+      assert.is_not_nil(failed_msg)
+      assert.is_true(failed_msg:find("Image Conversion Failed") ~= nil)
+    end
+
+    render.fail_preview = orig_fail
   end)
 end)
 

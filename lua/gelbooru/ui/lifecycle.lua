@@ -25,6 +25,7 @@ function M.teardown()
   UI.ac_debounce_timer = util.close_timer(UI.ac_debounce_timer)
   UI.resize_timer = util.close_timer(UI.resize_timer)
   UI.resume_timer = util.close_timer(UI.resume_timer)
+  UI.abort_cleanup_timer = util.close_timer(UI.abort_cleanup_timer)
   if UI.save_discovered_timer or #State.discovered > 0 then
     pcall(tags.save_discovered_now)
   end

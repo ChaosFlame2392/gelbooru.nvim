@@ -924,16 +924,40 @@ describe("util.read_image_dimensions", function()
       assert.is_false(util.is_image_complete(trunc_gif))
     end)
 
-    it("verifies WebP completeness via declared RIFF length", function()
+    it("verifies WebP completeness via declared RIFF length and WEBP signature", function()
       -- Declared payload length is 100 bytes, so total file size must be at least 108
       local riff_valid = "RIFF" .. string.char(100, 0, 0, 0) .. "WEBP" .. string.rep("W", 100)
       local riff_trunc = "RIFF" .. string.char(100, 0, 0, 0) .. "WEBP" .. string.rep("W", 10)
+      local riff_not_webp = "RIFF" .. string.char(100, 0, 0, 0) .. "WAVE" .. string.rep("W", 100)
 
       local valid_webp = write_file("complete.webp", riff_valid)
       local trunc_webp = write_file("truncated.webp", riff_trunc)
+      local not_webp = write_file("audio.wav", riff_not_webp)
 
       assert.is_true(util.is_image_complete(valid_webp))
       assert.is_false(util.is_image_complete(trunc_webp))
+      assert.is_false(util.is_image_complete(not_webp))
+    end)
+
+    it("scans last 64 bytes for PNG IEND chunk when trailing padding or metadata exists", function()
+      local ihdr = string.char(137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13)
+        .. "IHDR"
+        .. string.char(0, 0, 0, 10, 0, 0, 0, 10, 8, 2, 0, 0, 0, 0, 0, 0, 0)
+      local iend = string.char(0, 0, 0, 0) .. "IEND" .. string.char(174, 66, 96, 130)
+      local padding = string.rep("\0", 16)
+
+      local valid_padded = write_file("padded.png", ihdr .. iend .. padding)
+      assert.is_true(util.is_image_complete(valid_padded))
+    end)
+
+    it("rejects HTML/XML error payloads and arbitrary unknown binary files", function()
+      local html_p = write_file("error.html", "<!DOCTYPE html><html><body>Error</body></html>")
+      local xml_p = write_file("error.xml", "<?xml version=\"1.0\"?><error>500</error>")
+      local random_bin = write_file("random.bin", string.rep("\123\234\056\078", 50))
+
+      assert.is_false(util.is_image_complete(html_p))
+      assert.is_false(util.is_image_complete(xml_p))
+      assert.is_false(util.is_image_complete(random_bin))
     end)
   end)
 end)
