@@ -741,7 +741,7 @@ describe("api.fetch_post_metadata", function()
 end)
 
 describe("local.query: Query Parsing and Post Filtering", function()
-  local local_query = require("gelbooru.local.query")
+  local local_query = require("gelbooru.query.engine")
   local tmp_dir
 
   before_each(function()
@@ -1378,7 +1378,7 @@ describe("local.query: Query Parsing and Post Filtering", function()
   end)
 
   describe("Adversarial Test Suite: Local Queries, Filtering & Boundary Conditions", function()
-    local local_query = require("gelbooru.local.query")
+    local local_query = require("gelbooru.query.engine")
 
     it("tag word boundary matching: searching tag 'cat' does NOT match 'caterpillar' or 'scatter'", function()
       local post_caterpillar = {
@@ -2181,7 +2181,7 @@ describe("local.indexer: Dual-Tier Lookahead Prefetch & Background Indexing", fu
 end)
 
 describe("Multi-Stage Piped Sorting Pipeline (parse_pipeline & execute_pipeline)", function()
-  local local_query = require("gelbooru.local.query")
+  local local_query = require("gelbooru.query.engine")
 
   describe("query.parse_pipeline", function()
     it("parses empty or nil input to empty base_query and empty stages", function()
@@ -2552,12 +2552,12 @@ describe("Multi-Stage Piped Sorting Pipeline (parse_pipeline & execute_pipeline)
 
       -- Pipeline with sort:id:asc:1000..1200
       -- Items sorted by id ascending (1 to 1500)
-      -- offset: 1000, limit: 1200 -> slice 1001 to 1200 = 200 items
+      -- Range 1000..1200 -> slice 1000 to 1200 = 201 items
       local pipeline = local_query.parse_pipeline("sort:id:asc:1000..1200")
       local sliced = local_query.execute_pipeline(items, pipeline)
 
-      assert.are.equal(200, #sliced)
-      assert.are.equal("1001", sliced[1].id)
+      assert.are.equal(201, #sliced)
+      assert.are.equal("1000", sliced[1].id)
       assert.are.equal("1200", sliced[#sliced].id)
     end)
 

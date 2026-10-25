@@ -2,6 +2,7 @@ local config = require("gelbooru.core.config")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
 local constants = require("gelbooru.core.constants")
+local engine = require("gelbooru.query.engine")
 
 local M = {}
 
@@ -131,22 +132,12 @@ function M.process_next_batch()
       local UI = state.UI
       if UI.wins.frame and vim.api.nvim_win_is_valid(UI.wins.frame) then
         if State.local_filter and State.local_folder_posts then
-          local query_mod = require("gelbooru.local.query")
-          local new_filtered = query_mod.filter_posts(State.local_folder_posts, State.local_filter)
-          local is_random_sort = false
-          if State.local_filter.sort and State.local_filter.sort.key == "random" then
-            is_random_sort = true
-          elseif State.local_filter.pipeline_stages then
-            for _, st in ipairs(State.local_filter.pipeline_stages) do
-              if st.key == "random" then
-                is_random_sort = true
-                break
-              end
-            end
-          end
+          local new_filtered = engine.evaluate(State.local_folder_posts, State.local_filter)
+          local is_random_sort = State.local_filter.is_random or false
+          local stages = State.local_filter.stages or State.local_filter.pipeline_stages
           local has_sort = not is_random_sort
             and ((State.local_filter.sort ~= nil)
-              or (State.local_filter.pipeline_stages and #State.local_filter.pipeline_stages > 0))
+              or (stages and #stages > 0))
 
           if #new_filtered ~= #State.posts or has_sort then
             local prev_count = #State.posts

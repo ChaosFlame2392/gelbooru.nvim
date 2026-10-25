@@ -6,6 +6,7 @@ local tags = require("gelbooru.tags")
 local history = require("gelbooru.core.history")
 local image = require("gelbooru.ui.image")
 local constants = require("gelbooru.core.constants")
+local engine = require("gelbooru.query.engine")
 
 local function ensure_array(v)
   if util.ensure_array then return util.ensure_array(v) end
@@ -116,122 +117,18 @@ end
 --- 4. Tags with `~`:
 ---    - Single `~tag`: "1 out of 1 is just 1", strips `~` so Gelbooru finds the tag.
 ---    - Multiple `~tag`: returns branches (one for each OR tag) to be queried concurrently and merged.
+--- Normalizes query modifiers for Gelbooru API compatibility.
+--- Delegates directly to gelbooru.query.engine.normalize_remote().
 ---@param tags_str string|nil
 ---@return string[] branches
 function M.normalize_remote_query(tags_str)
-  if not tags_str or tags_str == "" then
-    return { "" }
-  end
-
-  local parse_mod = require("gelbooru.query.parse")
-  tags_str = parse_mod.normalize_modifier_spacing(tags_str) or tags_str
-
-  local tokens = {}
-  for tok in tags_str:gmatch("%S+") do
-    table.insert(tokens, tok)
-  end
-
-  local sort_order_tokens = {}
-  local positive_ratings = {}
-  local negative_ratings = {}
-  local or_tags = {}
-  local base_tokens = {}
-
-  local all_canonical_ratings = { "general", "sensitive", "questionable", "explicit" }
-  local rating_map = {
-    g = "general", general = "general",
-    s = "sensitive", sensitive = "sensitive",
-    q = "questionable", questionable = "questionable",
-    e = "explicit", explicit = "explicit",
-  }
-
-  for _, tok in ipairs(tokens) do
-    if tok:match("^~?[Ss][Oo][Rr][Tt]:") then
-      table.insert(sort_order_tokens, (tok:gsub("^~", "")))
-    elseif tok:match("^~?[Oo][Rr][Dd][Ee][Rr]:") then
-      table.insert(sort_order_tokens, (tok:gsub("^~", "")))
-    elseif tok:match("^%-[Rr][Aa][Tt][Ii][Nn][Gg]:(.+)$") then
-      local val = tok:match("^%-[Rr][Aa][Tt][Ii][Nn][Gg]:(.+)$")
-      for r in val:gmatch("[^,|]+") do
-        local canon = rating_map[r:lower()]
-        if canon then table.insert(negative_ratings, canon) end
-      end
-    elseif tok:match("^~?[Rr][Aa][Tt][Ii][Nn][Gg]:(.+)$") then
-      local val = tok:match("^~?[Rr][Aa][Tt][Ii][Nn][Gg]:(.+)$")
-      for r in val:gmatch("[^,|]+") do
-        local canon = rating_map[r:lower()]
-        if canon then table.insert(positive_ratings, canon) end
-      end
-    elseif tok:match("^~[Ss][Cc][Oo][Rr][Ee]:") then
-      table.insert(base_tokens, (tok:gsub("^~", "")))
-    elseif tok:match("^~[Ii][Dd]:") then
-      table.insert(base_tokens, (tok:gsub("^~", "")))
-    elseif tok:sub(1, 1) == "~" and #tok > 1 then
-      table.insert(or_tags, tok:sub(2))
-    elseif tok ~= "~" and tok ~= "|" and not tok:match("^|+$") then
-      table.insert(base_tokens, tok)
-    end
-  end
-
-  -- Deduplicate ratings
-  local function dedup(list)
-    local s = {}
-    local res = {}
-    for _, v in ipairs(list) do
-      if not s[v] then
-        s[v] = true
-        table.insert(res, v)
-      end
-    end
-    return res
-  end
-  positive_ratings = dedup(positive_ratings)
-  negative_ratings = dedup(negative_ratings)
-  or_tags = dedup(or_tags)
-
-  local rating_clause = {}
-  if #positive_ratings > 0 then
-    if #positive_ratings == 1 then
-      table.insert(rating_clause, "rating:" .. positive_ratings[1])
-    elseif #positive_ratings < 4 then
-      local sel = {}
-      for _, r in ipairs(positive_ratings) do sel[r] = true end
-      for _, r in ipairs(all_canonical_ratings) do
-        if not sel[r] then
-          table.insert(rating_clause, "-rating:" .. r)
-        end
-      end
-    end
-  end
-  for _, r in ipairs(negative_ratings) do
-    table.insert(rating_clause, "-rating:" .. r)
-  end
-
-  local common_parts = {}
-  for _, t in ipairs(base_tokens) do table.insert(common_parts, t) end
-  for _, r in ipairs(rating_clause) do table.insert(common_parts, r) end
-  for _, s in ipairs(sort_order_tokens) do table.insert(common_parts, s) end
-  local common_str = table.concat(common_parts, " ")
-
-  if #or_tags == 0 then
-    return { common_str }
-  elseif #or_tags == 1 then
-    local res = common_str == "" and or_tags[1] or (common_str .. " " .. or_tags[1])
-    return { res }
-  else
-    local branches = {}
-    for _, ot in ipairs(or_tags) do
-      local b = common_str == "" and ot or (common_str .. " " .. ot)
-      table.insert(branches, b)
-    end
-    return branches
-  end
+  return engine.normalize_remote(tags_str)
 end
 
 ---@param tags_str string|nil
 ---@return string
 function M.normalize_remote_tags(tags_str)
-  local branches = M.normalize_remote_query(tags_str)
+  local branches = engine.normalize_remote(tags_str)
   return branches[1] or ""
 end
 
@@ -245,9 +142,8 @@ function M.fetch(direction, is_explicit)
     return
   end
 
-  local query_mod = require("gelbooru.query")
-  local pipe = query_mod.parse_pipeline(State.query)
-  if pipe and pipe.stages and #pipe.stages > 0 then
+  local plan = engine.prepare(State.query)
+  if plan.is_pipeline then
     if is_explicit ~= false then
       ui.set_status("Pagination not supported on piped searches", 2000)
     end
@@ -290,7 +186,7 @@ function M.fetch(direction, is_explicit)
       nonce_param = "&_nonce=" .. nonce
     end
   end
-  local branches = M.normalize_remote_query(State.query or "")
+  local branches = engine.normalize_remote(State.query or "")
   local remote_tags = branches[1] or ""
   local cache_key = (nonce_param == "")
       and string.format("page:%s:pid=%d:limit=%d", table.concat(branches, "||"), State.page, config.options.per_page)
@@ -460,7 +356,7 @@ function M.fetch(direction, is_explicit)
             end
           end
           if sort_opt then
-            require("gelbooru.query.sort").sort_posts(deduped, sort_opt)
+            engine.sort_posts(deduped, sort_opt)
           else
             table.sort(deduped, function(a, b)
               local ida = tonumber(a.id) or 0
@@ -515,52 +411,26 @@ function M.execute_search(query, opts)
   end
 
   if type(query) == "string" then
-    local parse_mod = require("gelbooru.query.parse")
-    query = parse_mod.normalize_modifier_spacing(query) or query
+    query = query:gsub("^%s*id:%s*(%d+)%s*$", "id:%1")
   end
 
-  if query and util.is_local_query(query) then
+  local plan = engine.prepare(query)
+
+  if plan.is_local then
     ui.open_local(query)
     return
   end
 
-  if type(query) == "string" then
-    query = query:gsub("^%s*id:%s*(%d+)%s*$", "id:%1")
-    local bare_id = query:match("^%s*(%d+)%s*$")
-    if bare_id then
-      query = "id:" .. bare_id
-      local UI = state.UI
-      if UI.bufs and UI.bufs.input and vim.api.nvim_buf_is_valid(UI.bufs.input) then
-        pcall(vim.api.nvim_buf_set_lines, UI.bufs.input, 0, 1, false, { query })
-      end
+  if not plan.is_pipeline and plan.raw and plan.raw:match("^%s*%d+%s*$") then
+    query = "id:" .. vim.trim(plan.raw)
+    local UI = state.UI
+    if UI.bufs and UI.bufs.input and vim.api.nvim_buf_is_valid(UI.bufs.input) then
+      pcall(vim.api.nvim_buf_set_lines, UI.bufs.input, 0, 1, false, { query })
     end
+    plan = engine.prepare(query)
   end
-  local is_random = false
-  if type(query) == "string" then
-    local q_lower = query:lower()
-    if q_lower:find("sort:random", 1, true) or q_lower:find("order:random", 1, true) then
-      is_random = true
-    else
-      for token in q_lower:gmatch("%S+") do
-        if token == "random" or token == "|random" or token == "random|" then
-          is_random = true
-          break
-        end
-      end
-      if not is_random then
-        local query_mod = require("gelbooru.query")
-        local p = query_mod.parse_pipeline(query)
-        if p and p.stages then
-          for _, st in ipairs(p.stages) do
-            if st.key == "random" then
-              is_random = true
-              break
-            end
-          end
-        end
-      end
-    end
-  end
+
+  local is_random = plan.is_random
   if not is_random and query == State.query and #State.posts > 0 then
     ui.render_list()
     return
@@ -585,17 +455,14 @@ function M.execute_search(query, opts)
   State.cur_id = nil
   ui.render_list()
 
-  local query_mod = require("gelbooru.query")
-  local pipe = query_mod.parse_pipeline(query)
-
-  if pipe and #pipe.stages > 0 then
-    M.execute_piped_search(query, pipe)
+  if plan.is_pipeline then
+    M.execute_piped_search(query, plan)
   else
     M.fetch(1)
   end
 
   -- Auto-resolve any unknown query tags so they are saved to discovered.json
-  local tags_to_resolve = (pipe and pipe.base_query) or query or ""
+  local tags_to_resolve = plan.base_query or query or ""
   for word in tags_to_resolve:gmatch("%S+") do
     local clean_word = word:gsub("^[-~]", ""):lower()
     if clean_word ~= "" and clean_word ~= "|" and not clean_word:find(":") and not State.tags_by_name[clean_word] then
@@ -641,12 +508,16 @@ end
 function M.execute_piped_search(query, pipe)
   local State = state.State
   local ui = require("gelbooru.ui")
-  local query_mod = require("gelbooru.query")
+
+  local plan = pipe
+  if not plan or not plan.stages then
+    plan = engine.prepare(query)
+  end
 
   local epoch = State.search_epoch
-  local stages = pipe.stages
+  local stages = plan.stages
   local stage1 = stages[1]
-  local base_query = pipe.base_query or ""
+  local base_query = plan.base_query or ""
 
   local page_size = constants.PIPELINE_REMOTE_PAGE_SIZE
   local pid = 0
@@ -715,7 +586,7 @@ function M.execute_piped_search(query, pipe)
       end
     end
   end
-  local branches = M.normalize_remote_query(remote_tags)
+  local branches = engine.normalize_remote(remote_tags)
 
   local nonce_param = ""
   if remote_tags:lower():find("sort:random", 1, true) or remote_tags:lower():find("order:random", 1, true) then
@@ -754,7 +625,7 @@ function M.execute_piped_search(query, pipe)
           for s_idx = 2, #stages do
             table.insert(downstream_stages, stages[s_idx])
           end
-          final_posts = query_mod.execute_pipeline(window_posts, downstream_stages)
+          final_posts = engine.evaluate(window_posts, { stages = downstream_stages })
         else
           final_posts = window_posts
         end
@@ -789,7 +660,7 @@ function M.execute_piped_search(query, pipe)
       history.save_current_history()
       util.set_lines(state.UI.bufs.img, { "  No posts found" })
       util.set_lines(state.UI.bufs.meta, {})
-      M.check_self_heal(pipe and pipe.base_query or query)
+      M.check_self_heal(plan and plan.base_query or query)
       return
     end
 
@@ -834,12 +705,12 @@ function M.execute_piped_search(query, pipe)
         for s_idx = 2, #stages do
           table.insert(downstream_stages, stages[s_idx])
         end
-        final_posts = query_mod.execute_pipeline(window_posts, downstream_stages)
+        final_posts = engine.execute_pipeline(window_posts, downstream_stages)
       else
         final_posts = window_posts
       end
     else
-      final_posts = query_mod.execute_pipeline(candidate_pool, stages)
+      final_posts = engine.execute_pipeline(candidate_pool, stages)
     end
 
     State.posts = final_posts
