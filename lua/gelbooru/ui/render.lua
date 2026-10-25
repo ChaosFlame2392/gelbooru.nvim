@@ -2,9 +2,10 @@ local api = require("gelbooru.net.api")
 local config = require("gelbooru.core.config")
 local constants = require("gelbooru.core.constants")
 local download = require("gelbooru.net.download")
-local image = require("gelbooru.ui.image")
+local canvas = require("gelbooru.ui.canvas")
 local layout = require("gelbooru.ui.layout")
 local log = require("gelbooru.core.log")
+local resolver = require("gelbooru.media.resolver")
 local state = require("gelbooru.core.state")
 local tags = require("gelbooru.tags")
 local util = require("gelbooru.core.util")
@@ -37,8 +38,6 @@ function M.set_status(msg, reset_ms)
   end
 end
 
-M.resolve_post_dimensions = image.resolve_post_dimensions
-
 function M.render_list()
   local State = state.State
   local UI = state.UI
@@ -50,12 +49,12 @@ function M.render_list()
 
   for i, p in ipairs(State.posts) do
     if i == State.cur and (not p.width or p.width <= 0) then
-      image.resolve_post_dimensions(p)
+      resolver.resolve_post_dimensions(p)
     end
     local prefix = (i == State.cur) and "▶ " or "  "
     local r = (p.rating or "?"):sub(1, 1):upper()
     local score = tostring(p.score or 0)
-    local is_vid = image.is_video_post(p)
+    local is_vid = resolver.is_video_post(p)
     local is_pending = p._pending_delete or (p.id and State.pending_deletions and State.pending_deletions[tostring(p.id)] ~= nil)
     local is_saved = (not p.is_local) and (not is_pending) and p.id and (local_index.is_saved(p.id) or (State.saved_index and State.saved_index[tonumber(p.id)] ~= nil))
     local saved_badge = is_saved and " [SAVED]" or ""
@@ -87,7 +86,7 @@ function M.fail_preview(msg, p)
   if p and not is_same_post(State.posts[State.cur], p) then
     return
   end
-  pcall(image.close_current_placement)
+  pcall(canvas.close)
   pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
   util.set_lines(UI.bufs.img, { "", "  [ " .. msg .. " ]" })
   M.set_status(msg, constants.STATUS_TIMEOUT_INDEXER_MS)
@@ -98,230 +97,34 @@ end
 
 local fail_preview = M.fail_preview
 
-function M.load_and_render_image(p, url_idx, retry_count, force_download)
-  local UI = state.UI
-  local State = state.State
-  url_idx = url_idx or 1
-  local urls, dest = image.get_preview_targets(p, url_idx)
-  if #urls == 0 or not dest then
-    if image.is_video_post(p) then
-      image.render_video_placeholder(p, "Preview not playable in terminal • Press 'O' to open")
-      M.set_status("Video post • Press 'O' to play", constants.STATUS_TIMEOUT_INDEXER_MS)
-    else
-      fail_preview("No preview available", p)
-    end
-    return
-  end
-  url_idx = math.max(1, math.min(url_idx, #urls))
-  retry_count = retry_count or 0
-  local preview_url = urls[url_idx]
-  local is_saved = image.is_in_save_dir(dest)
-
-  if image.is_video_post(p) then
-    if force_download and (p.id or p.file_url) then
-      image.clear_snacks_cache_for(p.id or p.file_url)
-    end
-    local thumb_path = image.get_video_thumbnail_path(p.file_url, p.id)
-    if not force_download and vim.fn.filereadable(thumb_path) == 1 and (vim.fn.getfsize(thumb_path) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES then
-      local ok = image.render_image(UI.wins.img, thumb_path)
-      if ok then
-        M.set_status("Video preview [VIDEO] • Press 'O' to play", constants.STATUS_TIMEOUT_INDEXER_MS)
-        return
-      end
-    end
-
-    local video_to_extract = nil
-    if p.is_local then
-      video_to_extract = (p.file_url and vim.fn.filereadable(p.file_url) == 1) and p.file_url or nil
-    else
-      video_to_extract = image.get_saved_video_path(p.id)
-    end
-
-    if video_to_extract and vim.fn.filereadable(video_to_extract) == 1 then
-      M.set_status("Video post • extracting thumbnail…", constants.STATUS_TIMEOUT_HISTORY_MS)
-      image.extract_video_thumbnail(video_to_extract, p.id, function(extracted_path)
-        if state.State.torn_down then
-          return
-        end
-        if not is_same_post(State.posts[State.cur], p) then
-          return
-        end
-        if extracted_path and vim.fn.filereadable(extracted_path) == 1 and (vim.fn.getfsize(extracted_path) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES then
-          local ok = image.render_image(UI.wins.img, extracted_path)
-          if ok then
-            M.set_status("Video preview [VIDEO] • Press 'O' to play", constants.STATUS_TIMEOUT_INDEXER_MS)
-            return
-          end
-        end
-        image.render_video_placeholder(p, "Preview not playable in terminal • Press 'O' to open")
-        M.set_status("Video post • Press 'O' to play", constants.STATUS_TIMEOUT_INDEXER_MS)
-      end)
+function M.load_and_render_image(p, opts_or_idx, _, force)
+  if not p then return fail_preview("No post selected", nil) end
+  resolver.abort_active()
+  local opts = type(opts_or_idx) == "table" and opts_or_idx or { force = (opts_or_idx == true or force == true) }
+  M.set_status("Loading preview…")
+  local epoch = state.State.search_epoch
+  resolver.resolve(p, opts, function(target, err)
+    if state.State.torn_down or state.State.search_epoch ~= epoch or not is_same_post(state.State.posts[state.State.cur], p) then
       return
     end
-  end
-
-  local function do_render()
-    if not UI.wins.img or not vim.api.nvim_win_is_valid(UI.wins.img) then
-      log("DEBUG", "RENDER", "do_render aborted: img win invalid (post %s)", tostring(p.id or p.file_url))
-      return
-    end
-    if not is_same_post(State.posts[State.cur], p) then
-      log("DEBUG", "RENDER", "do_render stale: cur=%d wanted=%s got=%s",
-        State.cur, tostring(p.id or p.file_url),
-        State.posts[State.cur] and tostring(State.posts[State.cur].id or State.posts[State.cur].file_url) or "nil")
-      return
-    end
-    M.set_status()
-
-    local source_name = image.preview_source_name(p, preview_url)
-    if image.is_video_post({ file_url = preview_url }) then
-      if url_idx < #urls then
-        M.load_and_render_image(p, url_idx + 1, 0, force_download)
-        return
-      end
-      if dest and vim.fn.filereadable(dest) == 1 then
-        local thumb_path = image.get_video_thumbnail_path(dest, p.id)
-        if vim.fn.filereadable(thumb_path) == 1 and (vim.fn.getfsize(thumb_path) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES then
-          local ok = image.render_image(UI.wins.img, thumb_path)
-          if ok then
-            M.set_status("Video preview [VIDEO] • Press 'O' to play", constants.STATUS_TIMEOUT_INDEXER_MS)
-            return
-          end
-        end
-
-        M.set_status("Video post • extracting thumbnail…", constants.STATUS_TIMEOUT_HISTORY_MS)
-        image.extract_video_thumbnail(dest, p.id, function(extracted_path)
-          if state.State.torn_down then
-            return
-          end
-          if not is_same_post(State.posts[State.cur], p) then
-            return
-          end
-          if extracted_path and vim.fn.filereadable(extracted_path) == 1 and (vim.fn.getfsize(extracted_path) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES then
-            local ok = image.render_image(UI.wins.img, extracted_path)
-            if ok then
-              M.set_status("Video preview [VIDEO] • Press 'O' to play", constants.STATUS_TIMEOUT_INDEXER_MS)
-              return
-            end
-          end
-          image.render_video_placeholder(p, "Preview not playable in terminal • Press 'O' to open")
-          M.set_status("Video post • Press 'O' to play", constants.STATUS_TIMEOUT_INDEXER_MS)
-        end)
-        return
-      else
-        image.render_video_placeholder(p, string.format("No static %s available • Press 'O' to open", source_name))
-        M.set_status(string.format("Video post • no static %s available", source_name), constants.STATUS_TIMEOUT_INDEXER_MS)
-        return
-      end
-    end
-
-    local size = vim.fn.getfsize(dest)
-    if not p.is_local and not is_saved and size > -1 and size < constants.MIN_VALID_MEDIA_BYTES then
-      log("DEBUG", "RENDER", "file too small (%d bytes), re-fetching (post %s)", size, tostring(p.id or p.file_url))
-      if retry_count < 1 then
-        M.load_and_render_image(p, url_idx, retry_count + 1, true)
-      elseif url_idx < #urls then
-        M.load_and_render_image(p, url_idx + 1, 0, true)
-      else
-        fail_preview("Image Download Failed - File too small", p)
-      end
-      return
-    end
-
-    local ok = image.render_image(UI.wins.img, dest)
-    if not ok then
-      if p.is_local or is_saved then
+    if target and target.path and not (target.is_video and not target.is_thumbnail) then
+      if not canvas.render(state.UI.wins.img, target.path) then
         fail_preview("Image Conversion Failed - File may be corrupted or unsupported", p)
-      elseif retry_count < 1 then
-        M.load_and_render_image(p, url_idx, retry_count + 1, true)
-      elseif url_idx < #urls then
-        M.load_and_render_image(p, url_idx + 1, 0, true)
       else
-        fail_preview("Image Conversion Failed - File may be corrupted or unsupported", p)
-      end
-    else
-      if not p.width or p.width <= 0 then
-        local w, h = image.resolve_post_dimensions(p, dest)
-        if w and h then
+        if target.width and target.height and (not p.width or p.width <= 0) then
+          p.width, p.height = target.width, target.height
           M.render_metadata(p)
           M.render_list()
         end
+        M.set_status(target.is_video and "Video preview [VIDEO] • Press 'O' to play" or nil)
       end
+    else
+      local is_vid = resolver.is_video_post(p)
+      local msg = is_vid and (target and "Preview not playable in terminal • Press 'O' to open" or "Preview not available • Press 'O' to open") or (err or "Preview resolution failed")
+      canvas.render_placeholder(state.UI.wins.img, p, msg)
+      M.set_status(is_vid and "Video post • Press 'O' to play" or msg, constants.STATUS_TIMEOUT_INDEXER_MS)
     end
-  end
-
-  if p.is_local or is_saved then
-    if force_download and (p.id or p.file_url) then
-      image.clear_snacks_cache_for(p.id or p.file_url)
-    end
-    do_render()
-    return
-  end
-
-  -- Integrity check for cached preview files
-  if not p.is_local and not is_saved and vim.fn.filereadable(dest) == 1 and not force_download then
-    if not download.is_valid_media(dest) then
-      log("WARN", "PREVIEW", "Cached preview file corrupted on disk, deleting and re-fetching: %s", dest)
-      vim.fn.delete(dest)
-      image.clear_snacks_cache_for(p.id or dest or p.file_url)
-      force_download = true
-    end
-  end
-
-  if not p.is_local and not is_saved and (vim.fn.filereadable(dest) == 0 or force_download) then
-    if force_download and vim.fn.filereadable(dest) == 1 then
-      vim.fn.delete(dest)
-      image.clear_snacks_cache_for(p.id or dest or p.file_url)
-    end
-    M.set_status("Downloading preview…")
-    if not preview_url or not preview_url:match("^https?://") then
-      if url_idx < #urls then
-        M.load_and_render_image(p, url_idx + 1, 0, force_download)
-      else
-        fail_preview("Invalid preview URL", p)
-      end
-      return
-    end
-    download.download_async(preview_url, dest, function(ok)
-      if ok then
-        do_render()
-      elseif url_idx < #urls then
-        M.load_and_render_image(p, url_idx + 1, 0, true)
-      else
-        if image.is_video_post(p) then
-          image.render_video_placeholder(p, "Preview not available • Press 'O' to open")
-          M.set_status("Video post • no static preview available", constants.STATUS_TIMEOUT_INDEXER_MS)
-        else
-          fail_preview("Preview Download Failed", p)
-        end
-      end
-    end)
-  elseif not p.is_local and not is_saved and download.active_downloads[dest] then
-    if not preview_url or not preview_url:match("^https?://") then
-      if url_idx < #urls then
-        M.load_and_render_image(p, url_idx + 1, 0, force_download)
-      else
-        fail_preview("Invalid preview URL", p)
-      end
-      return
-    end
-    download.download_async(preview_url, dest, function(ok)
-      if ok then
-        do_render()
-      elseif url_idx < #urls then
-        M.load_and_render_image(p, url_idx + 1, 0, true)
-      else
-        if image.is_video_post(p) then
-          image.render_video_placeholder(p, "Preview not available • Press 'O' to open")
-          M.set_status("Video post • no static preview available", constants.STATUS_TIMEOUT_INDEXER_MS)
-        else
-          fail_preview("Preview Download Failed", p)
-        end
-      end
-    end)
-  else
-    do_render()
-  end
+  end)
 end
 
 function M.render_metadata(p)
@@ -331,10 +134,10 @@ function M.render_metadata(p)
     return
   end
 
-  image.resolve_post_dimensions(p)
+  resolver.resolve_post_dimensions(p)
 
-  local ext_info = image.file_ext_from_url(p.file_url)
-  local is_vid = image.is_video_post(p)
+  local ext_info = resolver.file_ext_from_url(p.file_url)
+  local is_vid = resolver.is_video_post(p)
   local meta = {
     "",
     string.format("  ID      : %s", p.id or "?"),
@@ -382,12 +185,12 @@ function M.render_preview(force_download)
   if not p then
     local no_img_msg = (State.query and util.is_local_query(State.query)) and "  No images found"
       or (#State.posts == 0 and "  No posts found" or "  No post selected")
-    image.reset_canvas(no_img_msg)
+    canvas.render_placeholder(UI.wins.img, nil, no_img_msg)
     return
   end
 
   local had_dims = (p.width and p.height and p.width > 0 and p.height > 0)
-  image.resolve_post_dimensions(p)
+  resolver.resolve_post_dimensions(p)
   if not had_dims and (p.width and p.width > 0) then
     M.render_list()
   end
@@ -448,11 +251,11 @@ function M.render_preview(force_download)
     indexer.cursor_rush_prefetch(State.cur, State.scroll_dir)
   end
 
-  local _, dest = image.get_preview_targets(p)
-  local is_saved = image.is_in_save_dir(dest)
+  local _, dest = resolver.get_preview_targets(p)
+  local is_saved = resolver.is_in_save_dir(dest)
   local is_cached = (not force_download or is_saved or p.is_local) and dest and vim.fn.filereadable(dest) == 1 and not download.active_downloads[dest]
-  if not is_cached and not force_download and image.is_video_post(p) then
-    local thumb_path = image.get_video_thumbnail_path(p.file_url, p.id)
+  if not is_cached and not force_download and resolver.is_video_post(p) then
+    local thumb_path = resolver.get_video_thumbnail_path(p.file_url, p.id)
     if vim.fn.filereadable(thumb_path) == 1 and (vim.fn.getfsize(thumb_path) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES then
       is_cached = true
     end
@@ -482,7 +285,7 @@ function M.render_preview(force_download)
         return
       end
       if is_same_post(State.posts[State.cur], p) then
-        M.load_and_render_image(p, 1, 0, force_download)
+        M.load_and_render_image(p, force_download)
         if not p.is_local then
           download.prefetch_around(State.cur, State.scroll_dir)
         end

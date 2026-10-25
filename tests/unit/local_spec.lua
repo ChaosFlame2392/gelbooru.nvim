@@ -6,7 +6,7 @@ local api = require("gelbooru.net.api")
 local config = require("gelbooru.core.config")
 local download = require("gelbooru.net.download")
 local state = require("gelbooru.core.state")
-local image = require("gelbooru.ui.image")
+local resolver = require("gelbooru.media.resolver")
 
 describe("ui.scan_local_folder", function()
   local tmp_dir
@@ -110,7 +110,7 @@ describe("ui.scan_local_folder", function()
     assert.are.equal(2, #posts)
     for _, p in ipairs(posts) do
       assert.is_true(p.is_local)
-      assert.is_true(image.is_video_post(p))
+      assert.is_true(resolver.is_video_post(p))
     end
   end)
 
@@ -205,8 +205,8 @@ describe("ui.scan_local_folder", function()
     assert.is_true(p.is_local)
     assert.are.equal(tmp_dir .. "/" .. complex_name, p.file_url)
 
-    -- Target resolution via image.get_preview_targets
-    local urls, dest = image.get_preview_targets(p)
+    -- Target resolution via resolver.get_preview_targets
+    local urls, dest = resolver.get_preview_targets(p)
     assert.are.equal(1, #urls)
     assert.are.equal(p.file_url, urls[1])
     assert.are.equal(p.file_url, dest)

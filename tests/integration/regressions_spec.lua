@@ -997,7 +997,7 @@ describe("Regression Tests for UI & Search bugs", function()
 
     it("prioritizes permanently downloaded high-quality media in save_dir over preview cache upon navigation", function()
       local config = require("gelbooru.core.config")
-      local image = require("gelbooru.ui.image")
+      local resolver = require("gelbooru.media.resolver")
       ui.open()
 
       local saved_file = config.options.save_dir .. "/99999.jpg"
@@ -1019,13 +1019,13 @@ describe("Regression Tests for UI & Search bugs", function()
       state.State.cur = 1
 
       -- get_preview_targets must return saved_file from save_dir directly
-      local urls, dest = image.get_preview_targets(post)
+      local urls, dest = resolver.get_preview_targets(post)
       assert.are.equal(saved_file, dest)
       assert.are.equal(saved_file, urls[1])
 
       -- When staged for deletion (_pending_delete = true), it must NOT use save_dir
       post._pending_delete = true
-      local urls_del, dest_del = image.get_preview_targets(post)
+      local urls_del, dest_del = resolver.get_preview_targets(post)
       assert.are.not_equal(saved_file, dest_del)
       assert.is_truthy(dest_del:find("prev_99999.jpg"))
 

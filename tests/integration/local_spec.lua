@@ -214,8 +214,9 @@ describe("Integration: Local Folder Browser Mode", function()
       assert.are.equal(3, #state.State.posts)
 
       -- Verify target resolution
+      local resolver = require("gelbooru.media.resolver")
       for _, p in ipairs(state.State.posts) do
-        local urls, dest = ui.image.get_preview_targets(p)
+        local urls, dest = resolver.get_preview_targets(p)
         assert.are.equal(p.file_url, dest)
         assert.are.equal(1, #urls)
       end
@@ -786,9 +787,10 @@ describe("Integration: Local Folder Browser Mode", function()
       local posts = ui.scan_local_folder(vid_dir)
       assert.are.equal(3, #posts)
 
+      local resolver = require("gelbooru.media.resolver")
       local vids = 0
       for _, p in ipairs(posts) do
-        if ui.image.is_video_post(p) then
+        if resolver.is_video_post(p) then
           vids = vids + 1
         end
       end
@@ -1045,7 +1047,7 @@ describe("Integration: Local Folder Browser Mode", function()
   describe("Sprint 3: Dual-Tier Lookahead & Online-Local Hybrid Index Integration", function()
     local local_index = require("gelbooru.local.index")
     local indexer = require("gelbooru.local.indexer")
-    local image = require("gelbooru.ui.image")
+    local canvas = require("gelbooru.ui.canvas")
 
     before_each(function()
       local_index.reset()
@@ -1095,8 +1097,8 @@ describe("Integration: Local Folder Browser Mode", function()
       assert.is_false(local_index.is_saved(10002))
 
       local rendered_image_path = nil
-      local orig_render_image = image.render_image
-      image.render_image = function(win, path)
+      local orig_render_image = canvas.render
+      canvas.render = function(win, path)
         rendered_image_path = path
         return orig_render_image(win, path)
       end
@@ -1120,7 +1122,7 @@ describe("Integration: Local Folder Browser Mode", function()
       local list_lines_after = harness.get_buf_lines(state.UI.bufs.list)
       assert.is_truthy(list_lines_after[2]:find("%[SAVED%]"))
 
-      image.render_image = orig_render_image
+      canvas.render = orig_render_image
     end)
 
     it("render_preview triggers cursor_rush_prefetch for local posts with current cursor and direction", function()
@@ -1680,28 +1682,29 @@ describe("Integration: Local Folder Browser Mode", function()
       assert.is_true(found_size)
     end)
 
-    it("ui.resolve_post_dimensions resolves dimensions lazily and caches on post object", function()
+    it("resolver.resolve_post_dimensions resolves dimensions lazily and caches on post object", function()
       local posts = ui.scan_local_folder(dim_dir)
       local p = posts[2]
       assert.is_nil(p.width)
       assert.is_nil(p.height)
 
-      local w, h = ui.resolve_post_dimensions(p)
+      local resolver = require("gelbooru.media.resolver")
+      local w, h = resolver.resolve_post_dimensions(p)
       assert.are.equal(1280, w)
       assert.are.equal(720, h)
       assert.are.equal(1280, p.width)
       assert.are.equal(720, p.height)
 
       -- Subsequent invocation uses cached values without reading file
-      local orig_read = util.read_image_dimensions
+      local orig_read = resolver.read_image_dimensions
       local read_called = false
-      util.read_image_dimensions = function(...)
+      resolver.read_image_dimensions = function(...)
         read_called = true
         return orig_read(...)
       end
 
-      local cw, ch = ui.resolve_post_dimensions(p)
-      util.read_image_dimensions = orig_read
+      local cw, ch = resolver.resolve_post_dimensions(p)
+      resolver.read_image_dimensions = orig_read
       assert.is_false(read_called)
       assert.are.equal(1280, cw)
       assert.are.equal(720, ch)

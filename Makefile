@@ -32,10 +32,15 @@ lint:
 	done
 
 # Run a single spec file: make spec FILE=tests/unit/util_spec.lua
-.PHONY: spec
+# Or: make test-file TEST_FILE=tests/unit/canvas_spec.lua
+.PHONY: spec test-file
 spec:
 	$(NVIM) --headless -u $(TEST_DIR)/minimal_init.lua \
-		-c "PlenaryBustedFile $(FILE)" 2>&1
+		-c "PlenaryBustedFile $(or $(FILE),$(TEST_FILE))" 2>&1
+
+test-file:
+	$(NVIM) --headless -u $(TEST_DIR)/minimal_init.lua \
+		-c "PlenaryBustedFile $(or $(TEST_FILE),$(FILE))" 2>&1
 
 .PHONY: help
 help:
@@ -43,3 +48,4 @@ help:
 	@echo "  make test          — run all unit specs"
 	@echo "  make lint          — LuaJIT syntax check all source files"
 	@echo "  make spec FILE=... — run a single spec file"
+	@echo "  make test-file TEST_FILE=... — run a single spec file"

@@ -3,7 +3,8 @@ local autocomplete = require("gelbooru.ui.autocomplete")
 local config = require("gelbooru.core.config")
 local constants = require("gelbooru.core.constants")
 local download = require("gelbooru.net.download")
-local image = require("gelbooru.ui.image")
+local canvas = require("gelbooru.ui.canvas")
+local resolver = require("gelbooru.media.resolver")
 local keymaps = require("gelbooru.ui.keymaps")
 local layout = require("gelbooru.ui.layout")
 local log = require("gelbooru.core.log")
@@ -25,7 +26,6 @@ function M.teardown()
   UI.ac_debounce_timer = util.close_timer(UI.ac_debounce_timer)
   UI.resize_timer = util.close_timer(UI.resize_timer)
   UI.resume_timer = util.close_timer(UI.resume_timer)
-  UI.abort_cleanup_timer = util.close_timer(UI.abort_cleanup_timer)
   if UI.save_discovered_timer or #State.discovered > 0 then
     pcall(tags.save_discovered_now)
   end
@@ -61,8 +61,8 @@ function M.teardown()
   download.active_downloads = {}
   pcall(download.abort_all)
   download.pending_resumes = {}
-  pcall(image.abort_all_ffmpeg)
-  pcall(image.close_current_placement)
+  pcall(resolver.abort_video_transcodes)
+  pcall(canvas.close)
 
   -- Execute deferred deletions on disk now that Gelbooru UI is tearing down.
   if State.pending_deletions then
@@ -81,7 +81,7 @@ function M.teardown()
           if meta_path and vim.fn.filereadable(meta_path) == 1 then
             pcall(vim.fn.delete, meta_path)
           end
-          local vthumb = image.get_video_thumbnail_path(item.path, item.id)
+          local vthumb = resolver.get_video_thumbnail_path(item.path, item.id)
           if vthumb and vim.fn.filereadable(vthumb) == 1 then
             pcall(vim.fn.delete, vthumb)
           end
@@ -89,7 +89,7 @@ function M.teardown()
           if vim.fn.filereadable(direct_vthumb) == 1 then
             pcall(vim.fn.delete, direct_vthumb)
           end
-          image.clear_snacks_cache_for(item.id or item.file_url)
+          resolver.clear_cache(item.id or item.file_url)
         end
       end
     end

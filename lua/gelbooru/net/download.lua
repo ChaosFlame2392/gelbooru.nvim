@@ -87,7 +87,7 @@ function M.is_valid_media(file_path, ref_path)
         return false
       end
     end
-    return util.is_image_complete(file_path)
+    return require("gelbooru.media.resolver").is_image_complete(file_path)
   end
 
   -- Generic fallback (unit test mocks, text or raw payloads): size > MIN_VALID_MEDIA_BYTES bytes
@@ -455,7 +455,7 @@ function M.prefetch_around(idx, scroll_dir)
   end
 
   local UI = state.UI
-  local image = require("gelbooru.ui.image")
+  local resolver = require("gelbooru.media.resolver")
   local radius = config.options.prefetch_radius
   local dir = scroll_dir or State.scroll_dir or 1
   if dir == 0 then
@@ -496,7 +496,7 @@ function M.prefetch_around(idx, scroll_dir)
   for _, i in ipairs(ordered) do
     local p = State.posts[i]
     if p and not p.is_local then
-      local urls, dest = image.get_preview_targets(p)
+      local urls, dest = resolver.get_preview_targets(p)
       local url = urls and urls[1]
 
       if url and dest then
@@ -552,10 +552,10 @@ function M.prefetch_around(idx, scroll_dir)
               )
             end
           end
-        elseif image.is_video_post(p) and vim.fn.filereadable(url) == 1 then
+        elseif resolver.is_video_post(p) and vim.fn.filereadable(url) == 1 then
           -- Saved video in save_dir: prefetch video thumbnail via ffmpeg
           if vim.fn.filereadable(dest) == 0 then
-            image.extract_video_thumbnail(url, p.id)
+            resolver.extract_video_thumbnail(url, p)
           end
         end
       end

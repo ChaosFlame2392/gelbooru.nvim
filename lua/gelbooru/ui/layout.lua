@@ -1,6 +1,6 @@
 local config = require("gelbooru.core.config")
 local constants = require("gelbooru.core.constants")
-local image = require("gelbooru.ui.image")
+local canvas = require("gelbooru.ui.canvas")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
 
@@ -251,7 +251,7 @@ function M.handle_resize()
   end
   local l = M.calc_layout(true)
   M.apply_layout(l)
-  image.nudge_current_placement()
+  canvas.nudge()
 end
 
 M.on_resize = M.handle_resize

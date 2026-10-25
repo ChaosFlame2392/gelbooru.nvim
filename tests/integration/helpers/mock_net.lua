@@ -76,12 +76,18 @@ function M.setup()
       end
       return
     end
-    -- Write a dummy 2KB file to simulate successful image download (> 1024 bytes guard)
+    -- Write a dummy 2KB valid JPEG file to satisfy media.resolver format integrity validation
     local dir = vim.fn.fnamemodify(dest, ":h")
     vim.fn.mkdir(dir, "p")
     local f = io.open(dest, "wb")
     if f then
-      f:write(string.rep("A", 2048))
+      local valid_jpeg = string.char(
+        0xFF, 0xD8, -- SOI
+        0xFF, 0xC0, 0x00, 0x11, 0x08, -- SOF0 (baseline DCT, 8-bit precision)
+        0x04, 0x00, 0x04, 0x00, -- Height: 1024, Width: 1024
+        0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00 -- 3 components
+      ) .. string.rep("A", 2048) .. string.char(0xFF, 0xD9) -- padding + EOI
+      f:write(valid_jpeg)
       f:close()
       if cb then
         vim.schedule(function()

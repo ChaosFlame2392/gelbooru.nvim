@@ -21,7 +21,8 @@ local test_dir = nil
 function M.setup_all()
   mock_net.setup()
   mock_snacks.setup()
-  _G.image = require("gelbooru.ui.image")
+  _G.resolver = require("gelbooru.media.resolver")
+  _G.canvas = require("gelbooru.ui.canvas")
 
   orig_load_tags = tags.load_tags
   tags.load_tags = function()

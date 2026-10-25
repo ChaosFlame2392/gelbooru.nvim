@@ -4,7 +4,7 @@
 -- to maintain 100% backwards compatibility with existing plugins and test suites.
 
 local autocomplete = require("gelbooru.ui.autocomplete")
-local image = require("gelbooru.ui.image")
+local canvas = require("gelbooru.ui.canvas")
 local keymaps = require("gelbooru.ui.keymaps")
 local layout = require("gelbooru.ui.layout")
 local lifecycle = require("gelbooru.ui.lifecycle")
@@ -14,7 +14,7 @@ local M = {}
 
 -- Submodule Handles
 M.autocomplete = autocomplete
-M.image = image
+M.canvas = canvas
 M.keymaps = keymaps
 M.layout = layout
 M.lifecycle = lifecycle
@@ -96,9 +96,6 @@ M.close_confirm_modal = function(...)
 end
 M.delete_current = function(...)
   return render.delete_current(...)
-end
-M.resolve_post_dimensions = function(...)
-  return image.resolve_post_dimensions(...)
 end
 
 -- Keymaps & Action Handlers

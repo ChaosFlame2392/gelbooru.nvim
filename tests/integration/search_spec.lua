@@ -318,11 +318,11 @@ describe("Integration: Search & List flow", function()
   end)
 
   describe("Adversarial: Placement error resilience & teardown race safety", function()
-    it("protects execute_search via pcall if image.close_current_placement fails", function()
+    it("protects execute_search via pcall if canvas.close fails", function()
       ui.open()
-      local image_mod = require("gelbooru.ui.image")
-      local orig_close = image_mod.close_current_placement
-      image_mod.close_current_placement = function()
+      local canvas = require("gelbooru.ui.canvas")
+      local orig_close = canvas.close
+      canvas.close = function()
         error("Simulated catastrophic close error")
       end
 
@@ -334,7 +334,7 @@ describe("Integration: Search & List flow", function()
       local img_lines = harness.get_buf_lines(state.UI.bufs.img)
       assert.are.same({ "  Loading..." }, img_lines)
 
-      image_mod.close_current_placement = orig_close
+      canvas.close = orig_close
     end)
 
     it("protects execute_search if current_placement:close() throws an error", function()

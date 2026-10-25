@@ -64,12 +64,12 @@ local function clear_preview_buffers(posts_count)
   if state.State.torn_down then
     return
   end
-  local img_mod = require("gelbooru.ui.image")
+  local canvas = require("gelbooru.ui.canvas")
   local msg = posts_count == 0 and "  No posts found" or "  Loading..."
   if state.State.query and util.is_local_query(state.State.query) and posts_count == 0 then
     msg = "  No images found"
   end
-  pcall(img_mod.reset_canvas, msg)
+  pcall(canvas.render_placeholder, state.UI.wins.img, nil, msg)
 end
 
 function M.restore_history(idx)
@@ -88,10 +88,13 @@ function M.restore_history(idx)
   pcall(function()
     require("gelbooru.local.indexer").stop()
   end)
+  pcall(function()
+    require("gelbooru.media.resolver").abort_active()
+  end)
   State.search_epoch = (State.search_epoch or 0) + 1
   State.loading = false
   pcall(function()
-    require("gelbooru.ui.image").close_current_placement()
+    require("gelbooru.ui.canvas").close()
   end)
   State.history_idx = idx
   local h = State.history[idx]

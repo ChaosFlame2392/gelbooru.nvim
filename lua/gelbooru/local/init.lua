@@ -3,7 +3,7 @@ local M = {}
 local scan = require("gelbooru.local.scan")
 local state = require("gelbooru.core.state")
 local history = require("gelbooru.core.history")
-local image = require("gelbooru.ui.image")
+local canvas = require("gelbooru.ui.canvas")
 local download = require("gelbooru.net.download")
 local util = require("gelbooru.core.util")
 
@@ -47,7 +47,7 @@ function M.open_local(query_or_dir)
 
   local UI = state.UI
   local State = state.State
-  image.reset_canvas(#filtered_posts == 0 and "  No images found" or "  Loading...")
+  canvas.render_placeholder(UI.wins.img, nil, #filtered_posts == 0 and "  No images found" or "  Loading...")
 
   local new_query
   if query_or_dir and type(query_or_dir) == "string" and util.is_local_query(query_or_dir) then

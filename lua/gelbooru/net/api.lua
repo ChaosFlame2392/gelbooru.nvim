@@ -4,7 +4,8 @@ local util = require("gelbooru.core.util")
 local download = require("gelbooru.net.download")
 local tags = require("gelbooru.tags")
 local history = require("gelbooru.core.history")
-local image = require("gelbooru.ui.image")
+local canvas = require("gelbooru.ui.canvas")
+local resolver = require("gelbooru.media.resolver")
 local constants = require("gelbooru.core.constants")
 local engine = require("gelbooru.query.engine")
 
@@ -398,7 +399,7 @@ local function clear_preview_loading()
     return
   end
   pcall(function()
-    require("gelbooru.ui.image").reset_canvas("  Loading...")
+    canvas.render_placeholder(state.UI.wins.img, nil, "  Loading...")
   end)
 end
 
@@ -439,6 +440,9 @@ function M.execute_search(query, opts)
   download.cancel_prefetch_timers(true)
   pcall(function()
     require("gelbooru.local.indexer").stop()
+  end)
+  pcall(function()
+    require("gelbooru.media.resolver").abort_active()
   end)
 
   clear_preview_loading()
@@ -936,17 +940,17 @@ function M.save_current(cb)
         end
         local UI = state.UI
         if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and State.posts[State.cur] == p then
-          if image.is_video_post(p) then
-            image.extract_video_thumbnail(dest, p.id, function(thumb)
+          if resolver.is_video_post(p) then
+            resolver.extract_video_thumbnail(dest, p, function(thumb)
               if thumb and UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and State.posts[State.cur] == p then
-                image.render_image(UI.wins.img, thumb)
+                canvas.render(UI.wins.img, thumb)
               end
             end)
           else
-            image.render_image(UI.wins.img, dest)
+            canvas.render(UI.wins.img, dest)
           end
-        elseif image.is_video_post(p) then
-          image.extract_video_thumbnail(dest, p.id)
+        elseif resolver.is_video_post(p) then
+          resolver.extract_video_thumbnail(dest, p)
         end
         ui.render_list()
       end
@@ -978,17 +982,17 @@ function M.save_current(cb)
       end
       local UI = state.UI
       if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and State.posts[State.cur] == p then
-        if image.is_video_post(p) then
-          image.extract_video_thumbnail(dest, p.id, function(thumb)
+        if resolver.is_video_post(p) then
+          resolver.extract_video_thumbnail(dest, p, function(thumb)
             if thumb and UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and State.posts[State.cur] == p then
-              image.render_image(UI.wins.img, thumb)
+              canvas.render(UI.wins.img, thumb)
             end
           end)
         else
-          image.render_image(UI.wins.img, dest)
+          canvas.render(UI.wins.img, dest)
         end
-      elseif image.is_video_post(p) then
-        image.extract_video_thumbnail(dest, p.id)
+      elseif resolver.is_video_post(p) then
+        resolver.extract_video_thumbnail(dest, p)
       end
       ui.render_list()
     end

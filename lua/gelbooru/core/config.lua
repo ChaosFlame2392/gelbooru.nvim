@@ -15,6 +15,7 @@ M.options = {
   show_tags_in_list = false,
   prefetch_radius = constants.DEFAULT_PREFETCH_RADIUS,
   media_player = nil,
+  backend = "snacks",
 }
 
 function M.get_discovered_tags_file()
@@ -99,6 +100,7 @@ function M.setup(opts)
   M.options.show_tags_in_list = get_opt("show_tags_in_list", "SHOW_TAGS_IN_LIST", M.options.show_tags_in_list)
   M.options.prefetch_radius = clamp(get_opt("prefetch_radius", "PREFETCH_RADIUS", M.options.prefetch_radius), constants.PREFETCH_RADIUS_MIN, constants.PREFETCH_RADIUS_MAX)
   M.options.media_player = get_opt("media_player", "MEDIA_PLAYER", M.options.media_player)
+  M.options.backend = get_opt("backend", "BACKEND", M.options.backend)
 end
 
 return M

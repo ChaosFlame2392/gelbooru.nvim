@@ -10,7 +10,8 @@ local api = require("gelbooru.net.api")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
 local config = require("gelbooru.core.config")
-local image = require("gelbooru.ui.image")
+local canvas = require("gelbooru.ui.canvas")
+local resolver = require("gelbooru.media.resolver")
 local download = require("gelbooru.net.download")
 
 local function get_keymap_cb(buf, mode, key)
@@ -272,8 +273,8 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       state.State.list_width_ratio = 0.25
 
       local nudged = false
-      local orig_nudge = image.nudge_current_placement
-      image.nudge_current_placement = function()
+      local orig_nudge = canvas.nudge
+      canvas.nudge = function()
         nudged = true
       end
 
@@ -283,9 +284,9 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       lt_cb()
 
       assert.is_true(math.abs(state.State.list_width_ratio - 0.225) < 1e-6, "list_width_ratio should decrement by 0.025")
-      assert.is_true(nudged, "image.nudge_current_placement should be called on width change")
+      assert.is_true(nudged, "canvas.nudge should be called on width change")
 
-      image.nudge_current_placement = orig_nudge
+      canvas.nudge = orig_nudge
     end)
 
     it("'<' clamps State.list_width_ratio at 0.10 minimum", function()
@@ -307,8 +308,8 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       state.State.list_width_ratio = 0.25
 
       local nudged = false
-      local orig_nudge = image.nudge_current_placement
-      image.nudge_current_placement = function()
+      local orig_nudge = canvas.nudge
+      canvas.nudge = function()
         nudged = true
       end
 
@@ -318,9 +319,9 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       gt_cb()
 
       assert.is_true(math.abs(state.State.list_width_ratio - 0.275) < 1e-6, "list_width_ratio should increment by 0.025")
-      assert.is_true(nudged, "image.nudge_current_placement should be called on width change")
+      assert.is_true(nudged, "canvas.nudge should be called on width change")
 
-      image.nudge_current_placement = orig_nudge
+      canvas.nudge = orig_nudge
     end)
 
     it("'>' clamps State.list_width_ratio at 0.40 maximum", function()
@@ -354,8 +355,8 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       ui.open()
 
       local nudged_count = 0
-      local orig_nudge = image.nudge_current_placement
-      image.nudge_current_placement = function()
+      local orig_nudge = canvas.nudge
+      canvas.nudge = function()
         nudged_count = nudged_count + 1
       end
 
@@ -395,7 +396,7 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       local vdiv_cfg_restored = vim.api.nvim_win_get_config(state.UI.wins.vdiv)
       assert.is_false(vdiv_cfg_restored.hide == true, "vdiv window should no longer be hidden")
 
-      image.nudge_current_placement = orig_nudge
+      canvas.nudge = orig_nudge
     end)
 
     it("stress test: toggles Zen Mode repeatedly 15 times without error or leaking window handles", function()
@@ -709,7 +710,7 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       local f = io.open(local_img, "w")
       if f then f:write("fake image data"); f:close() end
 
-      image.render_image(state.UI.wins.img, local_img)
+      canvas.render(state.UI.wins.img, local_img)
 
       local placement = state.UI.current_placement
       assert.is_not_nil(placement)
@@ -723,10 +724,10 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
         placement:update()
       end)
 
-      -- Verify close_current_placement aborts active convert process
+      -- Verify canvas.close aborts active convert process
       assert.is_not_nil(placement.img._convert)
-      image.close_current_placement()
-      assert.is_true(placement.img._convert.aborted, "close_current_placement must call abort() on in-flight convert")
+      canvas.close()
+      assert.is_true(placement.img._convert.aborted, "canvas.close must call abort() on in-flight convert")
     end)
 
     it("Issue 0.3: toggle_zen disables cursorline and maintains UI.wins.list focus; exiting restores cursorline", function()
@@ -793,7 +794,7 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       local f = io.open(local_img, "w")
       if f then f:write("fake image data"); f:close() end
 
-      image.render_image(state.UI.wins.img, local_img)
+      canvas.render(state.UI.wins.img, local_img)
       local img_buf = state.UI.current_placement.buf
       assert.is_not_nil(img_buf)
 
@@ -889,7 +890,12 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       local cache_dir = config.options.cache_dir
       vim.fn.mkdir(cache_dir, "p")
       local vthumb = string.format("%s/vthumb_9955.jpg", cache_dir)
-      vim.fn.writefile({ string.rep("x", 600) }, vthumb)
+      local soi = string.char(255, 216)
+      local sof0 = string.char(255, 192, 0, 17, 8, 2, 88, 3, 32, 3, 1, 17, 0, 2, 17, 1, 3, 17, 1)
+      local eoi = string.char(255, 217)
+      local valid_jpeg = soi .. sof0 .. string.rep("x", 600) .. eoi
+      local f = io.open(vthumb, "wb")
+      if f then f:write(valid_jpeg) f:close() end
 
       state.State.posts = {
         {
@@ -955,7 +961,7 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
       download.prefetch_around = orig_prefetch
     end)
 
-    it("Issue 13: ui.teardown invokes image.abort_all_ffmpeg() and kills active ffmpeg processes", function()
+    it("Issue 13: ui.teardown invokes resolver.abort_video_transcodes() and kills active ffmpeg processes", function()
       ui.open()
 
       local killed = {}
@@ -964,13 +970,13 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
           table.insert(killed, sig)
         end,
       }
-      image.active_ffmpeg_handles[mock_ffmpeg_handle] = mock_ffmpeg_handle
+      resolver.active_ffmpeg_handles[mock_ffmpeg_handle] = mock_ffmpeg_handle
 
       ui.teardown()
 
       assert.are.equal(1, #killed)
       assert.are.equal(9, killed[1])
-      assert.are.equal(0, vim.tbl_count(image.active_ffmpeg_handles))
+      assert.are.equal(0, vim.tbl_count(resolver.active_ffmpeg_handles))
     end)
   end)
 end)

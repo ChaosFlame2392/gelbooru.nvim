@@ -62,7 +62,6 @@ M.UI = {
   resume_timer = nil,
   prefetch_timers = {},
   indexer_timer = nil,
-  abort_cleanup_timer = nil,
   current_placement = nil,
   confirm_prev_win = nil,
   PREVIEW_COOLDOWN_MS = constants.PREVIEW_COOLDOWN_REMOTE_MS,
@@ -115,7 +114,6 @@ function M.reset_ui()
   M.UI.resume_timer = nil
   M.UI.prefetch_timers = {}
   M.UI.indexer_timer = nil
-  M.UI.abort_cleanup_timer = nil
   M.UI.current_placement = nil
   M.UI.confirm_prev_win = nil
 end

@@ -4,7 +4,8 @@ local config = require("gelbooru.core.config")
 local constants = require("gelbooru.core.constants")
 local download = require("gelbooru.net.download")
 local history = require("gelbooru.core.history")
-local image = require("gelbooru.ui.image")
+local canvas = require("gelbooru.ui.canvas")
+local resolver = require("gelbooru.media.resolver")
 local layout = require("gelbooru.ui.layout")
 local render = require("gelbooru.ui.render")
 local state = require("gelbooru.core.state")
@@ -77,7 +78,10 @@ function M.force_refresh()
     p._metadata_fetched = nil
   end
   if p and (p.id or p.file_url) then
-    image.clear_snacks_cache_for(p.id or p.file_url)
+    resolver.clear_snacks_cache_for(p.id or p.file_url)
+    if p.id then
+      resolver.clear_cache(p.id)
+    end
   end
   pcall(function()
     require("gelbooru.net.api").clear_session_cache()
@@ -115,7 +119,7 @@ function M.open_media_viewer()
     render.set_status("No file URL for this post", constants.STATUS_TIMEOUT_HISTORY_MS)
     return
   end
-  local ext = image.file_ext_from_url(p.file_url)
+  local ext = resolver.file_ext_from_url(p.file_url)
   local dest = string.format("%s/%s.%s", config.options.save_dir, tostring(p.id), ext)
   if vim.fn.filereadable(dest) == 1 then
     util.open_media(dest)
@@ -147,7 +151,7 @@ function M.toggle_zen()
     end
     render.render_list()
   end
-  image.nudge_current_placement()
+  canvas.nudge()
 end
 
 function M.return_to_list()
@@ -339,14 +343,14 @@ function M.setup_list_keymaps()
     local l = layout.calc_layout(true)
     layout.apply_layout(l)
     render.render_list()
-    image.nudge_current_placement()
+    canvas.nudge()
   end)
   lm(">", function()
     State.list_width_ratio = math.max(constants.MIN_LIST_RATIO, math.min(constants.MAX_LIST_RATIO, (State.list_width_ratio or constants.DEFAULT_LIST_WIDTH_RATIO) + constants.LIST_WIDTH_STEP))
     local l = layout.calc_layout(true)
     layout.apply_layout(l)
     render.render_list()
-    image.nudge_current_placement()
+    canvas.nudge()
   end)
   lm("\\", M.toggle_zen)
   lm("o", M.open_web_page)
@@ -444,19 +448,91 @@ function M.setup_meta_keymaps()
   end
 end
 
+M.SHIELD_KEYS = {
+  "b", "B", "c", "C", "e", "E", "f", "F", "h", "H", "l", "L",
+  "n", "N", "p", "P", "v", "V", "<C-v>", "w", "W", "x", "X",
+  "y", "Y", "z", "Z", ";", ":", "'", '"', "<BS>", "<Del>",
+  "<C-f>", "<C-b>", "<C-d>", "<C-u>", "<C-e>", "<C-y>", "<C-o>", "<C-i>",
+  "<C-p>", "<C-n>", "<C-w>", "<C-r>", "<Tab>", "<S-Tab>",
+  "<Up>", "<Down>", "<Left>", "<Right>",
+}
+
+function M.attach_image_keymaps(buf)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  util.shield_buffer(buf)
+
+  local function go_list()
+    M.return_to_list()
+  end
+
+  local function handle_q()
+    if state.State.zen_mode then
+      teardown()
+    else
+      go_list()
+    end
+  end
+
+  local function nav(action)
+    M.on_cursor_change(action)
+  end
+
+  util.keymap(buf, "n", "<LeftMouse>", go_list)
+  util.keymap(buf, "n", "<2-LeftMouse>", go_list)
+  util.keymap(buf, "n", "<3-LeftMouse>", go_list)
+  util.keymap(buf, "n", "<4-LeftMouse>", go_list)
+  util.keymap(buf, "n", "<RightMouse>", go_list)
+  util.keymap(buf, "n", "<Space>", go_list)
+  util.keymap(buf, "n", " ", go_list)
+  util.keymap(buf, "n", "<Leader>", go_list)
+  util.keymap(buf, "n", "<Localleader>", go_list)
+
+  util.keymap(buf, "n", "j", function() nav(1) end)
+  util.keymap(buf, "n", "k", function() nav(-1) end)
+  util.keymap(buf, "n", "gg", function() nav("gg") end)
+  util.keymap(buf, "n", "G", function() nav("G") end)
+
+  util.keymap(buf, "n", "r", function()
+    state.State.cur_id = nil
+    render.render_preview(false)
+  end)
+
+  util.keymap(buf, "n", "R", M.force_refresh)
+
+  util.keymap(buf, "n", "m", function()
+    state.State.show_meta = not state.State.show_meta
+    layout.handle_resize()
+  end)
+
+  util.keymap(buf, "n", "u", render.search_active_artist)
+  util.keymap(buf, "n", "o", M.open_web_page)
+  util.keymap(buf, "n", "O", M.open_media_viewer)
+
+  util.keymap(buf, "n", "<CR>", api.save_current)
+  util.keymap(buf, "n", "\\", M.toggle_zen)
+
+  util.keymap(buf, "n", "q", handle_q)
+  util.keymap(buf, "n", "<Esc>", handle_q)
+
+  util.keymap(buf, "n", "d", render.delete_current)
+  util.keymap(buf, "n", "D", render.delete_current)
+
+  for _, k in ipairs({ "i", "I", "a", "A", "s", "S", "/" }) do
+    util.keymap(buf, "n", k, enter_search)
+  end
+
+  for _, sk in ipairs(M.SHIELD_KEYS) do
+    util.keymap(buf, "n", sk, go_list)
+  end
+end
+
 function M.setup_noninteractive_keymaps()
   local UI = state.UI
   local mouse_clicks = {
     "<LeftMouse>", "<2-LeftMouse>", "<3-LeftMouse>", "<4-LeftMouse>",
     "<RightMouse>", "<2-RightMouse>", "<3-RightMouse>", "<4-RightMouse>",
-  }
-  local shield_keys = {
-    "b", "B", "c", "C", "e", "E", "f", "F", "h", "H", "l", "L",
-    "n", "N", "p", "P", "v", "V", "<C-v>", "w", "W", "x", "X",
-    "y", "Y", "z", "Z", ";", ":", "'", '"', "<BS>", "<Del>",
-    "<C-f>", "<C-b>", "<C-d>", "<C-u>", "<C-e>", "<C-y>", "<C-o>", "<C-i>",
-    "<C-p>", "<C-n>", "<C-w>", "<C-r>", "<Tab>", "<S-Tab>",
-    "<Up>", "<Down>", "<Left>", "<Right>",
   }
   for _, buf in ipairs({ UI.bufs.frame, UI.bufs.div, UI.bufs.vdiv, UI.bufs.hdiv, UI.bufs.img, UI.bufs.status, UI.bufs.ac }) do
     if buf and vim.api.nvim_buf_is_valid(buf) then
@@ -476,7 +552,7 @@ function M.setup_noninteractive_keymaps()
       util.keymap(buf, "n", "\\", M.toggle_zen)
       util.keymap(buf, "n", "d", render.delete_current)
       util.keymap(buf, "n", "D", render.delete_current)
-      for _, sk in ipairs(shield_keys) do
+      for _, sk in ipairs(M.SHIELD_KEYS) do
         util.keymap(buf, "n", sk, M.return_to_list)
       end
     end
