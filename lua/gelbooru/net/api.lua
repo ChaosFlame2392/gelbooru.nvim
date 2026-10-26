@@ -2,7 +2,7 @@ local config = require("gelbooru.core.config")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
 local download = require("gelbooru.net.download")
-local tags = require("gelbooru.tags")
+local catalog = require("gelbooru.tags.catalog")
 local history = require("gelbooru.core.history")
 local canvas = require("gelbooru.ui.canvas")
 local resolver = require("gelbooru.media.resolver")
@@ -89,15 +89,17 @@ function M.check_self_heal(query_str, cb)
     return
   end
 
-  local State = state.State
-  if State.tags_loaded and State.tags_by_name and not State.tags_by_name[clean_tag] then
+  local is_loaded = catalog.is_loaded()
+  local has_tag = catalog.has_tag(clean_tag)
+  if is_loaded and not has_tag then
     if cb then cb(false) end
     return
   end
 
   pcall(function()
-    local db = require("gelbooru.tags.db")
-    db.verify_and_prune_tag(clean_tag, cb)
+    catalog.verify_and_prune_tag(clean_tag, function(pruned)
+      if cb then cb(pruned) end
+    end)
   end)
 end
 
@@ -469,7 +471,8 @@ function M.execute_search(query, opts)
   local tags_to_resolve = plan.base_query or query or ""
   for word in tags_to_resolve:gmatch("%S+") do
     local clean_word = word:gsub("^[-~]", ""):lower()
-    if clean_word ~= "" and clean_word ~= "|" and not clean_word:find(":") and not State.tags_by_name[clean_word] then
+    local has_w = catalog.has_tag(clean_word)
+    if clean_word ~= "" and clean_word ~= "|" and not clean_word:find(":") and not has_w then
       local url = string.format("%s&names=%s%s", config.options.tags_api, util.url_encode(clean_word), util.auth_qs())
       download.curl_async(url, function(body)
         if state.State.torn_down then
@@ -481,27 +484,18 @@ function M.execute_search(query, opts)
         local ok, data = pcall(vim.json and vim.json.decode or vim.fn.json_decode, body)
         if ok and data and data.tag then
           local tag_list = ensure_array(data.tag)
+          local items = {}
           for _, t in ipairs(tag_list) do
             if t.name and t.type then
-              local nl = t.name:lower()
-              if not State.tags_by_name[nl] then
-                local item = {
-                  n = t.name,
-                  t = tonumber(t.type) or 0,
-                  c = tonumber(t.count) or 0,
-                }
-                if item.t == 3 then
-                  tags.add_tag_to_index(item, State.series, State.series_by_first)
-                elseif item.t == 4 then
-                  tags.add_tag_to_index(item, State.characters, State.chars_by_first)
-                elseif item.t == 1 then
-                  tags.add_tag_to_index(item, State.artists, State.artists_by_first)
-                else
-                  tags.add_tag_to_index(item, State.general, State.general_by_first)
-                end
-                tags.persist_discovered_tag(item)
-              end
+              items[#items + 1] = {
+                n = t.name,
+                t = tonumber(t.type) or 0,
+                c = tonumber(t.count) or 0,
+              }
             end
+          end
+          if #items > 0 then
+            catalog.record_discovered(items)
           end
         end
       end)

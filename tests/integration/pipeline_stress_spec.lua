@@ -727,11 +727,9 @@ describe("Pipeline & Concurrency Stress Testing Suite", function()
         local timers = {
           scroll = uv.new_timer(),
           status = uv.new_timer(),
-          api_tag = uv.new_timer(),
           ac_debounce = uv.new_timer(),
           resize = uv.new_timer(),
           resume = uv.new_timer(),
-          save_discovered = uv.new_timer(),
           prefetch = uv.new_timer(),
         }
 
@@ -741,11 +739,9 @@ describe("Pipeline & Concurrency Stress Testing Suite", function()
 
         state.UI.scroll_timer = timers.scroll
         state.UI.status_timer = timers.status
-        state.UI.api_tag_timer = timers.api_tag
         state.UI.ac_debounce_timer = timers.ac_debounce
         state.UI.resize_timer = timers.resize
         state.UI.resume_timer = timers.resume
-        state.UI.save_discovered_timer = timers.save_discovered
         state.UI.prefetch_timers = { [1] = timers.prefetch }
 
         -- Teardown UI
@@ -754,11 +750,9 @@ describe("Pipeline & Concurrency Stress Testing Suite", function()
         -- Verify all timers were stopped, closed, and nil'd out
         assert.is_nil(state.UI.scroll_timer)
         assert.is_nil(state.UI.status_timer)
-        assert.is_nil(state.UI.api_tag_timer)
         assert.is_nil(state.UI.ac_debounce_timer)
         assert.is_nil(state.UI.resize_timer)
         assert.is_nil(state.UI.resume_timer)
-        assert.is_nil(state.UI.save_discovered_timer)
         assert.are.same({}, state.UI.prefetch_timers)
 
         for name, t in pairs(timers) do

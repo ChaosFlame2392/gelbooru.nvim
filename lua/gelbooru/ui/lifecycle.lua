@@ -10,7 +10,7 @@ local layout = require("gelbooru.ui.layout")
 local log = require("gelbooru.core.log")
 local render = require("gelbooru.ui.render")
 local state = require("gelbooru.core.state")
-local tags = require("gelbooru.tags")
+local catalog = require("gelbooru.tags.catalog")
 local util = require("gelbooru.core.util")
 
 local M = {}
@@ -22,26 +22,10 @@ function M.teardown()
   log("INFO", "LIFECYCLE", "Teardown Gelbooru UI")
   UI.scroll_timer = util.close_timer(UI.scroll_timer)
   UI.status_timer = util.close_timer(UI.status_timer)
-  UI.api_tag_timer = util.close_timer(UI.api_tag_timer)
   UI.ac_debounce_timer = util.close_timer(UI.ac_debounce_timer)
   UI.resize_timer = util.close_timer(UI.resize_timer)
   UI.resume_timer = util.close_timer(UI.resume_timer)
-  if UI.save_discovered_timer or #State.discovered > 0 then
-    pcall(tags.save_discovered_now)
-  end
-  UI.save_discovered_timer = util.close_timer(UI.save_discovered_timer)
-
-  if UI.prune_disk_timer or (State.pending_prunes and next(State.pending_prunes) ~= nil) then
-    pcall(function()
-      local db = require("gelbooru.tags.db")
-      local prunes = State.pending_prunes
-      State.pending_prunes = {}
-      if prunes and next(prunes) ~= nil then
-        db.prune_tags_from_disk(prunes)
-      end
-    end)
-  end
-  UI.prune_disk_timer = util.close_timer(UI.prune_disk_timer)
+  pcall(catalog.teardown)
 
   for _, t in pairs(UI.fetcher_timers or {}) do
     util.close_timer(t)
@@ -373,7 +357,7 @@ function M.ensure_ui()
   util.ensure(config.options.cache_dir)
   util.ensure(config.options.save_dir)
   util.ensure(config.options.tags_dir)
-  tags.load_tags()
+  catalog.load()
 
   -- Silently resume any orphaned user-save .part files from previous sessions.
   UI.resume_timer = vim.defer_fn(function()

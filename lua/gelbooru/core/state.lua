@@ -12,27 +12,12 @@ M.State = {
   show_meta = true,
   history = {},
   history_idx = 0,
-  series = {},
-  characters = {},
-  artists = {},
-  general = {},
-  discovered = {},
-  discovered_by_name = {},
-  chars_by_first = {},
-  series_by_first = {},
-  artists_by_first = {},
-  general_by_first = {},
-  all_tags = {},
-  tags_by_name = {},
   autocomplete_filtered = {},
   autocomplete_cur = 1,
   autocomplete_navigated = false,
   input_focused = false,
   scroll_dir = 1,
   search_epoch = 0,
-  tag_load_epoch = 0,
-  tags_loaded = false,
-  tags_loading = false,
   torn_down = false,
   prev_mouse = nil,
   list_width_ratio = constants.DEFAULT_LIST_WIDTH_RATIO,
@@ -40,7 +25,6 @@ M.State = {
   saved_index = {},
   session_cache = {},
   pending_deletions = {},
-  pending_prunes = {},
   local_folder_posts = nil,
   local_filter = nil,
   local_query_tag_str = nil,
@@ -52,10 +36,7 @@ M.UI = {
   aug = nil,
   scroll_timer = nil,
   status_timer = nil,
-  api_tag_timer = nil,
   ac_debounce_timer = nil,
-  save_discovered_timer = nil,
-  prune_disk_timer = nil,
   fetcher_timers = {},
   tags_spinner_win = nil,
   resize_timer = nil,
@@ -88,7 +69,6 @@ function M.reset_query_state()
   M.State.zen_mode = false
   M.State.saved_index = {}
   M.State.pending_deletions = {}
-  M.State.pending_prunes = {}
   -- session_cache is preserved across query resets (TTL-managed in net/api.lua)
   M.State.local_folder_posts = nil
   M.State.local_filter = nil
@@ -104,10 +84,7 @@ function M.reset_ui()
   M.UI.aug = nil
   M.UI.scroll_timer = nil
   M.UI.status_timer = nil
-  M.UI.api_tag_timer = nil
   M.UI.ac_debounce_timer = nil
-  M.UI.save_discovered_timer = nil
-  M.UI.prune_disk_timer = nil
   M.UI.fetcher_timers = {}
   M.UI.tags_spinner_win = nil
   M.UI.resize_timer = nil
@@ -119,28 +96,9 @@ function M.reset_ui()
 end
 
 function M.reset_tag_state()
-  M.State.tag_load_epoch = (M.State.tag_load_epoch or 0) + 1
-  M.State.tags_loaded = false
-  M.State.tags_loading = false
-  M.State.series = {}
-  M.State.characters = {}
-  M.State.artists = {}
-  M.State.general = {}
-  M.State.discovered = {}
-  M.State.discovered_by_name = {}
-  M.State.chars_by_first = {}
-  M.State.series_by_first = {}
-  M.State.artists_by_first = {}
-  M.State.general_by_first = {}
-  M.State.all_tags = {}
-  M.State.tags_by_name = {}
   M.State.autocomplete_filtered = {}
   pcall(function()
-    package.loaded["gelbooru.tags.resolve"] = package.loaded["gelbooru.tags.resolve"]
-    local resolve = package.loaded["gelbooru.tags.resolve"]
-    if resolve and resolve.reset_cache then
-      resolve.reset_cache()
-    end
+    require("gelbooru.tags.catalog").reset()
   end)
 end
 

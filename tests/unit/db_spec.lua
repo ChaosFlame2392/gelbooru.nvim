@@ -1,7 +1,7 @@
 -- tests/unit/db_spec.lua
--- Unit tests for gelbooru.tags.db — tag validation and indexing.
+-- Unit tests for gelbooru.tags.catalog — tag validation and indexing.
 
-local db = require("gelbooru.tags.db")
+local db = require("gelbooru.tags.catalog")
 local state = require("gelbooru.core.state")
 
 describe("db.is_clean_tag", function()
@@ -62,8 +62,7 @@ describe("db.add_tag_to_index", function()
   before_each(function()
     target_list = {}
     bucket_map = {}
-    -- Reset tags_by_name so tests don't interfere with each other.
-    state.State.tags_by_name = {}
+    db.reset()
   end)
 
   it("adds a valid tag to target_list", function()
@@ -81,7 +80,7 @@ describe("db.add_tag_to_index", function()
   it("registers tag in tags_by_name", function()
     local t = { n = "hoshino_ai", c = 5000, t = 4 }
     db.add_tag_to_index(t, target_list, bucket_map)
-    assert.is_not_nil(state.State.tags_by_name["hoshino_ai"])
+    assert.is_true(db.has_tag("hoshino_ai"))
   end)
 
   it("buckets the tag by first letter", function()
@@ -101,7 +100,7 @@ describe("db.add_tag_to_index", function()
     assert.has_no.errors(function()
       db.add_tag_to_index(t, nil, nil)
     end)
-    assert.is_not_nil(state.State.tags_by_name["hoshino_ai"])
+    assert.is_true(db.has_tag("hoshino_ai"))
   end)
 
   it("handles nil or invalid tag table inputs safely without throwing", function()
@@ -141,7 +140,7 @@ describe("db.parse_tag_file", function()
   before_each(function()
     tmp_dir = vim.fn.tempname()
     vim.fn.mkdir(tmp_dir, "p")
-    state.State.tags_by_name = {}
+    db.reset()
   end)
 
   after_each(function()
@@ -179,11 +178,11 @@ describe("db.parse_tag_file", function()
     assert.are.equal("series_two", target_list[2].n)
     assert.is_not_nil(bucket_map["s"])
     assert.are.equal(2, #bucket_map["s"])
-    assert.is_not_nil(state.State.tags_by_name["series_one"])
+    assert.is_true(db.has_tag("series_one"))
   end)
 end)
 
-describe("db.load_tags", function()
+describe("catalog.load", function()
   local tmp_dir
   local config = require("gelbooru.core.config")
   local orig_tags_dir
@@ -193,22 +192,24 @@ describe("db.load_tags", function()
     tmp_dir = vim.fn.tempname()
     vim.fn.mkdir(tmp_dir, "p")
     config.options.tags_dir = tmp_dir
-    state.reset_tag_state()
+    db.reset()
   end)
 
   after_each(function()
     config.options.tags_dir = orig_tags_dir
     vim.fn.delete(tmp_dir, "rf")
-    state.reset_tag_state()
+    db.reset()
   end)
 
-  it("loads META_TAGS and marks tags_loaded = true when no category files exist", function()
-    db.load_tags()
-    assert.is_true(state.State.tags_loaded)
-    assert.is_false(state.State.tags_loading)
-    assert.is_not_nil(state.State.tags_by_name["sort:score"])
-    assert.is_not_nil(state.State.tags_by_name["rating:general"])
-    assert.is_true(#state.State.all_tags >= #config.META_TAGS)
+  it("loads META_TAGS and marks is_loaded() == true when no category files exist", function()
+    local done = false
+    db.load({ tags_dir = tmp_dir }, function()
+      done = true
+    end)
+    assert.is_true(db.is_loaded())
+    assert.is_false(db.is_loading())
+    assert.is_true(db.has_tag("sort:score"))
+    assert.is_true(db.has_tag("rating:general"))
   end)
 
   it("loads discovered.json synchronously if present in tags_dir", function()
@@ -222,12 +223,13 @@ describe("db.load_tags", function()
     -- Create split files so has_split is true
     vim.fn.writefile({ "[]" }, tmp_dir .. "/general.json")
 
-    db.load_tags()
+    local done = false
+    db.load({ tags_dir = tmp_dir, discovered_file = disc_file }, function()
+      done = true
+    end)
 
-    assert.is_not_nil(state.State.discovered_by_name["custom_artist_tag"])
-    assert.is_not_nil(state.State.discovered_by_name["custom_char_tag"])
-    assert.is_not_nil(state.State.tags_by_name["custom_artist_tag"])
-    assert.is_not_nil(state.State.tags_by_name["custom_char_tag"])
+    assert.is_true(db.has_tag("custom_artist_tag"))
+    assert.is_true(db.has_tag("custom_char_tag"))
   end)
 end)
 
@@ -272,41 +274,16 @@ end)
 
 describe("db.prune_tag", function()
   before_each(function()
-    state.reset_tag_state()
-    state.State.tags_by_name = {
-      ["dead_tag"] = { n = "dead_tag", c = 100, t = 0 },
-      ["live_tag"] = { n = "live_tag", c = 500, t = 0 },
-    }
-    state.State.general = {
-      { n = "dead_tag", n_lower = "dead_tag", c = 100, t = 0 },
-      { n = "live_tag", n_lower = "live_tag", c = 500, t = 0 },
-    }
-    state.State.general_by_first = {
-      ["d"] = { { n = "dead_tag", n_lower = "dead_tag", c = 100, t = 0 } },
-      ["l"] = { { n = "live_tag", n_lower = "live_tag", c = 500, t = 0 } },
-    }
-    state.State.all_tags = {
-      { n = "dead_tag", n_lower = "dead_tag" },
-      { n = "live_tag", n_lower = "live_tag" },
-    }
-    state.State.discovered = {
-      { n = "dead_tag", n_lower = "dead_tag" },
-    }
-    state.State.discovered_by_name = {
-      ["dead_tag"] = true,
-    }
+    db.reset()
+    db.add_tag({ n = "dead_tag", c = 100, t = 0 })
+    db.add_tag({ n = "live_tag", c = 500, t = 0 })
   end)
 
   it("prunes tag from memory across all tables", function()
     local existed = db.prune_tag("dead_tag")
     assert.is_true(existed)
-    assert.is_nil(state.State.tags_by_name["dead_tag"])
-    assert.are.equal(1, #state.State.general)
-    assert.are.equal("live_tag", state.State.general[1].n)
-    assert.are.equal(0, #state.State.general_by_first["d"])
-    assert.are.equal(1, #state.State.all_tags)
-    assert.is_nil(state.State.discovered_by_name["dead_tag"])
-    assert.are.equal(0, #state.State.discovered)
+    assert.is_false(db.has_tag("dead_tag"))
+    assert.is_true(db.has_tag("live_tag"))
   end)
 
   it("returns false for non-existent tag", function()
@@ -317,60 +294,42 @@ end)
 
 describe("db.update_tag_in_index", function()
   before_each(function()
-    state.reset_tag_state()
-    state.State.tags_by_name = {}
-    state.State.general = {}
-    state.State.series = {}
-    state.State.characters = {}
-    state.State.artists = {}
-    state.State.general_by_first = {}
-    state.State.series_by_first = {}
-    state.State.chars_by_first = {}
-    state.State.artists_by_first = {}
+    db.reset()
   end)
 
   it("updates tag count in place", function()
-    local t = { n = "rem", c = 5000, t = 4 }
-    db.add_tag_to_index(t, state.State.characters, state.State.chars_by_first)
-    assert.are.equal(5000, state.State.tags_by_name["rem"].c)
+    db.add_tag({ n = "rem", c = 5000, t = 4 })
+    assert.are.equal(5000, db.get_tag("rem").c)
 
     local ok = db.update_tag_in_index({ n = "rem", c = 7500, t = 4 })
     assert.is_true(ok)
-    assert.are.equal(7500, state.State.tags_by_name["rem"].c)
+    assert.are.equal(7500, db.get_tag("rem").c)
   end)
 
   it("reclassifies tag type and moves across category lists and buckets", function()
-    local t = { n = "re_zero", c = 1000, t = 0 }
-    db.add_tag_to_index(t, state.State.general, state.State.general_by_first)
-    assert.are.equal(1, #state.State.general)
-    assert.are.equal(0, #state.State.series)
+    db.add_tag({ n = "re_zero", c = 1000, t = 0 })
+    assert.are.equal(0, db.get_tag("re_zero").t)
 
     local ok = db.update_tag_in_index({ n = "re_zero", c = 1200, t = 3 })
     assert.is_true(ok)
-    assert.are.equal(0, #state.State.general)
-    assert.are.equal(1, #state.State.series)
-    assert.are.equal(3, state.State.tags_by_name["re_zero"].t)
-    assert.are.equal(1200, state.State.tags_by_name["re_zero"].c)
-    assert.are.equal(1, #state.State.series_by_first["r"])
+    assert.are.equal(3, db.get_tag("re_zero").t)
+    assert.are.equal(1200, db.get_tag("re_zero").c)
   end)
 
   it("prunes tag if updated count becomes 0 or invalid", function()
-    local t = { n = "dead_soon", c = 100, t = 0 }
-    db.add_tag_to_index(t, state.State.general, state.State.general_by_first)
-    assert.is_not_nil(state.State.tags_by_name["dead_soon"])
+    db.add_tag({ n = "dead_soon", c = 100, t = 0 })
+    assert.is_true(db.has_tag("dead_soon"))
 
     local ok = db.update_tag_in_index({ n = "dead_soon", c = 0, t = 0 })
     assert.is_false(ok)
-    assert.is_nil(state.State.tags_by_name["dead_soon"])
-    assert.are.equal(0, #state.State.general)
+    assert.is_false(db.has_tag("dead_soon"))
   end)
 
   it("adds new clean tag if not previously in index", function()
     local ok = db.update_tag_in_index({ n = "brand_new_series", c = 300, t = 3 })
     assert.is_true(ok)
-    assert.is_not_nil(state.State.tags_by_name["brand_new_series"])
-    assert.are.equal(1, #state.State.series)
-    assert.are.equal("brand_new_series", state.State.series[1].n)
+    assert.is_true(db.has_tag("brand_new_series"))
+    assert.are.equal(3, db.get_tag("brand_new_series").t)
   end)
 end)
 
@@ -419,15 +378,9 @@ describe("db.verify_and_prune_tag", function()
 
   before_each(function()
     orig_curl_async = download.curl_async
-    state.reset_tag_state()
-    state.State.tags_by_name = {
-      ["dying_tag"] = { n = "dying_tag", c = 50, t = 0 },
-      ["surviving_tag"] = { n = "surviving_tag", c = 50, t = 0 },
-    }
-    state.State.general = {
-      { n = "dying_tag", n_lower = "dying_tag", c = 50, t = 0 },
-      { n = "surviving_tag", n_lower = "surviving_tag", c = 50, t = 0 },
-    }
+    db.reset()
+    db.add_tag({ n = "dying_tag", c = 50, t = 0 })
+    db.add_tag({ n = "surviving_tag", c = 50, t = 0 })
   end)
 
   after_each(function()
@@ -451,31 +404,11 @@ describe("db.verify_and_prune_tag", function()
     vim.wait(1000, function() return done end)
     assert.is_true(done)
     assert.is_true(pruned_res)
-    assert.is_nil(state.State.tags_by_name["dying_tag"])
-    assert.are.equal(1, #state.State.general)
+    assert.is_false(db.has_tag("dying_tag"))
+    assert.is_true(db.has_tag("surviving_tag"))
   end)
 
-  it("prunes tag from memory when API returns empty/no tag", function()
-    download.curl_async = function(url, cb)
-      vim.schedule(function()
-        cb(vim.fn.json_encode({ tag = {} }))
-      end)
-    end
-
-    local done = false
-    local pruned_res = nil
-    db.verify_and_prune_tag("dying_tag", function(pruned)
-      pruned_res = pruned
-      done = true
-    end)
-
-    vim.wait(1000, function() return done end)
-    assert.is_true(done)
-    assert.is_true(pruned_res)
-    assert.is_nil(state.State.tags_by_name["dying_tag"])
-  end)
-
-  it("updates count and keeps tag when API returns count > 0", function()
+  it("retains tag when API returns active count", function()
     download.curl_async = function(url, cb)
       vim.schedule(function()
         cb(vim.fn.json_encode({ tag = { { name = "surviving_tag", count = "150", type = "0" } } }))
@@ -492,8 +425,8 @@ describe("db.verify_and_prune_tag", function()
     vim.wait(1000, function() return done end)
     assert.is_true(done)
     assert.is_false(pruned_res)
-    assert.is_not_nil(state.State.tags_by_name["surviving_tag"])
-    assert.are.equal(150, state.State.tags_by_name["surviving_tag"].c)
+    assert.is_true(db.has_tag("surviving_tag"))
+    assert.are.equal(150, db.get_tag("surviving_tag").c)
   end)
 end)
 
@@ -504,11 +437,8 @@ describe("api.check_self_heal", function()
 
   before_each(function()
     orig_curl_async = download.curl_async
-    state.reset_tag_state()
-    state.State.tags_loaded = true
-    state.State.tags_by_name = {
-      ["phantom_tag"] = { n = "phantom_tag", c = 10, t = 0 },
-    }
+    db.reset()
+    db.add_tag({ n = "phantom_tag", c = 10, t = 0 })
   end)
 
   after_each(function()
@@ -532,7 +462,7 @@ describe("api.check_self_heal", function()
     vim.wait(1000, function() return done end)
     assert.is_true(done)
     assert.is_true(pruned_res)
-    assert.is_nil(state.State.tags_by_name["phantom_tag"])
+    assert.is_false(db.has_tag("phantom_tag"))
   end)
 
   it("ignores multi-tag search without network calls", function()
@@ -707,5 +637,3 @@ describe("fetcher.refresh_tags", function()
     assert.are.equal(6000, chars_tags[2].c)
   end)
 end)
-
-

@@ -110,7 +110,8 @@ describe("Regression Tests for UI & Search bugs", function()
     assert.is_not_nil(p, "Expected at least one post")
 
     -- Render the preview once so cur_id is set, then confirm no artist section yet.
-    state.State.tags_by_name = {}
+    local catalog = require("gelbooru.tags.catalog")
+    catalog.reset()
     state.State.cur_id = nil
     ui.render_preview(false)
 
@@ -131,12 +132,8 @@ describe("Regression Tests for UI & Search bugs", function()
 
     -- Manually register kekeflipnote as an artist in the tag index (simulating
     -- what resolve_post_tags does after the API response arrives).
-    local db = require("gelbooru.tags.db")
-    db.add_tag_to_index(
-      { n = "kekeflipnote", t = 1, c = 500 },
-      state.State.artists,
-      state.State.artists_by_first
-    )
+    local catalog = require("gelbooru.tags.catalog")
+    catalog.add_tag({ n = "kekeflipnote", t = 1, c = 500 })
 
     -- Now call render_preview(false) exactly as on_complete does.
     ui.render_preview(false)
@@ -1272,6 +1269,22 @@ describe("Regression Tests for UI & Search bugs", function()
       download.download_async = orig_dl
       pcall(vim.fn.delete, test_file)
       ui.teardown()
+    end)
+
+    it("ensures UI opens without mocked tag loader using real tags.load()", function()
+      local tags = require("gelbooru.tags")
+      local real_load = require("gelbooru.tags.catalog").load
+      local orig_t_load = tags.load
+      tags.load = real_load
+
+      assert.has_no.errors(function()
+        ui.open()
+      end)
+      assert.is_not_nil(state.UI.wins.frame)
+      assert.is_true(vim.api.nvim_win_is_valid(state.UI.wins.frame))
+
+      ui.teardown()
+      tags.load = orig_t_load
     end)
   end)
 end)

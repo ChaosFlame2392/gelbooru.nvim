@@ -110,11 +110,10 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
         search_query = q
       end
 
-      state.State.tags_by_name = {
-        ["cat_ears"] = { n = "cat_ears", t = 0 },
-        ["solo"] = { n = "solo", t = 0 },
-        ["original_artist"] = { n = "original_artist", t = 1 },
-      }
+      local catalog = require("gelbooru.tags.catalog")
+      catalog.add_tag({ n = "cat_ears", t = 0, c = 100 })
+      catalog.add_tag({ n = "solo", t = 0, c = 100 })
+      catalog.add_tag({ n = "original_artist", t = 1, c = 100 })
 
       state.State.posts = {
         { id = 102, tags = "cat_ears solo original_artist", score = 25, file_url = "https://example.com/102.jpg" },
@@ -142,11 +141,10 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
         search_invoked = true
       end
 
-      state.State.tags_by_name = {
-        ["cat_ears"] = { n = "cat_ears", t = 0 },
-        ["solo"] = { n = "solo", t = 0 },
-        ["hatsune_miku"] = { n = "hatsune_miku", t = 4 }, -- character tag, not artist
-      }
+      local catalog = require("gelbooru.tags.catalog")
+      catalog.add_tag({ n = "cat_ears", t = 0, c = 100 })
+      catalog.add_tag({ n = "solo", t = 0, c = 100 })
+      catalog.add_tag({ n = "hatsune_miku", t = 4, c = 100 }) -- character tag, not artist
 
       state.State.posts = {
         { id = 103, tags = "cat_ears solo hatsune_miku", score = 5, file_url = "https://example.com/103.jpg" },
@@ -244,9 +242,8 @@ describe("Section 2.8: Minor Features Integration & Adversarial Suite", function
         search_query = q
       end
 
-      state.State.tags_by_name = {
-        ["artist's_work"] = { n = "artist's_work", t = 1 },
-      }
+      local catalog = require("gelbooru.tags.catalog")
+      catalog.add_tag({ n = "artist's_work", t = 1, c = 100 }, true)
 
       state.State.posts = {
         { id = 106, tags = "solo artist&#039;s_work", score = 20, file_url = "https://example.com/106.jpg" },

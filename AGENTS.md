@@ -129,6 +129,7 @@ gelbooru.nvim/
 │   │   ├── history_spec.lua          # Stack push/pop/restore, reference semantics, FIFO cap
 │   │   ├── local_spec.lua            # Local folder scanning, ID parsing, query parsing, enrichment
 │   │   ├── media_resolver_spec.lua   # Media resolution, binary validation, video thumbnails, caching
+│   │   ├── tag_catalog_spec.lua      # Unified tag catalog: indexing, search scoring, discovery, timers
 │   │   └── util_spec.lua             # URL encoding, entity decoding, fuzzy matching
 │   └── integration/
 │       ├── autocomplete_spec.lua     # Dropdown population, selection index advancement
@@ -171,10 +172,9 @@ gelbooru.nvim/
     │   ├── sort.lua                  # Post sorting engine (score, id, mtime, random)
     │   └── filter.lua                # Post matching and condition filter engine
     ├── tags/
-    │   ├── init.lua                  # Facade re-exporting db, fetcher, resolve submodules
-    │   ├── db.lua                    # Tag loading, memory indexing, bucketing, validation
-    │   ├── fetcher.lua               # Background scraper (:GelbooruTags) with checkpointing & backoff
-    │   └── resolve.lua               # Post tag batch resolution & runtime discovered.json cache
+    │   ├── init.lua                  # Unified tag catalog facade & public scraper entry point
+    │   ├── catalog.lua               # Encapsulated tag catalog: in-memory indexing, search scoring, discovery & pruning
+    │   └── fetcher.lua               # Background scraper (:GelbooruTags) with checkpointing & backoff
     └── ui/
         ├── init.lua                  # Thin facade re-exporting all public symbols from UI submodules
         ├── autocomplete.lua          # Autocomplete engine (prefix bucketing, scoring, fallback)
@@ -198,8 +198,8 @@ Centralized configuration table (130 lines) consolidating 65+ named constants ac
 
 #### `lua/gelbooru/core/state.lua`
 Declares the two foundational singletons:
-- `M.State`: Session runtime state (current query, posts array, pagination indices, current cursor, tag category lists, first-letter bucket indices, autocomplete buffers, history stack, saved index, pending deletions, pending tag prunes).
-- `M.UI`: Window IDs, buffer IDs, autocmd group, active placement handle, and libuv timers (`scroll_timer`, `status_timer`, `api_tag_timer`, `ac_debounce_timer`, `save_discovered_timer`, `prune_disk_timer`, `fetcher_timers`, `tags_spinner_win`, `prefetch_timers`, `resize_timer`).
+- `M.State`: Session runtime state (current query, posts array, pagination indices, current cursor, active autocomplete selection, history stack, saved index, session cache, pending deletions, local folder state). In-memory tag category lists, bucket maps, and discovered tags are encapsulated within `lua/gelbooru/tags/catalog.lua`.
+- `M.UI`: Window IDs, buffer IDs, autocmd group, active placement handle, and libuv timers (`scroll_timer`, `status_timer`, `ac_debounce_timer`, `fetcher_timers`, `tags_spinner_win`, `prefetch_timers`, `resize_timer`, `resume_timer`). Tag discovery, API fallback, and disk prune timers are encapsulated within `lua/gelbooru/tags/catalog.lua`.
 Provides lifecycle cleanup routines: `reset_query_state()`, `reset_ui()`, and `reset_tag_state()`.
 
 #### `lua/gelbooru/core/history.lua`
@@ -251,8 +251,11 @@ Dedicated query parser, filtering, pipeline execution, and sorting package:
 #### `lua/gelbooru/local/scan.lua`
 Safe directory traversal and post ID extractor using `vim.loop.fs_scandir`. Safely parses filenames with unicode, spaces, multiple dots, and brackets without external shell subshells. Falls back to `fs_stat` when filesystem returns nil `ftype`. Enforces a sequential filename collision guard (`id >= 10000` for bare numeric filenames like `1.png` or `42.jpg`) while preserving explicit booru prefixes (`gelbooru_`, `post_`, `id_`, `ID`, `prev_`).
 
-#### `lua/gelbooru/tags/db.lua`
-Local tag indexing and categorization: strict validation heuristic (`is_clean_tag`), memory indexing into first-letter bucket tables, and category composite list creation. Preserves `local_only` flags on metadata tags. Supports in-place count and category synchronization (`update_tag_in_index`), tag eviction (`prune_tag`), query-time verification hook (`verify_and_prune_tag`), and debounced disk database purging (`schedule_disk_prune`, `prune_tags_from_disk`).
+#### `lua/gelbooru/tags/init.lua`
+Unified tag catalog facade: re-exports the compact public catalog interface (`load`, `search`, `resolve_post_tags`, `record_discovered`, `prune_tag`, `is_loaded`, `get_tag`, `has_tag`, `add_tag`, `teardown`, `reset`) and maintenance scraper operations (`update_tags`, `verify_tags`, `refresh_tags`).
+
+#### `lua/gelbooru/tags/catalog.lua`
+Consolidated deep tag catalog module: encapsulates in-memory storage across five categories (Series, Characters, Artists, General, Meta), sub-3ms first-letter hash buckets, exact lookup dictionaries, and all-tags recommendations without exposing raw tables in `State`. Provides progressive asynchronous database loading across event-loop turns (`load`), candidate searching with popularity-weighted scoring and substring fallback (`search`), dynamic runtime tag discovery with debounced JSON persistence (`record_discovered`, `save_discovered_now`), self-healing verification and debounced disk pruning (`prune_tag`, `flush_prunes_now`), and background post metadata hydration (`resolve_post_tags`).
 
 #### `lua/gelbooru/tags/fetcher.lua`
 Tag database maintenance engine (`:GelbooruTags`, `:GelbooruTags verify`, `:GelbooruTags refresh`):
@@ -260,9 +263,6 @@ Tag database maintenance engine (`:GelbooruTags`, `:GelbooruTags verify`, `:Gelb
 - `verify_tags()`: High-speed batch verification checking existing tag databases against Gelbooru's multi-tag API in chunks of 50–100 names, synchronizing counts in-place, dynamically reclassifying changed tag categories, and purging dead tags.
 - `refresh_tags()`: Top-down count crawler scraping from page 0 downwards to update the top 50,000 most popular tags in-place without rebuilding databases from scratch.
 - Manages retry timers via `UI.fetcher_timers` and tracks progress window handle in `UI.tags_spinner_win` for clean teardown.
-
-#### `lua/gelbooru/tags/resolve.lua`
-Dynamic post tag categorization: extracts unindexed tags from posts, batches queries to the Gelbooru tag API, persists discovered tags to `discovered.json` (debounced 500ms), and provides live API fallback when local matches are sparse. Strictly clears `UI.api_tag_timer = nil` before closing timer handles to prevent stale handle leaks.
 
 #### `lua/gelbooru/ui/init.lua`
 Thin facade (145 lines) providing a unified public entry point and backwards-compatible interface for the UI subsystem. Re-exports all public symbols, lifecycle functions, layout helpers, keymaps, and render functions from the four specialized submodules (`ui/layout.lua`, `ui/render.lua`, `ui/keymaps.lua`, and `ui/lifecycle.lua`), ensuring zero breaking changes for existing external consumers and tests.
@@ -469,7 +469,7 @@ When configured, `util.auth_qs()` automatically appends credentials to API calls
 Maintainers and agents modifying `gelbooru.nvim` **MUST** strictly uphold the following invariants:
 
 ### 1. Headless Test Suite Zero-I/O & Memory Isolation
-- Integration test harnesses (`harness.setup_all()`) MUST mock `tags.load_tags = function() end` and `download.resume_pending_saves = function() end`.
+- Integration test harnesses (`harness.setup_all()`) MUST mock `tags.load = function() end` and `download.resume_pending_saves = function() end`.
 - Tests must isolate `tags_dir`, `cache_dir`, and `save_dir` to temporary directories (`/tmp/gelbooru_test_*`).
 - Headless test runs must never parse live production tag databases (32MB+ JSON) or touch user home directories.
 - Total test suite RSS memory must remain $<45\text{MB}$ and execution must complete in $<5\text{s}$.
@@ -608,7 +608,7 @@ This branch introduces unified local library browsing, offline booru metadata en
 - **Dual-Tier Lookahead Engine**: Implemented cursor rush prefetcher in scroll direction and throttled background metadata crawler in `lua/gelbooru/local/indexer.lua`.
 - **Download Process Spawn Safety & Resumption Pipeline**: Wrapped `vim.system` invocations in `pcall` within `lua/gelbooru/net/download.lua` to guard against file descriptor exhaustion or invalid argument crashes. On spawn error, `active_downloads[dest]` and process handles are cleanly drained and queued callbacks are invoked with `false`, preventing queue deadlocks. Handled orphaned `.part` files with automatic startup resumption and non-blocking `uv.fs_utime` timestamp synchronization.
 - **Queue Head-Pointer Optimization in Local Indexer**: Replaced shift-based `table.remove(queue, 1)` ($O(N)$ overhead) in `lua/gelbooru/local/indexer.lua` with a high-speed integer cursor (`M.queue_head`), eliminating GC churn and array shifting overhead when crawling thousands of images.
-- **In-Flight Tag Deduplication & Negative Caching**: Added `in_flight_tags` deduplication and `negative_tag_cache` hash set in `lua/gelbooru/tags/resolve.lua` to suppress duplicate concurrent network queries and eliminate redundant requests for non-existent tags.
+- **In-Flight Tag Deduplication & Negative Caching**: Added `in_flight_tags` deduplication and `negative_tag_cache` hash set in `lua/gelbooru/tags/catalog.lua` (consolidating legacy `resolve.lua`) to suppress duplicate concurrent network queries and eliminate redundant requests for non-existent tags.
 - **Native JSON Deserialization Modernization**: Replaced legacy `vim.fn.json_decode` across all network, tag scraper, and metadata modules with native C-speed `vim.json.decode()` (falling back to `vim.fn.json_decode` on older Neovim versions), significantly reducing bridge overhead and peak memory allocations during bulk tag ingestion.
 - **Decoupled Autocomplete Cursor Navigation**: Separated candidate evaluation from visual selection via `autocomplete.navigate(dir)` in `lua/gelbooru/ui/autocomplete.lua` and `lua/gelbooru/ui/init.lua`, enabling fast `<Tab>`/`<Down>` suggestion movement without re-tokenizing input or re-scoring candidate buckets.
 - **Anchored Snacks Image Cache Purge**: Hardened image cache invalidation in `lua/gelbooru/ui/image.lua` using boundary regex `%f[%d]<id>%f[%D]` and `vim.fn.stdpath("cache")` resolution to prevent accidental deletion of posts sharing prefix substrings.
@@ -639,7 +639,7 @@ This branch introduces unified local library browsing, offline booru metadata en
 - **In-Flight `_convert:abort()` on Placement Close via `abort_convert`**: Introduced `canvas.abort_convert(placement)` in `ui/canvas.lua` to invoke `img._convert:abort()` on active placements during buffer replacement, canvas reset, and teardown. Terminates running `magick`/`convert` child processes and frees snacks' concurrent execution queue (`MAX_PROCS = 3`), eliminating pipeline starvation during rapid user navigation.
 - **API Array Normalization in `resume_pending_saves` (`ensure_array`)**: Applied `util.ensure_array` in `net/download.lua` when deserializing single-post API responses (`data.post`). Resolves silent aborts where Gelbooru DAPI returns a single object dictionary instead of a list when queried with `&id=...`.
 - **Shallow Reference Array Slicing for Candidate Pools (LuaJIT Heap Discipline)**: Replaced `vim.deepcopy(cached_pool)` in `net/api.lua` (lines 858 & 864) with shallow array iteration loops (`candidate_pool = {}; for i = 1, #cached_pool do candidate_pool[i] = cached_pool[i] end`). Eliminates deep duplication of thousands of Lua tables and strings on the LuaJIT GC heap across large 2,000-post pipeline candidate pools.
-- **Timer Handle Leak Fix in `tags/resolve.lua`**: Fixed pointer check order in `tags/resolve.lua` line 216: now clears `UI.api_tag_timer = nil` before calling `timer = util.close_timer(timer)`. Prevents closed libuv timer handles from lingering in `UI.api_tag_timer`.
+- **Timer Handle Leak Fix in `tags/catalog.lua`**: Fixed pointer check order in `tags/catalog.lua`: now clears `api_tag_timer = nil` before calling `timer = util.close_timer(timer)`. Prevents closed libuv timer handles from lingering in `api_tag_timer`.
 - **Scraper Re-Entrancy Guard & Managed Timers in `tags/fetcher.lua`**: Added `M.is_running = false` flag guarding `:GelbooruTags`, `:GelbooruTags verify`, and `:GelbooruTags refresh`. Rejects concurrent scraper invocations with friendly notifications. Replaced unmanaged `vim.defer_fn` retry timers with managed `defer()` storing timer handles in `UI.fetcher_timers`, cleanly closed on teardown.
 - **DPI Normalization Threshold Refinement (`>= 300`)**: Updated DPI boundary in `ui/image.lua` (`sanitize_dpi`) from strict inequality `> 300` to inclusive inequality `>= 300` (and `< 50`). Prevents digital art exported at exactly 300 DPI from shrinking down to 32% size in `snacks.image`.
 - **Ghost Keymap Hint Removal from Status Line**: Removed unmapped `t: tags` shortcut from the default status bar string in `ui/init.lua` line 157, aligning displayed hints with active buffer keymaps.
@@ -655,7 +655,7 @@ This branch introduces unified local library browsing, offline booru metadata en
 ### 9.1 High Severity (Reliability, Network & Query Mechanics)
 
 #### 1. Tag Database Engine Overhaul [COMPLETED]
-- **Status**: Implemented in `lua/gelbooru/tags/fetcher.lua`, `lua/gelbooru/tags/db.lua`, `lua/gelbooru/tags/init.lua`, and `lua/gelbooru/net/api.lua`. Verified via 26 passing tests in `tests/unit/db_spec.lua`.
+- **Status**: Implemented in `lua/gelbooru/tags/fetcher.lua`, `lua/gelbooru/tags/catalog.lua`, `lua/gelbooru/tags/init.lua`, and `lua/gelbooru/net/api.lua`. Verified via passing unit tests in `tests/unit/db_spec.lua` and `tests/unit/tag_catalog_spec.lua`.
 
 #### 2. Tiny Image Canvas Scaling & Minimum Dimension Guard [IN PROGRESS]
 - **Status**: Partially resolved in this session. The DPI boundary check was fixed in `ui/image.lua` (`sanitize_dpi` updated from `> 300` to `>= 300`), eliminating the 300 DPI shrinkage bug.

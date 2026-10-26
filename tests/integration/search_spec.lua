@@ -976,7 +976,8 @@ describe("Integration: Search & List flow", function()
 
     it("Phase 2: autocomplete preserves leading delimiter in submit_input and Space commit", function()
       ui.open()
-      state.State.tags_by_name["hatsune_miku"] = { name = "hatsune_miku", count = 5000, type = "character" }
+      local catalog = require("gelbooru.tags.catalog")
+      catalog.add_tag({ n = "hatsune_miku", c = 5000, t = 4 })
       local ac = require("gelbooru.ui.autocomplete")
 
       local function get_cb(buf, mode, key)

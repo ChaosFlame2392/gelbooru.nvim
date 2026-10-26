@@ -1468,10 +1468,10 @@ function M.matches(post, plan_or_query)
     table.insert(post_characters, post.character:lower())
   end
 
-  local tags_by_name = state.State and state.State.tags_by_name
-  if tags_by_name and #post_tags > 0 then
+  local ok, catalog = pcall(require, "gelbooru.tags.catalog")
+  if ok and catalog and #post_tags > 0 then
     for _, t in ipairs(post_tags) do
-      local info = tags_by_name[t]
+      local info = catalog.get_tag(t)
       if info then
         if tonumber(info.t) == 1 then
           table.insert(post_artists, t)

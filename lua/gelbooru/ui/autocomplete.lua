@@ -1,38 +1,25 @@
 local config = require("gelbooru.core.config")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
-local tags = require("gelbooru.tags")
-local constants = require("gelbooru.core.constants")
+local catalog = require("gelbooru.tags.catalog")
 
 local M = {}
 
-local function is_syntax_directive(t)
-  if not t or t == "" then
-    return false
+catalog.on_tags_updated = function()
+  local State = state.State
+  local UI = state.UI
+  if State.input_focused and UI.bufs.input and UI.wins.ac
+    and vim.api.nvim_buf_is_valid(UI.bufs.input)
+    and vim.api.nvim_win_is_valid(UI.wins.ac)
+  then
+    pcall(M.update_autocomplete)
   end
-  t = t:lower()
-  if t == "random" or t == "asc" or t == "desc" then
-    return true
-  end
-  if t:match("^sort:")
-    or t:match("^order:")
-    or t:match("^limit:")
-    or t:match("^offset:")
-    or t:match("^rating:")
-    or t:match("^score:")
-    or t:match("^id:")
-    or t:match("^artist:")
-    or t:match("^character:") then
-    return true
-  end
-  return false
 end
 
 function M.update_autocomplete(query)
   local State = state.State
   local UI = state.UI
 
-  State.autocomplete_filtered = {}
   local full = query
   if not full then
     full = (UI.bufs.input and vim.api.nvim_buf_is_valid(UI.bufs.input))
@@ -59,149 +46,8 @@ function M.update_autocomplete(query)
   local line = full or ""
   local is_local = util.is_local_query(line)
 
-  local search_target = query_part:gsub("^[|%-~]+", ""):lower()
-  local target_norm = util.normalize_str(search_target)
-  local has_norm = target_norm ~= "" and #target_norm > 0
-
-  if search_target == "" then
-    for i = 1, #State.all_tags do
-      local t = State.all_tags[i]
-      if is_local or not t.local_only then
-        table.insert(State.autocomplete_filtered, t)
-        if #State.autocomplete_filtered >= constants.AC_EMPTY_QUERY_LIMIT then
-          break
-        end
-      end
-    end
-  else
-    local seen_names = {}
-    local candidates = {}
-    local first_char = search_target:sub(1, 1)
-
-    local function check_bucket(bucket, cat_nudge, prefix_only, max_per_bucket)
-      if not bucket then
-        return
-      end
-      local added = 0
-      local limit = max_per_bucket or constants.AC_BUCKET_LIMIT
-      for i = 1, #bucket do
-        local t = bucket[i]
-        local is_local_only = t.local_only or false
-        local count = tonumber(t.c) or 0
-        local typ = tonumber(t.t) or 0
-        if (is_local or not is_local_only) and (typ == 5 or count >= 1) then
-          local nl = t.n_lower
-          if not seen_names[nl] then
-            local base = 0
-            if nl == search_target then
-              base = constants.SCORE_BASE_EXACT
-            elseif has_norm and t.norm == target_norm then
-              base = constants.SCORE_BASE_NORM
-            elseif vim.startswith(nl, search_target) then
-              base = constants.SCORE_BASE_PREFIX
-            elseif has_norm and vim.startswith(t.norm, target_norm) then
-              base = constants.SCORE_BASE_PREFIX_NORM
-            elseif not prefix_only and (nl:find(search_target, 1, true) or (has_norm and t.norm:find(target_norm, 1, true))) then
-              base = constants.SCORE_BASE_SUBSTRING
-            end
-
-            if base > 0 then
-              seen_names[nl] = true
-              local pop = (typ == 5) and 0 or (math.log10(count + 1) * constants.SCORE_POP_MULTIPLIER)
-              local score = (typ == 5) and constants.SCORE_META_PIN or (base + pop + (cat_nudge or 0))
-              candidates[#candidates + 1] = {
-                item = t,
-                score = score,
-                count = count,
-              }
-              added = added + 1
-              if added >= limit then
-                break
-              end
-            end
-          end
-        end
-      end
-    end
-
-    -- 1. First-character bucket lookup
-    check_bucket(State.series_by_first[first_char], constants.CAT_NUDGE_SERIES, false, constants.AC_BUCKET_LIMIT)
-    check_bucket(State.chars_by_first[first_char], constants.CAT_NUDGE_CHARACTER, false, constants.AC_BUCKET_LIMIT)
-    check_bucket(State.general_by_first[first_char], constants.CAT_NUDGE_GENERAL, false, constants.AC_BUCKET_LIMIT)
-    check_bucket(State.artists_by_first[first_char], constants.CAT_NUDGE_ARTIST, true, constants.AC_BUCKET_LIMIT)
-
-    -- META tags are a small fixed list, always injected at top priority
-    for _, t in ipairs(config.META_TAGS) do
-      if is_local or not t.local_only then
-        local nl = t.n_lower or t.n:lower()
-        if not seen_names[nl] then
-          if nl == search_target or vim.startswith(nl, search_target) then
-            seen_names[nl] = true
-            candidates[#candidates + 1] = { item = t, score = constants.SCORE_META_PIN, count = 0 }
-          end
-        end
-      end
-    end
-
-    -- 2. Substring fallback across full lists when few candidates found
-    if #candidates < constants.AC_SUBSTRING_TRIGGER and #search_target >= constants.AC_MIN_TRIGGER_LEN then
-      local function check_full_list(list, cat_nudge, max_needed)
-        if not list then
-          return false
-        end
-        for i = 1, #list do
-          local t = list[i]
-          local is_local_only = t.local_only or false
-          local count = tonumber(t.c) or 0
-          local typ = tonumber(t.t) or 0
-          if (is_local or not is_local_only) and (typ == 5 or count >= 1) and not seen_names[t.n_lower] then
-            local nl = t.n_lower
-            if nl:find(search_target, 1, true) or (has_norm and t.norm:find(target_norm, 1, true)) then
-              seen_names[nl] = true
-              local pop = (typ == 5) and 0 or (math.log10(count + 1) * constants.SCORE_POP_MULTIPLIER)
-              local score = (typ == 5) and constants.SCORE_META_PIN or (constants.SCORE_BASE_SUBSTRING + pop + (cat_nudge or 0))
-              candidates[#candidates + 1] = {
-                item = t,
-                score = score,
-                count = count,
-              }
-              if #candidates >= max_needed then
-                return true
-              end
-            end
-          end
-        end
-        return false
-      end
-
-      check_full_list(State.series, constants.CAT_NUDGE_SERIES, 60)
-      if #candidates < 60 then
-        check_full_list(State.characters, constants.CAT_NUDGE_CHARACTER, 80)
-      end
-      if #candidates < 80 then
-        check_full_list(State.general, constants.CAT_NUDGE_GENERAL, 100)
-      end
-    end
-
-    table.sort(candidates, function(a, b)
-      if math.abs(a.score - b.score) > 0.0001 then
-        return a.score > b.score
-      end
-      if a.count ~= b.count then
-        return a.count > b.count
-      end
-      return (a.item.n or "") < (b.item.n or "")
-    end)
-
-    for i = 1, math.min(constants.AC_MAX_RENDERED_CANDIDATES, #candidates) do
-      table.insert(State.autocomplete_filtered, candidates[i].item)
-    end
-
-    -- Trigger live API fallback if few results found
-    if #candidates < constants.AC_API_FALLBACK_COUNT and #search_target >= constants.AC_MIN_TRIGGER_LEN and not is_syntax_directive(search_target) then
-      tags.fetch_api_tags(search_target)
-    end
-  end
+  local results = catalog.search(query_part, { is_local = is_local })
+  State.autocomplete_filtered = results or {}
 
   M.render_candidates()
 end
@@ -224,7 +70,7 @@ function M.render_candidates()
     local mark = (i == State.autocomplete_cur) and " ▶" or "  "
     local badge = config.TAG_BADGES[tonumber(t.t)] or "Tag"
     local cnt = (t.c and t.c > 0) and string.format("%8d", t.c) or "       -"
-    local name_display = t.n:sub(1, 46)
+    local name_display = (t.n or t.name or ""):sub(1, 46)
     lines[#lines + 1] = string.format("%s  %-46s  [%-7s] %s", mark, name_display, badge, cnt)
   end
   util.set_lines(UI.bufs.ac, lines)

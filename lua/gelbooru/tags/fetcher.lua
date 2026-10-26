@@ -2,7 +2,7 @@ local config = require("gelbooru.core.config")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
 local download = require("gelbooru.net.download")
-local db = require("gelbooru.tags.db")
+local catalog = require("gelbooru.tags.catalog")
 local constants = require("gelbooru.core.constants")
 
 local json_decode = vim.json and vim.json.decode or vim.fn.json_decode
@@ -180,7 +180,7 @@ local function absorb_and_prune_discovered(series_map, chars_map, artists_map, g
       local count = tonumber(t.c) or 0
       local typ = tonumber(t.t) or 0
       local nl = t.n:lower()
-      if db.is_clean_tag(t.n, count, typ) then
+      if catalog.is_clean_tag(t.n, count, typ) then
         local item = { n = t.n, c = count, t = typ }
         local handled = false
         if typ == 3 then
@@ -404,11 +404,11 @@ function M.verify_tags(opts)
 
     -- 4. Synchronize in-memory structures
     for nl, _ in pairs(purged_set) do
-      db.prune_tag(nl, { immediate_disk = false })
+      catalog.prune_tag(nl, { immediate_disk = false })
     end
     for _, item in pairs(updated_items) do
       if not purged_set[item.n:lower()] then
-        db.update_tag_in_index(item)
+        catalog.update_tag_in_index(item)
       end
     end
     if state and state.State then
@@ -520,7 +520,7 @@ function M.verify_tags(opts)
             local count = tonumber(t.count) or 0
             local typ = tonumber(t.type) or 0
 
-            if count <= 0 or not db.is_clean_tag(t.name, count, typ) then
+            if count <= 0 or not catalog.is_clean_tag(t.name, count, typ) then
               purged_set[nl] = true
               total_purged = total_purged + 1
             else
@@ -691,7 +691,7 @@ function M.refresh_tags(opts)
           local count = tonumber(t.count) or 0
           local typ = tonumber(t.type) or 0
 
-          if name and db.is_clean_tag(name, count, typ) and count >= 1 then
+          if name and catalog.is_clean_tag(name, count, typ) and count >= 1 then
             local nl = name:lower()
             total_refreshed = total_refreshed + 1
 
@@ -758,7 +758,7 @@ function M.refresh_tags(opts)
             end
 
             -- Update in-memory tag index if loaded
-            db.update_tag_in_index(new_item)
+            catalog.update_tag_in_index(new_item)
           end
         end
 
@@ -927,7 +927,7 @@ function M.update_tags(mode, opts)
           local name = t.name
           local count = tonumber(t.count) or 0
           local typ = tonumber(t.type) or 0
-          if name and db.is_clean_tag(name, count, typ) and not seen[name] then
+          if name and catalog.is_clean_tag(name, count, typ) and not seen[name] then
             seen[name] = true
             total_fetched = total_fetched + 1
             local item = { n = name, c = count, t = typ }

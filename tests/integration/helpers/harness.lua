@@ -11,7 +11,8 @@ local mock_snacks = require("tests.integration.helpers.mock_snacks")
 
 local M = {}
 
-local orig_load_tags = nil
+local orig_load = nil
+local orig_catalog_load = nil
 local orig_resume_pending_saves = nil
 local orig_tags_dir = nil
 local orig_cache_dir = nil
@@ -24,23 +25,22 @@ function M.setup_all()
   _G.resolver = require("gelbooru.media.resolver")
   _G.canvas = require("gelbooru.ui.canvas")
 
-  orig_load_tags = tags.load_tags
-  tags.load_tags = function()
-    local db = require("gelbooru.tags.db")
+  local catalog = require("gelbooru.tags.catalog")
+  orig_load = tags.load
+  orig_catalog_load = catalog.load
+  local stub_load = function(opts, cb)
+    local callback = type(opts) == "function" and opts or cb
     for _, t in ipairs(mock_net.sample_tags) do
       local typ = tonumber(t.type) or 0
       local item = { n = t.name, t = typ, c = tonumber(t.count) or 0 }
-      if typ == 3 then
-        db.add_tag_to_index(item, state.State.series, state.State.series_by_first)
-      elseif typ == 4 then
-        db.add_tag_to_index(item, state.State.characters, state.State.chars_by_first)
-      elseif typ == 1 then
-        db.add_tag_to_index(item, state.State.artists, state.State.artists_by_first)
-      else
-        db.add_tag_to_index(item, state.State.general, state.State.general_by_first)
-      end
+      catalog.add_tag(item)
+    end
+    if callback then
+      callback(true)
     end
   end
+  tags.load = stub_load
+  catalog.load = stub_load
 
   orig_resume_pending_saves = download.resume_pending_saves
   download.resume_pending_saves = function() end
@@ -64,9 +64,14 @@ function M.teardown_all()
   mock_snacks.teardown()
   _G.image = nil
 
-  if orig_load_tags then
-    tags.load_tags = orig_load_tags
-    orig_load_tags = nil
+  if orig_load then
+    tags.load = orig_load
+    orig_load = nil
+  end
+  if orig_catalog_load then
+    local catalog = require("gelbooru.tags.catalog")
+    catalog.load = orig_catalog_load
+    orig_catalog_load = nil
   end
   if orig_resume_pending_saves then
     download.resume_pending_saves = orig_resume_pending_saves

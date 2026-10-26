@@ -7,7 +7,7 @@ local layout = require("gelbooru.ui.layout")
 local log = require("gelbooru.core.log")
 local resolver = require("gelbooru.media.resolver")
 local state = require("gelbooru.core.state")
-local tags = require("gelbooru.tags")
+local catalog = require("gelbooru.tags.catalog")
 local util = require("gelbooru.core.util")
 
 local M = {}
@@ -152,7 +152,7 @@ function M.render_metadata(p)
   local artist_tags = {}
   for raw_tag in (p.tags or ""):gmatch("%S+") do
     local tag = util.decode_html(raw_tag)
-    local t = State.tags_by_name and State.tags_by_name[tag:lower()]
+    local t = catalog.get_tag(tag)
     if t and tonumber(t.t) == 1 then
       table.insert(artist_tags, tag)
     else
@@ -204,7 +204,7 @@ function M.render_preview(force_download)
   M.render_metadata(p)
 
   -- Background dynamic artist resolution.
-  pcall(tags.resolve_post_tags, p, function()
+  pcall(catalog.resolve_post_tags, p, function()
     if state.State.torn_down then
       return
     end
@@ -234,7 +234,7 @@ function M.render_preview(force_download)
       if is_same_post(state.State.posts[state.State.cur], updated_p) then
         M.render_metadata(updated_p)
         M.render_list()
-        pcall(tags.resolve_post_tags, updated_p, function()
+        pcall(catalog.resolve_post_tags, updated_p, function()
           if state.State.torn_down then
             return
           end
@@ -313,7 +313,7 @@ function M.search_active_artist()
   elseif p.tags and p.tags ~= "" then
     for raw_tag in p.tags:gmatch("%S+") do
       local tag = util.decode_html(raw_tag)
-      local t = State.tags_by_name and State.tags_by_name[tag:lower()]
+      local t = catalog.get_tag(tag)
       if t and tonumber(t.t) == 1 then
         artist_tag = tag
         break
