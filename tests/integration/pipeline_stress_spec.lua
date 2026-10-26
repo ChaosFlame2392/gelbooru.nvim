@@ -532,6 +532,71 @@ describe("Pipeline & Concurrency Stress Testing Suite", function()
       assert.is_nil(download_mod.last_prefetch_dir)
     end)
 
+    it("dispatches prefetch eagerly on render_preview navigation without waiting for scroll debounce timer", function()
+      ui.open()
+      local download_mod = require("gelbooru.net.download")
+      local mock_net = require("tests.integration.helpers.mock_net")
+
+      -- Temporarily restore real download_async so we can test with mocked vim.system
+      mock_net.teardown()
+
+      local orig_system = vim.system
+      local spawned_urls = {}
+      local mock_handle = { kill = function() end }
+      vim.system = function(cmd, opts, on_exit)
+        table.insert(spawned_urls, cmd[#cmd])
+        return mock_handle
+      end
+
+      -- Populate 20 dummy posts
+      local posts = {}
+      for i = 1, 20 do
+        table.insert(posts, {
+          id = tostring(i),
+          score = i,
+          width = 800,
+          height = 600,
+          file_url = string.format("https://example.com/%d.jpg", i),
+          preview_url = string.format("https://example.com/prev_%d.jpg", i),
+        })
+      end
+      state.State.posts = posts
+      state.State.cur = 1
+      state.State.scroll_dir = 1
+      ui.render_list()
+
+      -- Call render_preview (as triggered by cursor navigation)
+      ui.render_preview(false)
+
+      -- Debounce timer for canvas rendering MUST be armed
+      assert.is_not_nil(state.UI.scroll_timer)
+
+      -- But lookahead prefetch MUST have been dispatched eagerly without waiting for scroll_timer!
+      -- Both post 2 (N+1) and post 3 (N+2) must have been dispatched concurrently
+      assert.is_true(#spawned_urls >= 2)
+      assert.are.equal(2, vim.tbl_count(download_mod.active_prefetch_handles or {}))
+
+      -- Navigate to post 2 moving forward
+      state.State.cur = 2
+      state.State.scroll_dir = 1
+      ui.render_preview(false)
+
+      -- Lookahead prefetch should have eagerly triggered next post (post 4)
+      assert.is_true(#spawned_urls >= 3)
+
+      -- Rapid direction reversal to post 1 (dir = -1)
+      state.State.cur = 1
+      state.State.scroll_dir = -1
+      ui.render_preview(false)
+
+      -- Direction reversal must be recorded
+      assert.are.equal(-1, download_mod.last_prefetch_dir)
+
+      download_mod.cancel_prefetch_timers(true)
+      vim.system = orig_system
+      mock_net.setup()
+    end)
+
     it("survives rapid UI open/close/re-open cycling without window or buffer errors", function()
       -- Rapid open -> close cycle 5 times
       for cycle = 1, 5 do

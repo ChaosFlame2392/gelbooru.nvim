@@ -447,4 +447,34 @@ describe("history.restore_history", function()
     assert.are.equal(2, state.State.history_idx)
     assert.are.equal(start_epoch, state.State.search_epoch)
   end)
+
+  it("restore_history invokes download.abort_all to terminate in-flight transfers", function()
+    history.push_history("entry1")
+    history.push_history("entry2")
+    state.State.history_idx = 2
+
+    local download = require("gelbooru.net.download")
+    local orig_abort_all = download.abort_all
+    local abort_all_called = false
+    download.abort_all = function()
+      abort_all_called = true
+    end
+
+    package.loaded["gelbooru.ui"] = {
+      set_status = function() end,
+      render_list = function() end,
+      render_preview = function() end,
+    }
+    package.loaded["gelbooru.net.api"] = { fetch = function() end }
+    state.UI.bufs = { input = false }
+
+    history.restore_history(1)
+
+    download.abort_all = orig_abort_all
+    package.loaded["gelbooru.ui"] = nil
+    package.loaded["gelbooru.net.api"] = nil
+    state.UI.bufs = {}
+
+    assert.is_true(abort_all_called, "restore_history must call download.abort_all()")
+  end)
 end)

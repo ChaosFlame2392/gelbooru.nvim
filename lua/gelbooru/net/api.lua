@@ -440,6 +440,7 @@ function M.execute_search(query, opts)
   end
 
   download.cancel_prefetch_timers(true)
+  pcall(download.abort_all)
   pcall(function()
     require("gelbooru.local.indexer").stop()
   end)

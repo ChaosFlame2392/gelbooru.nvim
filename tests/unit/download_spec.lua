@@ -6,6 +6,7 @@
 local download = require("gelbooru.net.download")
 local config = require("gelbooru.core.config")
 local state = require("gelbooru.core.state")
+local constants = require("gelbooru.core.constants")
 
 local tmp = vim.fn.tempname
 
@@ -185,6 +186,90 @@ describe("download: curl arguments, retry options & referer injection", function
     assert.is_true(has_c)
 
     vim.fn.delete(part)
+  end)
+
+  it("automatically adds -C - resume argument when .part file > 1024 bytes without explicit opts.resume", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local f = io.open(part, "wb")
+    f:write(string.rep("x", 2048))
+    f:close()
+
+    local captured_cmd = nil
+    vim.system = function(cmd, opts, on_exit)
+      captured_cmd = cmd
+      return { kill = function() end }
+    end
+
+    -- Call download_async with preview target and no opts
+    download.download_async("https://example.com/preview.jpg", dest, function() end)
+
+    assert.is_not_nil(captured_cmd)
+    local has_c = false
+    for i, arg in ipairs(captured_cmd) do
+      if arg == "-C" and captured_cmd[i + 1] == "-" then
+        has_c = true
+        break
+      end
+    end
+    assert.is_true(has_c)
+    assert.are.equal(1, vim.fn.filereadable(part))
+
+    vim.fn.delete(part)
+  end)
+
+  it("does not add -C - and unlinks .part when opts.force == true even if .part > 1024 bytes", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local f = io.open(part, "wb")
+    f:write(string.rep("x", 2048))
+    f:close()
+
+    local captured_cmd = nil
+    vim.system = function(cmd, opts, on_exit)
+      captured_cmd = cmd
+      return { kill = function() end }
+    end
+
+    download.download_async("https://example.com/preview.jpg", dest, function() end, { force = true })
+
+    assert.is_not_nil(captured_cmd)
+    local has_c = false
+    for i, arg in ipairs(captured_cmd) do
+      if arg == "-C" and captured_cmd[i + 1] == "-" then
+        has_c = true
+        break
+      end
+    end
+    assert.is_false(has_c)
+    assert.are.equal(0, vim.fn.filereadable(part))
+  end)
+
+  it("does not add -C - and unlinks .part when .part size <= 1024 bytes without force", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local f = io.open(part, "wb")
+    f:write(string.rep("x", 500))
+    f:close()
+
+    local captured_cmd = nil
+    vim.system = function(cmd, opts, on_exit)
+      captured_cmd = cmd
+      return { kill = function() end }
+    end
+
+    download.download_async("https://example.com/small.jpg", dest, function() end)
+
+    assert.is_not_nil(captured_cmd)
+    local has_c = false
+    for i, arg in ipairs(captured_cmd) do
+      if arg == "-C" and captured_cmd[i + 1] == "-" then
+        has_c = true
+        break
+      end
+    end
+    assert.is_false(has_c)
+    assert.are.equal(0, vim.fn.filereadable(part))
   end)
 end)
 
@@ -392,6 +477,93 @@ describe("download: failure recovery & resume flag behaviour", function()
     assert.are.equal(0, vim.fn.filereadable(dest))
 
     vim.fn.delete(part)
+  end)
+
+  it("preserves .part when curl exits with error and .part > 1024 bytes without explicit opts.resume", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local exit_fn = nil
+
+    -- Seed an existing .part > 1024 bytes (e.g. from an interrupted preview download)
+    local f = io.open(part, "wb")
+    f:write(string.rep("x", 2048))
+    f:close()
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      return { kill = function() end }
+    end
+
+    local result = nil
+    -- No explicit opts.resume provided
+    download.download_async("https://example.com/preview_fail.jpg", dest, function(ok)
+      result = ok
+    end)
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 28 }) -- Timeout error
+    vim.wait(200, function() return result ~= nil end)
+
+    assert.is_false(result)
+    assert.are.equal(1, vim.fn.filereadable(part))
+    assert.are.equal(0, vim.fn.filereadable(dest))
+
+    vim.fn.delete(part)
+  end)
+
+  it("deletes .part when curl exits with error and opts.force == true", function()
+    local dest = tmp()
+    local part = dest .. ".part"
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      local f = io.open(part, "wb")
+      f:write(string.rep("x", 2048))
+      f:close()
+      return { kill = function() end }
+    end
+
+    local result = nil
+    download.download_async("https://example.com/force_fail.jpg", dest, function(ok)
+      result = ok
+    end, { force = true })
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 28 }) -- Timeout error
+    vim.wait(200, function() return result ~= nil end)
+
+    assert.is_false(result)
+    assert.are.equal(0, vim.fn.filereadable(part))
+    assert.are.equal(0, vim.fn.filereadable(dest))
+  end)
+
+  it("deletes .part when curl exits with code 0 but media validation fails (corrupt payload)", function()
+    local dest = tmp() .. ".jpg"
+    local part = dest .. ".part"
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      -- Write Cloudflare error HTML or corrupt non-media body > 1024 bytes
+      local f = io.open(part, "wb")
+      f:write("<!DOCTYPE html><html><body>Error 521 Cloudflare</body></html>" .. string.rep(" ", 2000))
+      f:close()
+      return { kill = function() end }
+    end
+
+    local result = nil
+    download.download_async("https://example.com/corrupt.jpg", dest, function(ok)
+      result = ok
+    end)
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 0 }) -- Curl claims success, but body is invalid media
+    vim.wait(200, function() return result ~= nil end)
+
+    assert.is_false(result)
+    assert.are.equal(0, vim.fn.filereadable(part))
+    assert.are.equal(0, vim.fn.filereadable(dest))
   end)
 end)
 
@@ -691,6 +863,7 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
       { id = 102, file_url = "http://example.com/102.jpg", sample_url = "http://example.com/102_s.jpg" },
       { id = 103, file_url = "http://example.com/103.jpg", sample_url = "http://example.com/103_s.jpg" },
       { id = 104, file_url = "http://example.com/104.jpg", sample_url = "http://example.com/104_s.jpg" },
+      { id = 105, file_url = "http://example.com/105.jpg", sample_url = "http://example.com/105_s.jpg" },
     }
     state.State.cur = 1
     state.State.scroll_dir = 1
@@ -705,7 +878,7 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
     state.State.torn_down = orig_torn_down
   end)
 
-  it("eliminates artificial 50ms delay and triggers immediate next post (cur + dir) synchronously", function()
+  it("dispatches top lookahead targets (N+1 and N+2) concurrently without delay and staggers subsequent targets", function()
     local spawned_urls = {}
     local mock_handle = { kill = function() end }
 
@@ -714,12 +887,57 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
       return mock_handle
     end
 
-    -- Trigger prefetch at index 1 with direction 1 -> immediate next is post 102
+    -- Trigger prefetch at index 1 with direction 1 -> immediate targets are posts 102 (N+1) and 103 (N+2)
     download.prefetch_around(1, 1)
 
-    -- Post 102 (immediate next) must have triggered download_async immediately without waiting for timers!
-    assert.is_true(#spawned_urls >= 1)
+    -- Both top lookahead targets (102 and 103) must be triggered immediately without timer delay!
+    assert.are.equal(2, #spawned_urls)
     assert.are.equal("http://example.com/102_s.jpg", spawned_urls[1])
+    assert.are.equal("http://example.com/103_s.jpg", spawned_urls[2])
+
+    -- Both active handles must be tracked in active_prefetch_handles
+    assert.are.equal(2, vim.tbl_count(download.active_prefetch_handles))
+
+    -- Subsequent posts (104, 105) must be staggered via prefetch_timers
+    assert.is_true(vim.tbl_count(state.UI.prefetch_timers) >= 2)
+  end)
+
+  it("dispatches top lookahead targets in reverse scroll direction without delay", function()
+    local spawned_urls = {}
+    local mock_handle = { kill = function() end }
+
+    vim.system = function(cmd, opts, on_exit)
+      table.insert(spawned_urls, cmd[#cmd])
+      return mock_handle
+    end
+
+    -- Trigger prefetch at index 5 with direction -1 -> immediate targets are posts 104 (N-1) and 103 (N-2)
+    download.prefetch_around(5, -1)
+
+    assert.are.equal(2, #spawned_urls)
+    assert.are.equal("http://example.com/104_s.jpg", spawned_urls[1])
+    assert.are.equal("http://example.com/103_s.jpg", spawned_urls[2])
+    assert.are.equal(2, vim.tbl_count(download.active_prefetch_handles))
+  end)
+
+  it("bounds immediate lookahead targets by math.min(radius, constants.PREFETCH_LOOKAHEAD_DEPTH)", function()
+    local spawned_urls = {}
+    local mock_handle = { kill = function() end }
+
+    vim.system = function(cmd, opts, on_exit)
+      table.insert(spawned_urls, cmd[#cmd])
+      return mock_handle
+    end
+
+    local orig_radius = config.options.prefetch_radius
+    config.options.prefetch_radius = 1
+    download.prefetch_around(1, 1)
+
+    -- With radius = 1, only 1 immediate lookahead target (102) should be dispatched
+    assert.are.equal(1, #spawned_urls)
+    assert.are.equal("http://example.com/102_s.jpg", spawned_urls[1])
+
+    config.options.prefetch_radius = orig_radius
   end)
 
   it("does not cancel in-flight prefetch downloads if moving in the same direction", function()

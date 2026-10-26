@@ -17,15 +17,14 @@ local SPINNERS = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"
 local function track_timer(timer)
   local UI = state.UI
   UI.fetcher_timers = UI.fetcher_timers or {}
-  local idx = #UI.fetcher_timers + 1
-  UI.fetcher_timers[idx] = timer
-  return idx
+  UI.fetcher_timers[timer] = timer
+  return timer
 end
 
-local function untrack_timer(idx)
+local function untrack_timer(timer)
   local UI = state.UI
-  if UI.fetcher_timers and UI.fetcher_timers[idx] then
-    UI.fetcher_timers[idx] = nil
+  if UI.fetcher_timers and timer then
+    UI.fetcher_timers[timer] = nil
   end
 end
 

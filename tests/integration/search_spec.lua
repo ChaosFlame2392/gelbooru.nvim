@@ -337,6 +337,21 @@ describe("Integration: Search & List flow", function()
       canvas.close = orig_close
     end)
 
+    it("calls download.abort_all when execute_search executes a new query", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local orig_abort_all = download.abort_all
+      local abort_all_called = false
+      download.abort_all = function()
+        abort_all_called = true
+      end
+
+      api.execute_search("abort_all_test")
+
+      download.abort_all = orig_abort_all
+      assert.is_true(abort_all_called, "execute_search must call download.abort_all()")
+    end)
+
     it("protects execute_search if current_placement:close() throws an error", function()
       ui.open()
       state.UI.current_placement = {

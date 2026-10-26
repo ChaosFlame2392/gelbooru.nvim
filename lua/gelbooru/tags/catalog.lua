@@ -282,12 +282,13 @@ local function notify_tags_updated(items)
 end
 
 --- Immediately flush any pending tag prunes to disk without waiting for debounce.
-function M.flush_prunes_now()
+--- @param opts? table { force = bool }
+function M.flush_prunes_now(opts)
   prune_disk_timer = util.close_timer(prune_disk_timer)
   local prunes = pending_prunes
   pending_prunes = {}
   if prunes and next(prunes) ~= nil then
-    M.prune_tags_from_disk(prunes)
+    M.prune_tags_from_disk(prunes, opts)
   end
 end
 
@@ -326,8 +327,8 @@ end
 
 --- Cleanly flush pending changes, stop and close all encapsulated timers, and reset catalog state.
 function M.teardown()
-  pcall(M.save_discovered_now)
-  pcall(M.flush_prunes_now)
+  pcall(M.save_discovered_now, { force = true })
+  pcall(M.flush_prunes_now, { force = true })
   M.reset()
 end
 
@@ -576,10 +577,12 @@ function M.record_discovered(item_or_items)
 end
 
 --- Immediately flush all discovered tags to disk, merging with existing entries.
-function M.save_discovered_now()
+--- @param opts? table { force = bool }
+function M.save_discovered_now(opts)
   save_discovered_timer = util.close_timer(save_discovered_timer)
 
-  if state.State and state.State.torn_down then
+  local is_force = opts and opts.force
+  if not is_force and state.State and state.State.torn_down then
     return
   end
 
@@ -644,8 +647,10 @@ end
 
 --- Prune specified lowercase tag set from all disk files.
 --- @param prune_set table<string, boolean>
-function M.prune_tags_from_disk(prune_set)
-  if state.State and state.State.torn_down then
+--- @param opts? table { force = bool }
+function M.prune_tags_from_disk(prune_set, opts)
+  local is_force = opts and opts.force
+  if not is_force and state.State and state.State.torn_down then
     return
   end
   if not prune_set or next(prune_set) == nil then

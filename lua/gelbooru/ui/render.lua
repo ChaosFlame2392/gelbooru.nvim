@@ -249,6 +249,8 @@ function M.render_preview(force_download)
   if p.is_local then
     local indexer = require("gelbooru.local.indexer")
     indexer.cursor_rush_prefetch(State.cur, State.scroll_dir)
+  else
+    download.prefetch_around(State.cur, State.scroll_dir)
   end
 
   local _, dest = resolver.get_preview_targets(p)
@@ -286,9 +288,6 @@ function M.render_preview(force_download)
       end
       if is_same_post(State.posts[State.cur], p) then
         M.load_and_render_image(p, force_download)
-        if not p.is_local then
-          download.prefetch_around(State.cur, State.scroll_dir)
-        end
       else
         log("DEBUG", "RENDER", "scroll_timer stale: wanted post %s, cur is now %s",
           tostring(p.id or p.file_url),

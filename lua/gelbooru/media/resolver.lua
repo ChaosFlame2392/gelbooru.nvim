@@ -1044,10 +1044,6 @@ end
 function M.abort_active()
   M._active_request_id = (M._active_request_id or 0) + 1
   M.abort_video_transcodes()
-  local ok, download = pcall(require, "gelbooru.net.download")
-  if ok and download and type(download.abort_all) == "function" then
-    pcall(download.abort_all)
-  end
   local ok_c, canvas = pcall(require, "gelbooru.ui.canvas")
   if ok_c and canvas and type(canvas.close) == "function" then
     pcall(canvas.close)
@@ -1315,7 +1311,7 @@ function M.resolve(post, opts, callback)
       end
       M.clean_corrupt_snacks_cache(dest)
       try_candidate(idx + 1)
-    end)
+    end, { force = force })
   end
 
   try_candidate(1)

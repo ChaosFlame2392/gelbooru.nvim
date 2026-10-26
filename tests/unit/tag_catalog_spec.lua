@@ -979,5 +979,26 @@ describe("tags.catalog", function()
 
       download.curl_async = orig_curl
     end)
+
+    it("teardown flushes discovered tags to disk even when state.State.torn_down is true", function()
+      local state = require("gelbooru.core.state")
+      local disc_path = tmp_dir .. "/discovered.json"
+      vim.fn.delete(disc_path)
+
+      catalog.load({ tags_dir = tmp_dir, discovered_file = disc_path }, function() end)
+      catalog.record_discovered({ { name = "miku_hatsune", type = 4, count = 500 } })
+      state.State.torn_down = true
+
+      catalog.teardown()
+
+      assert.are.equal(1, vim.fn.filereadable(disc_path))
+      local f = io.open(disc_path, "r")
+      assert.is_not_nil(f)
+      local content = vim.fn.json_decode(f:read("*a"))
+      f:close()
+      assert.is_not_nil(content)
+      assert.are.equal(1, #content)
+      assert.are.equal("miku_hatsune", content[1].n)
+    end)
   end)
 end)

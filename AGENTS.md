@@ -157,7 +157,6 @@ gelbooru.nvim/
     │   ├── init.lua                  # Local browser facade & open_local orchestrator
     │   ├── index.lua                 # O(1) integer hash index of saved files & mtime validator
     │   ├── indexer.lua               # Dual-tier cursor rush prefetcher & background metadata indexer
-    │   ├── query.lua                 # Query parser for local expressions & tag/rating/score filter
     │   └── scan.lua                  # Fast & safe directory scanner & post ID extractor
     ├── media/
     │   └── resolver.lua              # Headless media resolver, binary validation, video thumbnails, caching
@@ -166,11 +165,8 @@ gelbooru.nvim/
     │   ├── api.lua                   # Gelbooru REST client, query execution, metadata hydration
     │   └── download.lua              # Async curl download queue, dedup, retry, & prefetch scheduler
     ├── query/
-    │   ├── init.lua                  # Dedicated query package facade (parse, filter, sort, pipeline)
-    │   ├── parse.lua                 # Query tokenizer & modifier parser (rating:, score:, -tag, ranges)
-    │   ├── pipeline.lua              # Piped query parser (|) and stage execution engine
-    │   ├── sort.lua                  # Post sorting engine (score, id, mtime, random)
-    │   └── filter.lua                # Post matching and condition filter engine
+    │   ├── init.lua                  # Dedicated query package facade
+    │   └── engine.lua                # Unified query preparation, execution, parsing, sorting, and pipeline engine
     ├── tags/
     │   ├── init.lua                  # Unified tag catalog facade & public scraper entry point
     │   ├── catalog.lua               # Encapsulated tag catalog: in-memory indexing, search scoring, discovery & pruning
@@ -227,7 +223,7 @@ Network transfer engine using `vim.system({"curl", ...})`:
 - `cancel_pending_resumes()`, `cancel_prefetch_timers()`: Manages and cleans up deferred retry and prefetch timer handles.
 
 #### `lua/gelbooru/local/init.lua`
-Local folder browser subsystem facade: coordinates `scan_local_folder`, query parsing via `local/query.lua`, canvas clearing, history synchronization, and metadata hydration.
+Local folder browser subsystem facade: coordinates `scan_local_folder`, query parsing via `query.engine`, canvas clearing, history synchronization, and metadata hydration.
 
 #### `lua/gelbooru/local/index.lua`
 Maintains flat integer hash table `saved_index[tonumber(id)] = ext` mapping downloaded files in `save_dir`. Tracks directory `mtime` to avoid redundant filesystem traversal. Exposes `mark_saved(id, ext)` and `reset()`.
@@ -237,16 +233,10 @@ Dual-tier lookahead engine:
 - **Tier 1 (High Priority - Cursor Rush)**: Hydrates metadata immediately around active cursor in `scroll_dir`.
 - **Tier 2 (Background - Folder Indexer)**: Throttled async queue crawling unindexed posts with max 2 concurrent workers and 100ms pacing, aborted cleanly on navigation or teardown.
 
-#### `lua/gelbooru/local/query.lua`
-Compatibility re-export layer: cleanly re-exports all functions, submodules, and interfaces from the dedicated `lua/gelbooru/query/` package (`parse_query`, `filter_posts`, `sort_posts`, `execute_pipeline`, etc.) ensuring seamless zero-breaking-change backwards compatibility for existing plugins and tests requiring `gelbooru.local.query`.
-
 #### `lua/gelbooru/query/`
 Dedicated query parser, filtering, pipeline execution, and sorting package:
-- `query/init.lua`: Top-level facade exposing unified parsing, filtering, sorting, and pipeline functions and submodule handles (`parse`, `pipeline`, `sort`, `filter`).
-- `query/parse.lua`: Query tokenizer (`tokenize_query`), modifier parser (`rating:`, `score:`, `local:`, `-tag`, `id:`, tilde/pipe OR syntax), directory detector, and numeric/range bound parser (`50..`, `..100`).
-- `query/pipeline.lua`: Pipeline parser (`parse_pipeline` with pipe `|` splitting) and cascading stage execution engine (`execute_pipeline` with offset/limit/range slicing and sorting).
-- `query/sort.lua`: Post sorting engine (`sort_posts`) supporting `score`, `id`, `date`/`mtime`, and `random` with disk metadata score hydration and filesystem timestamp fallback.
-- `query/filter.lua`: Post matching engine (`matches_post` / `matches_query`) and collection filtering (`filter_posts`).
+- `query/init.lua`: Top-level facade exposing unified parsing, filtering, sorting, and pipeline functions from `query.engine`.
+- `query/engine.lua`: Unified query preparation (`prepare`), atomic evaluation (`evaluate`), parsing, multi-stage pipeline execution (`|`), and sorting engine.
 
 #### `lua/gelbooru/local/scan.lua`
 Safe directory traversal and post ID extractor using `vim.loop.fs_scandir`. Safely parses filenames with unicode, spaces, multiple dots, and brackets without external shell subshells. Falls back to `fs_stat` when filesystem returns nil `ftype`. Enforces a sequential filename collision guard (`id >= 10000` for bare numeric filenames like `1.png` or `42.jpg`) while preserving explicit booru prefixes (`gelbooru_`, `post_`, `id_`, `ID`, `prev_`).

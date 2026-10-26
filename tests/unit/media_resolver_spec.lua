@@ -487,14 +487,29 @@ describe("lua.gelbooru.media.resolver", function()
       assert.are.equal(800, cb_res.height)
     end)
 
-    it("abort_active cancels active jobs and ignores stale callbacks", function()
+    it("abort_active preserves active background downloads while ignoring stale callbacks", function()
       local download = require("gelbooru.net.download")
       local orig_download = download.download_async
+      local orig_abort_all = download.abort_all
       local captured_cb = nil
+      local abort_all_called = false
 
       download.download_async = function(url, dest, cb)
         captured_cb = cb
       end
+      download.abort_all = function()
+        abort_all_called = true
+        orig_abort_all()
+      end
+
+      local killed_handles = {}
+      local mock_handle = {
+        kill = function(self, sig)
+          table.insert(killed_handles, sig)
+        end,
+      }
+      download.active_handles["/tmp/prefetch_test.jpg"] = mock_handle
+      download.active_prefetch_handles["/tmp/prefetch_test.jpg"] = mock_handle
 
       local post = {
         id = 44444,
@@ -510,10 +525,20 @@ describe("lua.gelbooru.media.resolver", function()
       -- User navigates away, triggering abort_active
       resolver.abort_active()
 
+      -- resolver.abort_active must NOT invoke download.abort_all()
+      assert.is_false(abort_all_called, "resolver.abort_active must not call download.abort_all()")
+      -- Active background downloads and prefetch handles must continue unimpeded
+      assert.are.equal(0, #killed_handles, "Background download handle must not be killed by resolver.abort_active()")
+      assert.are.equal(mock_handle, download.active_handles["/tmp/prefetch_test.jpg"])
+      assert.are.equal(mock_handle, download.active_prefetch_handles["/tmp/prefetch_test.jpg"])
+
       -- Late callback arrives after abort
       captured_cb(true)
 
       download.download_async = orig_download
+      download.abort_all = orig_abort_all
+      download.active_handles["/tmp/prefetch_test.jpg"] = nil
+      download.active_prefetch_handles["/tmp/prefetch_test.jpg"] = nil
       assert.is_false(resolution_called, "Callback must be dropped after abort_active()")
     end)
   end)

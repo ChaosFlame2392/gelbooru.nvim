@@ -33,6 +33,11 @@ describe("config", function()
     it("prefetch_radius is non-negative", function()
       assert.is_true(config.options.prefetch_radius >= 0)
     end)
+
+    it("constants defines PREFETCH_LOOKAHEAD_DEPTH as 2", function()
+      local constants = require("gelbooru.core.constants")
+      assert.are.equal(2, constants.PREFETCH_LOOKAHEAD_DEPTH)
+    end)
   end)
 
   describe("setup() clamping", function()

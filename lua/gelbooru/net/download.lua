@@ -167,9 +167,9 @@ function M.curl_async(url, cb)
   return handle
 end
 
--- opts: { resume = bool }
--- When resume=true and a .part file already exists with bytes, uses curl -C - to
--- continue the interrupted transfer instead of restarting from scratch.
+-- opts: { resume = bool, force = bool }
+-- Automatically enables HTTP byte-range resumption (-C -) whenever a .part file
+-- exists and has size > 1024 bytes, unless opts.force is true.
 function M.download_async(url, dest, cb, opts)
   if not url or type(url) ~= "string" or not url:match("^https?://") then
     log("WARN", "DOWNLOAD", "Invalid HTTP(S) URL rejected: %s", tostring(url))
@@ -216,9 +216,23 @@ function M.download_async(url, dest, cb, opts)
   end
 
   local tmp_dest = dest .. ".part"
-  local resume = opts and opts.resume == true
+  local force = opts and opts.force == true
   local part_size = vim.fn.getfsize(tmp_dest)
-  local do_resume = resume and part_size > 1024
+  local do_resume = not force and part_size > constants.MIN_VALID_MEDIA_BYTES
+
+  if do_resume then
+    local pf = io.open(tmp_dest, "rb")
+    if pf then
+      local head = pf:read(16) or ""
+      pf:close()
+      local lower_head = head:lower()
+      if lower_head:find("<!doctype", 1, true) or lower_head:find("<html", 1, true) or lower_head:find("<?xml", 1, true) then
+        do_resume = false
+      end
+    else
+      do_resume = false
+    end
+  end
 
   if do_resume then
     log("INFO", "DOWNLOAD", "Resuming download at %d bytes: %s -> %s", part_size, url, dest)
@@ -292,10 +306,13 @@ function M.download_async(url, dest, cb, opts)
         end
       end
 
-      -- Only delete .part on failure for non-resume downloads; for resumes we
-      -- leave a failed .part intact so the next session can retry resuming it.
+      -- Only delete .part on failure for non-resumable downloads, range errors, or corrupt payloads;
+      -- for resumable downloads we leave a failed .part intact so future requests can resume it.
       if not ok then
-        if not resume and vim.fn.filereadable(tmp_dest) == 1 then
+        local current_part_size = vim.fn.getfsize(tmp_dest)
+        local is_range_error = (out.code == 33 or out.code == 22)
+        local preserve_part = not force and not is_range_error and current_part_size > constants.MIN_VALID_MEDIA_BYTES and out.code ~= 0
+        if not preserve_part and vim.fn.filereadable(tmp_dest) == 1 then
           vim.fn.delete(tmp_dest)
         end
         log("WARN", "DOWNLOAD", "Download failed or corrupted (code %d): %s", out.code or -1, url)
@@ -441,6 +458,14 @@ function M.cancel_prefetch_timers(abort_active)
       end
     end
     M.active_prefetch_handles = {}
+  else
+    if M.active_prefetch_handles then
+      for dest, _ in pairs(M.active_prefetch_handles) do
+        if not M.active_downloads[dest] then
+          M.active_prefetch_handles[dest] = nil
+        end
+      end
+    end
   end
 end
 
@@ -490,7 +515,15 @@ function M.prefetch_around(idx, scroll_dir)
     table.insert(ordered, i)
   end
 
-  local immediate_next = idx + dir
+  -- Top lookahead targets in active scroll direction within radius:
+  local immediate_targets = {}
+  for step = 1, math.min(radius, constants.PREFETCH_LOOKAHEAD_DEPTH) do
+    local lookahead_idx = idx + dir * step
+    if lookahead_idx >= 1 and lookahead_idx <= #State.posts then
+      immediate_targets[lookahead_idx] = true
+    end
+  end
+
   local delay = 0
 
   for _, i in ipairs(ordered) do
@@ -502,24 +535,24 @@ function M.prefetch_around(idx, scroll_dir)
       if url and dest then
         if type(url) == "string" and url:match("^https?://") then
           if vim.fn.filereadable(dest) == 0 and not M.active_downloads[dest] then
-            if i == immediate_next then
-              -- Immediate next post (`cur + dir`): eliminate artificial 50ms delay, trigger immediately!
-              log("DEBUG", "PREFETCH", "Prefetching immediate next post %s (dir=%d)", tostring(p.id), dir)
+            if immediate_targets[i] then
+              -- Top lookahead targets in active scroll direction:
+              -- Eliminate artificial delay and dispatch concurrently without delay to overlap TLS handshakes!
+              log("DEBUG", "PREFETCH", "Prefetching immediate lookahead post %s (idx=%d, dir=%d)", tostring(p.id), i, dir)
               M.queued_prefetch_dests[dest] = nil
               local handle = M.download_async(url, dest, function()
                 if M.active_prefetch_handles then
                   M.active_prefetch_handles[dest] = nil
                 end
               end)
-              if handle and M.active_prefetch_handles then
+              if handle and M.active_prefetch_handles and M.active_downloads[dest] then
                 M.active_prefetch_handles[dest] = handle
               end
             elseif not M.queued_prefetch_dests[dest] then
               delay = delay + constants.PREFETCH_STAGGER_MS
               M.queued_prefetch_dests[dest] = true
               local timer = vim.loop.new_timer()
-              local timer_idx = #UI.prefetch_timers + 1
-              UI.prefetch_timers[timer_idx] = timer
+              UI.prefetch_timers[timer] = timer
               local cap_url, cap_dest = url, dest
               local cap_pid = p.id
 
@@ -530,7 +563,7 @@ function M.prefetch_around(idx, scroll_dir)
                   if not timer:is_closing() then
                     timer:close()
                   end
-                  UI.prefetch_timers[timer_idx] = nil
+                  UI.prefetch_timers[timer] = nil
                   if M.queued_prefetch_dests then
                     M.queued_prefetch_dests[cap_dest] = nil
                   end
@@ -544,7 +577,7 @@ function M.prefetch_around(idx, scroll_dir)
                         M.active_prefetch_handles[cap_dest] = nil
                       end
                     end)
-                    if handle and M.active_prefetch_handles then
+                    if handle and M.active_prefetch_handles and M.active_downloads[cap_dest] then
                       M.active_prefetch_handles[cap_dest] = handle
                     end
                   end
