@@ -1636,3 +1636,198 @@ describe("download: token-bucket rate governor and priority queue", function()
   end)
 end)
 
+describe("download: pipelined online preview prewarming", function()
+  local orig_system
+  local mock_snacks = require("tests.integration.helpers.mock_snacks")
+  local prewarmer = require("gelbooru.media.prewarmer")
+  local tmp_dir
+
+  before_each(function()
+    mock_snacks.setup()
+    prewarmer.reset()
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.interrupted_dests = {}
+    download.pending_resumes = {}
+    orig_system = vim.system
+    tmp_dir = vim.fn.tempname()
+    vim.fn.mkdir(tmp_dir, "p")
+    config.options.cache_dir = tmp_dir .. "/cache"
+    vim.fn.mkdir(config.options.cache_dir, "p")
+  end)
+
+  after_each(function()
+    vim.system = orig_system
+    prewarmer.stop()
+    prewarmer.reset()
+    mock_snacks.teardown()
+    vim.fn.delete(tmp_dir, "rf")
+  end)
+
+  local function write_valid_jpeg(path, size)
+    local f = io.open(path, "wb")
+    if f then
+      local valid_jpeg = string.char(
+        0xFF, 0xD8,
+        0xFF, 0xC0, 0x00, 0x11, 0x08,
+        0x04, 0x00, 0x04, 0x00,
+        0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00
+      ) .. string.rep("A", size or 2048) .. string.char(0xFF, 0xD9)
+      f:write(valid_jpeg)
+      f:close()
+    end
+  end
+
+  it("enqueues downloaded preview file into background prewarmer upon successful download", function()
+    local dest = config.options.cache_dir .. "/prev_9901.jpg"
+    local part = dest .. ".part"
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      write_valid_jpeg(part, 2048)
+      return { kill = function() end }
+    end
+
+    local download_done = false
+    download.download_async("https://example.com/preview9901.jpg", dest, function(ok)
+      download_done = ok
+    end, { priority = constants.PRIORITY_PREFETCH, post_idx = 2 })
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 0 })
+    vim.wait(300, function() return download_done end, 10)
+    assert.is_true(download_done)
+
+    -- Assert prewarming was triggered immediately on dest
+    vim.wait(300, function() return #mock_snacks.conversions_run > 0 end, 10)
+    assert.is_true(#mock_snacks.conversions_run >= 1)
+    assert.are.equal(dest, mock_snacks.conversions_run[1].src)
+  end)
+
+  it("executes prewarming purely disk-to-disk without creating dummy buffers or placements", function()
+    local dest = config.options.cache_dir .. "/prev_9902.jpg"
+    local part = dest .. ".part"
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      write_valid_jpeg(part, 2048)
+      return { kill = function() end }
+    end
+
+    local bufs_before = #vim.api.nvim_list_bufs()
+
+    local download_done = false
+    download.download_async("https://example.com/preview9902.jpg", dest, function(ok)
+      download_done = ok
+    end, { priority = constants.PRIORITY_PREVIEW })
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 0 })
+    vim.wait(300, function() return download_done end, 10)
+    assert.is_true(download_done)
+
+    vim.wait(300, function() return #mock_snacks.conversions_run > 0 end, 10)
+    assert.is_true(#mock_snacks.conversions_run >= 1)
+
+    -- Must be strictly disk-to-disk: 0 placements created, 0 extra buffers created
+    assert.are.equal(0, #mock_snacks.placements_created)
+    local bufs_after = #vim.api.nvim_list_bufs()
+    assert.are.equal(bufs_before, bufs_after)
+  end)
+
+  it("does not prewarm when download fails or media verification fails", function()
+    local dest = config.options.cache_dir .. "/prev_9903.jpg"
+    local part = dest .. ".part"
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      -- Write corrupt HTML error body
+      local f = io.open(part, "wb")
+      f:write("<!doctype html><html><body>500 Internal Server Error</body></html>")
+      f:close()
+      return { kill = function() end }
+    end
+
+    local download_done = nil
+    download.download_async("https://example.com/corrupt.jpg", dest, function(ok)
+      download_done = ok
+    end, { priority = constants.PRIORITY_PREFETCH })
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 0 })
+    vim.wait(300, function() return download_done ~= nil end, 10)
+    assert.is_false(download_done)
+
+    -- Conversion must NOT run for failed/corrupted download
+    assert.are.equal(0, #mock_snacks.conversions_run)
+    assert.are.equal(0, #mock_snacks.conversions_created)
+  end)
+
+  it("respects opts.prewarm == false flag to opt out of prewarming", function()
+    local dest = config.options.cache_dir .. "/prev_9904.jpg"
+    local part = dest .. ".part"
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      write_valid_jpeg(part, 2048)
+      return { kill = function() end }
+    end
+
+    local download_done = false
+    download.download_async("https://example.com/noprewarm.jpg", dest, function(ok)
+      download_done = ok
+    end, { priority = constants.PRIORITY_PREFETCH, prewarm = false })
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 0 })
+    vim.wait(300, function() return download_done end, 10)
+    assert.is_true(download_done)
+
+    -- Prewarming should be skipped because prewarm = false
+    assert.are.equal(0, #mock_snacks.conversions_run)
+    assert.are.equal(0, #mock_snacks.conversions_created)
+  end)
+
+  it("queues multiple pipelined preview downloads without exceeding prewarmer concurrency", function()
+    local dests = {}
+
+    vim.system = function(cmd, opts, on_exit)
+      local dest_arg = cmd[#cmd - 1]
+      vim.schedule(function()
+        write_valid_jpeg(dest_arg, 2048)
+        on_exit({ code = 0 })
+      end)
+      return { kill = function() end }
+    end
+
+    for i = 1, 6 do
+      local dest = config.options.cache_dir .. string.format("/prev_bulk_%d.jpg", i)
+      table.insert(dests, dest)
+      download.download_async("https://example.com/" .. i .. ".jpg", dest, function() end, {
+        priority = constants.PRIORITY_PREFETCH,
+        post_idx = i,
+      })
+    end
+
+    -- Prewarmer should process items up to max_concurrent (3) and queue the rest
+    vim.wait(2000, function() return #mock_snacks.conversions_run >= 6 end, 20)
+    assert.is_true(#mock_snacks.conversions_run >= 6)
+
+    local warmed = {}
+    for _, c in ipairs(mock_snacks.conversions_run) do
+      warmed[c.src] = true
+    end
+    for _, d in ipairs(dests) do
+      assert.is_true(warmed[d] == true, "Expected " .. d .. " to be prewarmed")
+    end
+  end)
+end)
+

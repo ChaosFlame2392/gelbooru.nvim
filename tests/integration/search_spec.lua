@@ -1444,6 +1444,38 @@ describe("Integration: Search & List flow", function()
 
       download.curl_async = orig_curl
     end)
+
+    it("prewarms lookahead online previews so subsequent navigation renders with cached cooldown (<30ms)", function()
+      local prewarmer = require("gelbooru.media.prewarmer")
+
+      ui.open()
+      api.execute_search("hatsune_miku")
+
+      vim.wait(300, function()
+        return #state.State.posts >= 2
+      end)
+
+      local p2 = state.State.posts[2]
+      assert.is_not_nil(p2)
+      local _, dest2 = _G.resolver.get_preview_targets(p2)
+
+      -- Wait for prefetch of post 2 to complete and trigger background prewarm
+      vim.wait(500, function()
+        return vim.fn.filereadable(dest2) == 1 and prewarmer.prewarmed_cache[dest2] == true
+      end, 10)
+
+      assert.are.equal(1, vim.fn.filereadable(dest2))
+      assert.is_true(prewarmer.prewarmed_cache[dest2] == true)
+
+      -- Navigate to post 2
+      state.State.cur = 2
+      local render = require("gelbooru.ui.render")
+      render.render_preview(false)
+
+      -- Assert status is not "Loading preview..." because image is cached & prewarmed
+      local status_line = harness.get_buf_lines(state.UI.bufs.status)
+      assert.is_false((status_line[1] or ""):find("Loading preview") ~= nil)
+    end)
   end)
 end)
 

@@ -123,6 +123,119 @@ describe("gelbooru.media.prewarmer", function()
       assert.is_false(result_ok)
       assert.is_truthy(err_msg)
     end)
+
+    it("queues prewarm_file when max_concurrent jobs are active and drains automatically", function()
+      -- Simulate slow running conversions that do not complete synchronously
+      local orig_run = package.loaded["snacks.image.convert"].convert
+      local active_on_dones = {}
+      package.loaded["snacks.image.convert"].convert = function(opts)
+        local conv = orig_run(opts)
+        conv.run = function(self)
+          self.running = true
+          table.insert(mock_snacks.conversions_run, self)
+          table.insert(active_on_dones, function()
+            self.done_flag = true
+            if opts.on_done then opts.on_done(self) end
+          end)
+        end
+        return conv
+      end
+
+      -- Start 3 conversions (saturating max_concurrent = 3)
+      local f1 = make_dummy_file("f1.png", 2048)
+      local f2 = make_dummy_file("f2.png", 2048)
+      local f3 = make_dummy_file("f3.png", 2048)
+      local f4 = make_dummy_file("f4.png", 2048)
+
+      prewarmer.prewarm_file(f1)
+      prewarmer.prewarm_file(f2)
+      prewarmer.prewarm_file(f3)
+
+      assert.are.equal(3, #mock_snacks.conversions_run)
+
+      -- 4th file should be queued in prewarmer.queue because active == 3
+      local f4_done = false
+      prewarmer.prewarm_file(f4, function(ok)
+        f4_done = ok
+      end)
+
+      assert.are.equal(3, #mock_snacks.conversions_run)
+      assert.are.equal(1, #prewarmer.queue)
+      assert.are.equal(f4, prewarmer.queue[1].path)
+
+      -- Finish one of the active conversions
+      local finish_first = table.remove(active_on_dones, 1)
+      finish_first()
+
+      -- f4 should now be dequeued and running
+      vim.wait(500, function() return #mock_snacks.conversions_run == 4 end, 10)
+      assert.are.equal(4, #mock_snacks.conversions_run)
+      assert.are.equal(f4, mock_snacks.conversions_run[4].src)
+
+      -- Finish the rest
+      while #active_on_dones > 0 do
+        local fin = table.remove(active_on_dones, 1)
+        fin()
+      end
+      vim.wait(500, function() return f4_done end, 10)
+      assert.is_true(f4_done)
+    end)
+
+    it("conversion failure on queued prewarm_file does not block subsequent queue items", function()
+      local orig_run = package.loaded["snacks.image.convert"].convert
+      local active_on_dones = {}
+      package.loaded["snacks.image.convert"].convert = function(opts)
+        local conv = orig_run(opts)
+        conv.run = function(self)
+          self.running = true
+          table.insert(mock_snacks.conversions_run, self)
+          table.insert(active_on_dones, function()
+            self.done_flag = true
+            if opts.src:find("corrupt") then
+              self._err = "Corrupt file"
+            end
+            if opts.on_done then opts.on_done(self) end
+          end)
+        end
+        return conv
+      end
+
+      local f1 = make_dummy_file("f1.png", 2048)
+      local f2 = make_dummy_file("f2.png", 2048)
+      local f3 = make_dummy_file("f3.png", 2048)
+      local f_corrupt = make_dummy_file("corrupt_q.png", 2048)
+      local f_good = make_dummy_file("good_q.png", 2048)
+
+      prewarmer.prewarm_file(f1)
+      prewarmer.prewarm_file(f2)
+      prewarmer.prewarm_file(f3)
+
+      local corrupt_done, corrupt_ok
+      prewarmer.prewarm_file(f_corrupt, function(ok)
+        corrupt_done = true
+        corrupt_ok = ok
+      end)
+
+      local good_done, good_ok
+      prewarmer.prewarm_file(f_good, function(ok)
+        good_done = true
+        good_ok = ok
+      end)
+
+      assert.are.equal(2, #prewarmer.queue)
+
+      -- Drain all conversions
+      while #active_on_dones > 0 do
+        local fin = table.remove(active_on_dones, 1)
+        fin()
+      end
+
+      vim.wait(500, function() return corrupt_done and good_done end, 10)
+      assert.is_true(corrupt_done)
+      assert.is_false(corrupt_ok)
+      assert.is_true(good_done)
+      assert.is_true(good_ok)
+    end)
   end)
 
   describe("prewarm_post", function()

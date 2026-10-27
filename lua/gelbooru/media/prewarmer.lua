@@ -44,53 +44,29 @@ function M.drain_queue()
   local active = count_active_jobs()
   while active < M.max_concurrent and #M.queue > 0 do
     local item = table.remove(M.queue, 1)
-    if item and item.post and not item.post._pending_delete then
-      local path = item.post.file_url
-      if not M.active_jobs[path] and not M.prewarmed_cache[path] then
-        active = active + 1
-        M.prewarm_post(item.post, item.cb)
+    if item then
+      if item.post and not item.post._pending_delete then
+        local path = item.post.file_url
+        if not M.active_jobs[path] and not M.prewarmed_cache[path] then
+          active = active + 1
+          M.prewarm_post(item.post, item.cb)
+        end
+      elseif item.path and not (item.post and item.post._pending_delete) then
+        local path = item.path
+        if not M.active_jobs[path] and not M.prewarmed_cache[path] then
+          active = active + 1
+          M._do_prewarm_file(path, item.cb)
+        end
       end
     end
   end
 end
 
-function M.prewarm_file(file_path, cb)
-  if not file_path or type(file_path) ~= "string" or file_path == "" then
-    if cb then cb(false, "Invalid file path") end
-    return nil
-  end
-
-  if vim.fn.filereadable(file_path) == 0 then
-    if cb then cb(false, "File not readable: " .. file_path) end
-    return nil
-  end
-
-  local fsize = vim.fn.getfsize(file_path) or 0
-  if fsize <= 0 then
-    if cb then cb(false, "File empty: " .. file_path) end
-    return nil
-  end
-
-  if M.prewarmed_cache[file_path] then
-    if cb then cb(true) end
-    return nil
-  end
-
-  local existing_job = M.active_jobs[file_path]
-  if existing_job then
-    if cb then
-      local orig_cb = existing_job.cb
-      existing_job.cb = function(ok, err)
-        if orig_cb then pcall(orig_cb, ok, err) end
-        pcall(cb, ok, err)
-      end
-    end
-    return existing_job.conv
-  end
-
-  local convert_mod = get_convert_module()
+function M._do_prewarm_file(file_path, cb, convert_mod)
+  convert_mod = convert_mod or get_convert_module()
   if not convert_mod then
     if cb then cb(true) end
+    M.drain_queue()
     return nil
   end
 
@@ -138,6 +114,72 @@ function M.prewarm_file(file_path, cb)
   end)
 
   return conv
+end
+
+function M.prewarm_file(file_path, cb, opts)
+  if not file_path or type(file_path) ~= "string" or file_path == "" then
+    if cb then cb(false, "Invalid file path") end
+    return nil
+  end
+
+  if vim.fn.filereadable(file_path) == 0 then
+    if cb then cb(false, "File not readable: " .. file_path) end
+    return nil
+  end
+
+  local fsize = vim.fn.getfsize(file_path) or 0
+  if fsize <= 0 then
+    if cb then cb(false, "File empty: " .. file_path) end
+    return nil
+  end
+
+  if M.prewarmed_cache[file_path] then
+    if cb then cb(true) end
+    return nil
+  end
+
+  local existing_job = M.active_jobs[file_path]
+  if existing_job then
+    if cb then
+      local orig_cb = existing_job.cb
+      existing_job.cb = function(ok, err)
+        if orig_cb then pcall(orig_cb, ok, err) end
+        pcall(cb, ok, err)
+      end
+    end
+    return existing_job.conv
+  end
+
+  local convert_mod = get_convert_module()
+  if not convert_mod then
+    if cb then cb(true) end
+    return nil
+  end
+
+  -- Check if already queued
+  for _, item in ipairs(M.queue) do
+    if item.path == file_path or (item.post and item.post.file_url == file_path) then
+      if cb then
+        local orig_cb = item.cb
+        item.cb = function(ok, err)
+          if orig_cb then pcall(orig_cb, ok, err) end
+          pcall(cb, ok, err)
+        end
+      end
+      return nil
+    end
+  end
+
+  if count_active_jobs() >= M.max_concurrent then
+    table.insert(M.queue, {
+      path = file_path,
+      cb = cb,
+      post_idx = opts and opts.post_idx,
+    })
+    return nil
+  end
+
+  return M._do_prewarm_file(file_path, cb, convert_mod)
 end
 
 function M.prewarm_post(post, cb)
@@ -255,7 +297,7 @@ function M.prewarm_posts(posts, cur_idx, dir_or_opts)
   local window = constants.PREWARM_SLIDING_WINDOW or 10
   local pruned_queue = {}
   for _, item in ipairs(M.queue) do
-    if math.abs(item.post_idx - cur_idx) <= window then
+    if not item.post_idx or math.abs(item.post_idx - cur_idx) <= window then
       table.insert(pruned_queue, item)
     end
   end

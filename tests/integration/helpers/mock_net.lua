@@ -69,7 +69,7 @@ function M.setup()
     end)
   end
 
-  download.download_async = function(url, dest, cb)
+  download.download_async = function(url, dest, cb, opts)
     if not dest or dest == "" then
       if cb then
         cb(false)
@@ -89,6 +89,12 @@ function M.setup()
       ) .. string.rep("A", 2048) .. string.char(0xFF, 0xD9) -- padding + EOI
       f:write(valid_jpeg)
       f:close()
+      if opts == nil or opts.prewarm ~= false then
+        pcall(function()
+          local prewarmer = require("gelbooru.media.prewarmer")
+          prewarmer.prewarm_file(dest, nil, opts)
+        end)
+      end
       if cb then
         vim.schedule(function()
           cb(true)

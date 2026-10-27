@@ -274,6 +274,29 @@ local function is_in_save_dir(path)
   return path == save_dir or path:sub(1, #prefix) == prefix
 end
 
+local function is_preview_target(dest, opts)
+  if opts and opts.is_preview ~= nil then
+    return opts.is_preview
+  end
+  if opts and (opts.priority == constants.PRIORITY_PREFETCH or opts.priority == constants.PRIORITY_PREVIEW) then
+    return true
+  end
+  if type(dest) == "string" and (dest:match("prev_[%w_]+%.") or dest:match("[/\\]prev_") or dest:match("^prev_")) then
+    return true
+  end
+  return false
+end
+
+local function should_prewarm(dest, opts)
+  if opts and opts.prewarm == false then
+    return false
+  end
+  if opts and opts.prewarm == true then
+    return true
+  end
+  return is_preview_target(dest, opts)
+end
+
 function M.is_valid_media(file_path, ref_path)
   if not file_path or vim.fn.filereadable(file_path) ~= 1 then
     return false
@@ -486,6 +509,12 @@ function M.download_async(url, dest, cb, opts)
   if vim.fn.filereadable(dest) == 1 and not M.active_downloads[dest] then
     if M.is_valid_media(dest) then
       log("DEBUG", "DOWNLOAD", "File already cached on disk: %s", dest)
+      if should_prewarm(dest, opts) then
+        pcall(function()
+          local prewarmer = require("gelbooru.media.prewarmer")
+          prewarmer.prewarm_file(dest, nil, opts)
+        end)
+      end
       if cb then
         pcall(cb, true)
       end
@@ -690,6 +719,15 @@ function M.download_async(url, dest, cb, opts)
             uv.fs_utime(dest, now, now)
           end)
           log("INFO", "DOWNLOAD", "Download succeeded: %s", dest)
+
+          -- Pipelined online preview prewarming:
+          -- Forward completed preview image immediately into disk-to-disk graphics prewarmer
+          if should_prewarm(dest, opts) then
+            pcall(function()
+              local prewarmer = require("gelbooru.media.prewarmer")
+              prewarmer.prewarm_file(dest, nil, opts)
+            end)
+          end
         end
 
         for _, fn in ipairs(callbacks) do
