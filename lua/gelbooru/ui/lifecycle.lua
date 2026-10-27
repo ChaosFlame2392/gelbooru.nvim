@@ -39,6 +39,10 @@ function M.teardown()
   pcall(function()
     require("gelbooru.local.indexer").stop()
   end)
+  pcall(function()
+    require("gelbooru.media.prewarmer").stop()
+    require("gelbooru.media.prewarmer").reset()
+  end)
 
   download.cancel_prefetch_timers(true)
   -- Drop pending download callbacks so their closures are freed immediately.
@@ -333,6 +337,10 @@ function M.setup_autocmds()
         render.render_preview(false)
         if not (State.posts[State.cur] and State.posts[State.cur].is_local) then
           download.prefetch_around(State.cur, State.scroll_dir)
+        else
+          pcall(function()
+            require("gelbooru.media.prewarmer").prewarm_posts(State.posts, State.cur, State.scroll_dir)
+          end)
         end
         if State.cur >= #State.posts - constants.AUTOPAGE_BOUNDARY_THRESHOLD then
           api.fetch(1, false)

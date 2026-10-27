@@ -249,6 +249,9 @@ function M.render_preview(force_download)
   if p.is_local then
     local indexer = require("gelbooru.local.indexer")
     indexer.cursor_rush_prefetch(State.cur, State.scroll_dir)
+    pcall(function()
+      require("gelbooru.media.prewarmer").prewarm_posts(State.posts, State.cur, State.scroll_dir)
+    end)
   else
     download.prefetch_around(State.cur, State.scroll_dir)
   end

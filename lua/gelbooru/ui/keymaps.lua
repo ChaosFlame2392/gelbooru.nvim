@@ -10,6 +10,7 @@ local layout = require("gelbooru.ui.layout")
 local render = require("gelbooru.ui.render")
 local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
+local prewarmer = require("gelbooru.media.prewarmer")
 
 local M = {}
 
@@ -61,6 +62,8 @@ function M.on_cursor_change(action)
   render.render_preview(false)
   if not (State.posts[State.cur] and State.posts[State.cur].is_local) then
     download.prefetch_around(State.cur, State.scroll_dir)
+  else
+    prewarmer.prewarm_posts(State.posts, State.cur, State.scroll_dir)
   end
   if State.cur >= #State.posts - constants.AUTOPAGE_BOUNDARY_THRESHOLD then
     api.fetch(1, false)
@@ -78,6 +81,7 @@ function M.force_refresh()
     p._metadata_fetched = nil
   end
   if p and (p.id or p.file_url) then
+    prewarmer.invalidate(p.file_url or p.id)
     resolver.clear_snacks_cache_for(p.id or p.file_url)
     if p.id then
       resolver.clear_cache(p.id)
