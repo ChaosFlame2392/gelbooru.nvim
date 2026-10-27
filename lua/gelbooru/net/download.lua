@@ -223,6 +223,44 @@ function governor.upgrade_priority(dest, new_priority)
   end
 end
 
+function governor.reorder_prefetch(cur_idx, dir)
+  local q = governor.queues[constants.PRIORITY_PREFETCH]
+  if not q or #q <= 1 then
+    return
+  end
+  cur_idx = cur_idx or 1
+  dir = dir or 1
+
+  table.sort(q, function(a, b)
+    if a.killed ~= b.killed then
+      return b.killed
+    end
+
+    local idx_a = a.post_idx
+    local idx_b = b.post_idx
+
+    if not idx_a and not idx_b then
+      return false
+    elseif not idx_a then
+      return false
+    elseif not idx_b then
+      return true
+    end
+
+    local delta_a = (idx_a - cur_idx) * dir
+    local delta_b = (idx_b - cur_idx) * dir
+
+    local rank_a = (delta_a > 0) and delta_a or (1000 + math.abs(delta_a))
+    local rank_b = (delta_b > 0) and delta_b or (1000 + math.abs(delta_b))
+
+    return rank_a < rank_b
+  end)
+end
+
+function M.reorder_prefetch_queue(cur_idx, dir)
+  governor.reorder_prefetch(cur_idx, dir)
+end
+
 local function is_in_save_dir(path)
   if not path or type(path) ~= "string" or path == "" then
     return false
@@ -522,6 +560,7 @@ function M.download_async(url, dest, cb, opts)
     dest = dest,
     url = url,
     priority = priority,
+    post_idx = opts and opts.post_idx,
     handle = handle_proxy,
     socket_active = false,
     on_cancel = function()
@@ -781,8 +820,8 @@ function M.cancel_prefetch_timers(abort_active)
   end
   UI.prefetch_timers = {}
   M.queued_prefetch_dests = {}
-  M.last_prefetch_dir = nil
   if abort_active then
+    M.last_prefetch_dir = nil
     for dest, handle in pairs(M.active_prefetch_handles or {}) do
       M.interrupted_dests[dest] = true
       if handle then
@@ -823,10 +862,13 @@ function M.prefetch_around(idx, scroll_dir)
   end
 
   -- Direction handling:
-  -- Do not cancel in-flight prefetch downloads if moving in the same direction (`scroll_dir`).
-  -- If scroll direction has reversed, cancel old prefetch timers and abort opposite in-flight prefetch downloads.
+  -- Anti-jitter connection resilience:
+  -- When scroll direction changes, do NOT cancel/SIGKILL in-flight curl downloads.
+  -- Let active transfers finish and populate the disk cache naturally.
+  -- Cancel un-fired stagger timers and re-order the prefetch queue to favor the new direction.
   if M.last_prefetch_dir ~= nil and M.last_prefetch_dir ~= dir then
-    M.cancel_prefetch_timers(true)
+    M.cancel_prefetch_timers(false)
+    governor.reorder_prefetch(idx, dir)
   end
   M.last_prefetch_dir = dir
 
@@ -879,7 +921,7 @@ function M.prefetch_around(idx, scroll_dir)
                 if M.active_prefetch_handles then
                   M.active_prefetch_handles[dest] = nil
                 end
-              end, { priority = constants.PRIORITY_PREFETCH })
+              end, { priority = constants.PRIORITY_PREFETCH, post_idx = i })
               if handle and M.active_prefetch_handles and M.active_downloads[dest] then
                 M.active_prefetch_handles[dest] = handle
               end
@@ -890,6 +932,7 @@ function M.prefetch_around(idx, scroll_dir)
               UI.prefetch_timers[timer] = timer
               local cap_url, cap_dest = url, dest
               local cap_pid = p.id
+              local cap_idx = i
 
               timer:start(
                 delay,
@@ -911,7 +954,7 @@ function M.prefetch_around(idx, scroll_dir)
                       if M.active_prefetch_handles then
                         M.active_prefetch_handles[cap_dest] = nil
                       end
-                    end, { priority = constants.PRIORITY_PREFETCH })
+                    end, { priority = constants.PRIORITY_PREFETCH, post_idx = cap_idx })
                     if handle and M.active_prefetch_handles and M.active_downloads[cap_dest] then
                       M.active_prefetch_handles[cap_dest] = handle
                     end
@@ -929,6 +972,8 @@ function M.prefetch_around(idx, scroll_dir)
       end
     end
   end
+
+  governor.reorder_prefetch(idx, dir)
 end
 
 return M

@@ -894,13 +894,14 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
     orig_torn_down = state.State.torn_down
 
     state.State.torn_down = false
-    state.State.posts = {
-      { id = 101, file_url = "http://example.com/101.jpg", sample_url = "http://example.com/101_s.jpg" },
-      { id = 102, file_url = "http://example.com/102.jpg", sample_url = "http://example.com/102_s.jpg" },
-      { id = 103, file_url = "http://example.com/103.jpg", sample_url = "http://example.com/103_s.jpg" },
-      { id = 104, file_url = "http://example.com/104.jpg", sample_url = "http://example.com/104_s.jpg" },
-      { id = 105, file_url = "http://example.com/105.jpg", sample_url = "http://example.com/105_s.jpg" },
-    }
+    state.State.posts = {}
+    for i = 1, 15 do
+      table.insert(state.State.posts, {
+        id = 100 + i,
+        file_url = string.format("http://example.com/%d.jpg", 100 + i),
+        sample_url = string.format("http://example.com/%d_s.jpg", 100 + i),
+      })
+    end
     state.State.cur = 1
     state.State.scroll_dir = 1
   end)
@@ -914,7 +915,7 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
     state.State.torn_down = orig_torn_down
   end)
 
-  it("dispatches top lookahead targets (N+1 and N+2) concurrently without delay and staggers subsequent targets", function()
+  it("dispatches immediate lookahead targets (up to 8 posts ahead) concurrently without delay and staggers subsequent targets", function()
     local spawned_urls = {}
     local mock_handle = { kill = function() end }
 
@@ -923,20 +924,25 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
       return mock_handle
     end
 
-    -- Trigger prefetch at index 1 with direction 1 -> immediate targets are posts 102 (N+1) and 103 (N+2)
+    local orig_radius = config.options.prefetch_radius
+    config.options.prefetch_radius = 10
+
+    -- Trigger prefetch at index 1 with direction 1 -> immediate targets are posts 102 through 109 (8 posts)
     download.prefetch_around(1, 1)
 
-    -- Both active handles must be tracked in active_prefetch_handles immediately
-    assert.are.equal(2, vim.tbl_count(download.active_prefetch_handles))
+    -- All 8 lookahead handles must be tracked in active_prefetch_handles immediately
+    assert.are.equal(8, vim.tbl_count(download.active_prefetch_handles))
 
-    -- Subsequent posts (104, 105) must be staggered via prefetch_timers immediately
+    -- Subsequent posts beyond lookahead depth (110, 111) must be staggered via prefetch_timers immediately
     assert.is_true(vim.tbl_count(state.UI.prefetch_timers) >= 2)
 
-    -- Both top lookahead targets (102 and 103) dispatch via rate governor without artificial prefetch timer delay
+    -- Governor dispatches immediate lookahead targets without artificial prefetch timer delay
     vim.wait(250, function() return #spawned_urls >= 2 end, 10)
-    assert.are.equal(2, #spawned_urls)
+    assert.is_true(#spawned_urls >= 2)
     assert.are.equal("http://example.com/102_s.jpg", spawned_urls[1])
     assert.are.equal("http://example.com/103_s.jpg", spawned_urls[2])
+
+    config.options.prefetch_radius = orig_radius
   end)
 
   it("dispatches top lookahead targets in reverse scroll direction without delay", function()
@@ -948,14 +954,14 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
       return mock_handle
     end
 
-    -- Trigger prefetch at index 5 with direction -1 -> immediate targets are posts 104 (N-1) and 103 (N-2)
-    download.prefetch_around(5, -1)
+    -- Trigger prefetch at index 10 with direction -1 -> immediate targets are posts 109 down to 102 (8 posts)
+    download.prefetch_around(10, -1)
 
     vim.wait(250, function() return #spawned_urls >= 2 end, 10)
-    assert.are.equal(2, #spawned_urls)
-    assert.are.equal("http://example.com/104_s.jpg", spawned_urls[1])
-    assert.are.equal("http://example.com/103_s.jpg", spawned_urls[2])
-    assert.are.equal(2, vim.tbl_count(download.active_prefetch_handles))
+    assert.is_true(#spawned_urls >= 2)
+    assert.are.equal("http://example.com/109_s.jpg", spawned_urls[1])
+    assert.are.equal("http://example.com/108_s.jpg", spawned_urls[2])
+    assert.are.equal(8, vim.tbl_count(download.active_prefetch_handles))
   end)
 
   it("bounds immediate lookahead targets by math.min(radius, constants.PREFETCH_LOOKAHEAD_DEPTH)", function()
@@ -1005,7 +1011,7 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
     assert.are.equal(1, download.last_prefetch_dir)
   end)
 
-  it("cancels and aborts in-flight prefetch downloads when moving in reversed direction", function()
+  it("anti-jitter: does not terminate in-flight prefetch curl transfers via SIGKILL when reversing scroll direction", function()
     local killed = {}
     local mock_handle = {
       kill = function(self, sig)
@@ -1020,15 +1026,82 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
     -- Start prefetch moving forward (dir = 1)
     download.prefetch_around(1, 1)
     assert.are.equal(1, download.last_prefetch_dir)
-    assert.is_true(vim.tbl_count(download.active_prefetch_handles) >= 1)
+    local active_count = vim.tbl_count(download.active_prefetch_handles)
+    assert.is_true(active_count >= 1)
 
     -- Reverse scroll direction to backward (dir = -1)
     download.prefetch_around(2, -1)
 
-    -- Opposite in-flight prefetch handles must have been killed with SIGKILL (9)
-    assert.is_true(#killed >= 1)
-    assert.are.equal(9, killed[1])
+    -- Anti-jitter: in-flight prefetch handles must NOT have been killed with SIGKILL
+    assert.are.equal(0, #killed)
     assert.are.equal(-1, download.last_prefetch_dir)
+    -- In-flight handles remain tracked to complete naturally
+    assert.is_true(vim.tbl_count(download.active_prefetch_handles) >= active_count)
+  end)
+
+  it("anti-jitter: re-orders pending rate governor prefetch queue on direction reversal to prioritize new scroll direction", function()
+    local dispatch_order = {}
+
+    vim.system = function(cmd, opts, on_exit)
+      table.insert(dispatch_order, cmd[#cmd])
+      return { kill = function() end }
+    end
+
+    -- Enqueue forward lookahead tasks at index 5 moving forward (dir = 1)
+    download.prefetch_around(5, 1)
+
+    -- Direction reversal to backward (dir = -1) at index 5
+    download.prefetch_around(5, -1)
+
+    -- Verify the rate governor prefetch queue is re-ordered to favor backward targets first
+    local q = download.governor.queues[constants.PRIORITY_PREFETCH]
+    assert.is_not_nil(q)
+    assert.is_true(#q > 0)
+
+    -- The task at the front of queue 2 must have post_idx < 5 (e.g. 4, 3, 2, 1)
+    local first_task = q[1]
+    assert.is_not_nil(first_task.post_idx)
+    assert.is_true(first_task.post_idx < 5, string.format("Expected post_idx < 5, got %s", tostring(first_task.post_idx)))
+  end)
+
+  it("anti-jitter: resumed downloads and near-complete transfers continue populating disk cache during cursor jitter", function()
+    local exit_cbs = {}
+    local tmp_target = tmp() .. ".jpg"
+    local tmp_part = tmp_target .. ".part"
+
+    -- Create valid mock JPEG in part file
+    local f = io.open(tmp_part, "wb")
+    f:write("\255\216" .. string.rep("x", 2048) .. "\255\217")
+    f:close()
+
+    vim.system = function(cmd, opts, on_exit)
+      table.insert(exit_cbs, on_exit)
+      return { kill = function() end }
+    end
+
+    local completed = false
+    download.download_async("https://example.com/jitter.jpg", tmp_target, function(ok)
+      completed = ok
+    end, { priority = constants.PRIORITY_PREFETCH, post_idx = 3 })
+
+    -- Rapid cursor jitter: reverse direction repeatedly
+    download.prefetch_around(3, -1)
+    download.prefetch_around(3, 1)
+    download.prefetch_around(3, -1)
+
+    -- Active transfer must NOT have been cancelled
+    assert.are.equal(1, #exit_cbs)
+
+    -- Simulate curl completing successfully
+    exit_cbs[1]({ code = 0 })
+    vim.wait(200, function() return completed == true end)
+
+    -- File must have been validated and renamed to target
+    assert.is_true(completed)
+    assert.are.equal(1, vim.fn.filereadable(tmp_target))
+
+    vim.fn.delete(tmp_target)
+    vim.fn.delete(tmp_part)
   end)
 
   it("respects State.torn_down and performs no prefetch actions", function()

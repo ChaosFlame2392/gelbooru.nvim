@@ -14,6 +14,7 @@ local download = require("gelbooru.net.download")
 local indexer = require("gelbooru.local.indexer")
 local config = require("gelbooru.core.config")
 local util = require("gelbooru.core.util")
+local constants = require("gelbooru.core.constants")
 
 describe("Pipeline & Concurrency Stress Testing Suite", function()
   before_each(function()
@@ -572,8 +573,8 @@ describe("Pipeline & Concurrency Stress Testing Suite", function()
       assert.is_not_nil(state.UI.scroll_timer)
 
       -- But lookahead prefetch MUST have been dispatched eagerly without waiting for scroll_timer!
-      -- Both post 2 (N+1) and post 3 (N+2) are tracked in active_prefetch_handles immediately
-      assert.are.equal(2, vim.tbl_count(download_mod.active_prefetch_handles or {}))
+      -- Immediate lookahead targets (up to 8 posts ahead) are tracked in active_prefetch_handles immediately
+      assert.are.equal(constants.PREFETCH_LOOKAHEAD_DEPTH, vim.tbl_count(download_mod.active_prefetch_handles or {}))
 
       -- Wait for rate governor to dispatch top lookahead targets
       vim.wait(250, function() return #spawned_urls >= 2 end, 10)

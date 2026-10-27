@@ -34,9 +34,19 @@ describe("config", function()
       assert.is_true(config.options.prefetch_radius >= 0)
     end)
 
-    it("constants defines PREFETCH_LOOKAHEAD_DEPTH as 2", function()
+    it("constants defines PREFETCH_LOOKAHEAD_DEPTH as 8", function()
       local constants = require("gelbooru.core.constants")
-      assert.are.equal(2, constants.PREFETCH_LOOKAHEAD_DEPTH)
+      assert.are.equal(8, constants.PREFETCH_LOOKAHEAD_DEPTH)
+    end)
+
+    it("constants defines AUTOPAGE_BOUNDARY_THRESHOLD as 15", function()
+      local constants = require("gelbooru.core.constants")
+      assert.are.equal(15, constants.AUTOPAGE_BOUNDARY_THRESHOLD)
+    end)
+
+    it("constants defines DEFAULT_PREFETCH_RADIUS as 8", function()
+      local constants = require("gelbooru.core.constants")
+      assert.are.equal(8, constants.DEFAULT_PREFETCH_RADIUS)
     end)
 
     it("constants defines rate governor limits and priority levels", function()
