@@ -98,6 +98,7 @@ function governor.reset(notify_cancelled)
   end
   governor.timer = nil
   governor.active_sockets = 0
+  governor.active_preview_sockets = 0
   governor.last_dispatch_time = 0
   governor.last_refill_time = 0
   governor.tokens = constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS
@@ -146,8 +147,11 @@ local function _schedule_token_refill(gov)
   gov.schedule_dispatch(wait_ms)
 end
 
-function governor.release_socket()
+function governor.release_socket(priority)
   governor.active_sockets = math.max(0, governor.active_sockets - 1)
+  if priority == constants.PRIORITY_PREVIEW then
+    governor.active_preview_sockets = math.max(0, (governor.active_preview_sockets or 0) - 1)
+  end
   if not governor.is_empty() then
     governor.refill()
     if (governor.tokens or 0) >= 1 - 1e-9 then
@@ -165,19 +169,37 @@ function governor.dispatch()
 
   governor.refill()
 
-  while governor.active_sockets < constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS do
-    if (governor.tokens or 0) < 1 - 1e-9 then
-      break
-    end
-
+  while true do
     local next_task = nil
     for p = 1, 4 do
       local q = governor.queues[p]
       while q and #q > 0 do
-        local candidate = table.remove(q, 1)
-        if not candidate.killed then
-          next_task = candidate
-          break
+        local candidate = q[1]
+        if candidate.killed then
+          table.remove(q, 1)
+        else
+          local can_dispatch = false
+          if p == constants.PRIORITY_PREVIEW then
+            local max_sockets = (governor.active_preview_sockets or 0) == 0
+              and constants.RATE_LIMIT_BURST_SOCKETS
+              or constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS
+            local has_tokens = (governor.tokens or 0) >= 1 - 1e-9
+            local can_burst_token = (governor.active_preview_sockets or 0) == 0
+            if governor.active_sockets < max_sockets and (has_tokens or can_burst_token) then
+              can_dispatch = true
+            end
+          else
+            if governor.active_sockets < constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS and (governor.tokens or 0) >= 1 - 1e-9 then
+              can_dispatch = true
+            end
+          end
+
+          if can_dispatch then
+            next_task = table.remove(q, 1)
+            break
+          else
+            break
+          end
         end
       end
       if next_task then
@@ -192,6 +214,9 @@ function governor.dispatch()
     -- Consume token and socket, then dispatch immediately
     governor.tokens = math.max(0, (governor.tokens or 1) - 1)
     governor.active_sockets = governor.active_sockets + 1
+    if next_task.priority == constants.PRIORITY_PREVIEW then
+      governor.active_preview_sockets = (governor.active_preview_sockets or 0) + 1
+    end
     governor.last_dispatch_time = governor.now_ms()
 
     local ok, err = pcall(next_task.run)
@@ -199,7 +224,7 @@ function governor.dispatch()
       log("ERROR", "GOVERNOR", "Task dispatch execution error: %s", tostring(err))
       if next_task.socket_active then
         next_task.socket_active = false
-        governor.release_socket()
+        governor.release_socket(next_task.priority)
       end
     end
   end
@@ -216,13 +241,32 @@ function governor.enqueue(task)
   local p = task.priority or constants.PRIORITY_METADATA
   p = math.max(1, math.min(4, p))
   task.priority = p
-  table.insert(governor.queues[p], task)
+  if p == constants.PRIORITY_PREVIEW then
+    table.insert(governor.queues[constants.PRIORITY_PREVIEW], 1, task)
+  else
+    table.insert(governor.queues[p], task)
+  end
   governor.dispatch()
 end
 
 function governor.upgrade_priority(dest, new_priority)
   if not dest then return end
   new_priority = math.max(1, math.min(4, new_priority or 1))
+
+  local q_cur = governor.queues[new_priority]
+  if q_cur and new_priority == constants.PRIORITY_PREVIEW then
+    for i, task in ipairs(q_cur) do
+      if task.dest == dest and not task.killed then
+        if i > 1 then
+          table.remove(q_cur, i)
+          table.insert(q_cur, 1, task)
+          governor.dispatch()
+        end
+        return
+      end
+    end
+  end
+
   for p = new_priority + 1, 4 do
     local q = governor.queues[p]
     if q then
@@ -270,12 +314,20 @@ function governor.reorder_prefetch(cur_idx, dir)
   end)
 end
 
+function M.escalate_preview(dest)
+  governor.upgrade_priority(dest, constants.PRIORITY_PREVIEW)
+end
+
+function M.is_downloading(dest)
+  return M.active_downloads[dest] ~= nil
+end
+
 function M.reorder_prefetch_queue(cur_idx, dir)
   governor.reorder_prefetch(cur_idx, dir)
 end
 
 function governor.prune_prefetch(cur_idx, window)
-  window = window or constants.PREWARM_SLIDING_WINDOW or 10
+  window = window or constants.PREWARM_SLIDING_WINDOW
   cur_idx = cur_idx or 1
   local q = governor.queues[constants.PRIORITY_PREFETCH]
   if not q then return end
@@ -540,7 +592,7 @@ function M.curl_async(url, cb, opts)
         done = true
         if task.socket_active then
           task.socket_active = false
-          governor.release_socket()
+          governor.release_socket(task.priority)
         end
         if handle_proxy then
           M.active_handles[handle_proxy] = nil
@@ -567,7 +619,7 @@ function M.curl_async(url, cb, opts)
     if not spawn_ok or not res then
       if task.socket_active then
         task.socket_active = false
-        governor.release_socket()
+        governor.release_socket(task.priority)
       end
       log("ERROR", "CURL", "Failed to spawn curl: %s", tostring(res))
       if cb then
@@ -740,7 +792,7 @@ function M.download_async(url, dest, cb, opts)
       done = true
       if task.socket_active then
         task.socket_active = false
-        governor.release_socket()
+        governor.release_socket(task.priority)
       end
       if handle_proxy then
         M.active_handles[dest] = nil
@@ -825,7 +877,7 @@ function M.download_async(url, dest, cb, opts)
     if not spawn_ok or not res then
       if task.socket_active then
         task.socket_active = false
-        governor.release_socket()
+        governor.release_socket(task.priority)
       end
       log("ERROR", "DOWNLOAD", "Failed to spawn curl: %s", tostring(res))
       local callbacks = M.active_downloads[dest] or {}
@@ -980,7 +1032,7 @@ function M.prefetch_around(idx, scroll_dir)
 
   local UI = state.UI
   local resolver = require("gelbooru.media.resolver")
-  local radius = config.options.prefetch_radius
+  local radius = config.options.prefetch_radius or constants.DEFAULT_PREFETCH_RADIUS
   local dir = scroll_dir or State.scroll_dir or 1
   if dir == 0 then
     dir = 1
@@ -998,7 +1050,9 @@ function M.prefetch_around(idx, scroll_dir)
   M.last_prefetch_dir = dir
 
   -- Prune out-of-radius tasks from rate governor prefetch queue & pending stagger timers
-  M.prune_prefetch_queue(idx, radius or 10)
+  -- Allow hysteresis margin (radius + constants.PREFETCH_JITTER_MARGIN) so 1-2 step cursor jitter does not thrash lookahead queue
+  local prune_window = math.max(radius + constants.PREFETCH_JITTER_MARGIN, constants.PREWARM_SLIDING_WINDOW)
+  M.prune_prefetch_queue(idx, prune_window)
 
   local ahead, behind = {}, {}
   for i = 1, radius do

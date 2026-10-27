@@ -258,7 +258,7 @@ function M.render_preview(force_download)
 
   local _, dest = resolver.get_preview_targets(p)
   local is_saved = resolver.is_in_save_dir(dest)
-  local is_cached = (not force_download or is_saved or p.is_local) and dest and vim.fn.filereadable(dest) == 1 and not download.active_downloads[dest]
+  local is_cached = (not force_download or is_saved or p.is_local) and dest and vim.fn.filereadable(dest) == 1 and not download.is_downloading(dest)
   if not is_cached and not force_download and resolver.is_video_post(p) then
     local thumb_path = resolver.get_video_thumbnail_path(p.file_url, p.id)
     if vim.fn.filereadable(thumb_path) == 1 and (vim.fn.getfsize(thumb_path) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES then
@@ -267,6 +267,26 @@ function M.render_preview(force_download)
   end
 
   if not is_cached then
+    if not p.is_local and dest then
+      if download.is_downloading(dest) then
+        download.escalate_preview(dest)
+      else
+        local urls = resolver.get_preview_targets(p)
+        if urls and urls[1] and vim.fn.filereadable(dest) == 0 then
+          download.download_async(urls[1], dest, function(ok)
+            if ok and not state.State.torn_down and is_same_post(state.State.posts[state.State.cur], p) then
+              -- Early paint! If download finished before 150ms scroll_timer, close timer and render immediately
+              UI.scroll_timer = util.close_timer(UI.scroll_timer)
+              M.load_and_render_image(p, false)
+            end
+          end, {
+            priority = constants.PRIORITY_PREVIEW,
+            post_idx = State.cur,
+          })
+        end
+      end
+    end
+
     if UI.wins.img and vim.api.nvim_win_is_valid(UI.wins.img) and UI.bufs.img and vim.api.nvim_buf_is_valid(UI.bufs.img) then
       pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
       util.set_lines(UI.bufs.img, { "", "  Loading preview…" })
