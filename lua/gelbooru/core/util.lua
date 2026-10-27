@@ -319,4 +319,10 @@ function M.abort_background_tasks()
   end)
 end
 
+function M.directional_rank(idx, cur, dir)
+  local d = (dir or 1) >= 0 and 1 or -1
+  local delta = (idx - cur) * d
+  return (delta >= 0) and delta or (1000 + math.abs(delta))
+end
+
 return M

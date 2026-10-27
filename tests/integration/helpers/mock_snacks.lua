@@ -110,6 +110,9 @@ function M.setup()
   end
 
   local convert_mod = {
+    get_file = function(src)
+      return src and (src .. ".png")
+    end,
     convert = function(opts)
       local conv = setmetatable({
         opts = opts or {},

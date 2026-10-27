@@ -139,6 +139,13 @@ function governor.schedule_dispatch(delay_ms)
   end))
 end
 
+local function _schedule_token_refill(gov)
+  gov = gov or governor
+  local needed = 1 - (gov.tokens or 0)
+  local wait_ms = math.max(1, math.ceil(needed / (constants.RATE_LIMIT_RPS / 1000)))
+  gov.schedule_dispatch(wait_ms)
+end
+
 function governor.release_socket()
   governor.active_sockets = math.max(0, governor.active_sockets - 1)
   if not governor.is_empty() then
@@ -146,9 +153,7 @@ function governor.release_socket()
     if (governor.tokens or 0) >= 1 - 1e-9 then
       governor.dispatch()
     else
-      local needed = 1 - (governor.tokens or 0)
-      local wait_ms = math.max(1, math.ceil(needed / (constants.RATE_LIMIT_RPS / 1000)))
-      governor.schedule_dispatch(wait_ms)
+      _schedule_token_refill(governor)
     end
   end
 end
@@ -202,9 +207,7 @@ function governor.dispatch()
   if not governor.is_empty() and governor.active_sockets < constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS then
     governor.refill()
     if (governor.tokens or 0) < 1 - 1e-9 then
-      local needed = 1 - (governor.tokens or 0)
-      local wait_ms = math.max(1, math.ceil(needed / (constants.RATE_LIMIT_RPS / 1000)))
-      governor.schedule_dispatch(wait_ms)
+      _schedule_token_refill(governor)
     end
   end
 end
@@ -260,11 +263,8 @@ function governor.reorder_prefetch(cur_idx, dir)
       return true
     end
 
-    local delta_a = (idx_a - cur_idx) * dir
-    local delta_b = (idx_b - cur_idx) * dir
-
-    local rank_a = (delta_a > 0) and delta_a or (1000 + math.abs(delta_a))
-    local rank_b = (delta_b > 0) and delta_b or (1000 + math.abs(delta_b))
+    local rank_a = util.directional_rank(idx_a, cur_idx, dir)
+    local rank_b = util.directional_rank(idx_b, cur_idx, dir)
 
     return rank_a < rank_b
   end)
@@ -339,11 +339,14 @@ local function is_in_save_dir(path)
 end
 
 local function is_preview_target(dest, opts)
+  if opts and (opts.is_save or opts.save) then
+    return false
+  end
+  if is_in_save_dir(dest) then
+    return false
+  end
   if opts and opts.is_preview ~= nil then
     return opts.is_preview
-  end
-  if opts and (opts.priority == constants.PRIORITY_PREFETCH or opts.priority == constants.PRIORITY_PREVIEW) then
-    return true
   end
   if type(dest) == "string" and (dest:match("prev_[%w_]+%.") or dest:match("[/\\]prev_") or dest:match("^prev_")) then
     return true
@@ -359,6 +362,15 @@ local function should_prewarm(dest, opts)
     return true
   end
   return is_preview_target(dest, opts)
+end
+
+local function _trigger_prewarm(dest, opts)
+  if should_prewarm(dest, opts) then
+    pcall(function()
+      local prewarmer = require("gelbooru.media.prewarmer")
+      prewarmer.prewarm_file(dest, nil, opts)
+    end)
+  end
 end
 
 function M.is_valid_media(file_path, ref_path)
@@ -535,6 +547,7 @@ function M.curl_async(url, cb, opts)
           M.interrupted_dests[handle_proxy] = nil
         end
         vim.schedule(function()
+          if state.State.torn_down then return end
           if handle_proxy then
             M.active_handles[handle_proxy] = nil
             M.interrupted_dests[handle_proxy] = nil
@@ -590,12 +603,7 @@ function M.download_async(url, dest, cb, opts)
   if vim.fn.filereadable(dest) == 1 and not M.active_downloads[dest] then
     if M.is_valid_media(dest) then
       log("DEBUG", "DOWNLOAD", "File already cached on disk: %s", dest)
-      if should_prewarm(dest, opts) then
-        pcall(function()
-          local prewarmer = require("gelbooru.media.prewarmer")
-          prewarmer.prewarm_file(dest, nil, opts)
-        end)
-      end
+      _trigger_prewarm(dest, opts)
       if cb then
         pcall(cb, true)
       end
@@ -805,12 +813,7 @@ function M.download_async(url, dest, cb, opts)
 
           -- Pipelined online preview prewarming:
           -- Forward completed preview image immediately into disk-to-disk graphics prewarmer
-          if should_prewarm(dest, opts) then
-            pcall(function()
-              local prewarmer = require("gelbooru.media.prewarmer")
-              prewarmer.prewarm_file(dest, nil, opts)
-            end)
-          end
+          _trigger_prewarm(dest, opts)
         end
 
         for _, fn in ipairs(callbacks) do

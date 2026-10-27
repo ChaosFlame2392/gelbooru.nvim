@@ -642,6 +642,29 @@ describe("download: curl_async execution & response handling", function()
     assert.is_true(called)
     assert.is_nil(res_body)
   end)
+
+  it("immediately returns without invoking cb or altering state if state.State.torn_down is true", function()
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      return { kill = function() end }
+    end
+
+    local called = false
+    download.curl_async("https://gelbooru.com/api/test", function(body)
+      called = true
+    end)
+
+    assert.is_not_nil(exit_fn)
+    state.State.torn_down = true
+
+    exit_fn({ code = 0, stdout = "response" })
+    vim.wait(100, function() return false end, 10)
+
+    assert.is_false(called)
+    state.State.torn_down = false
+  end)
 end)
 
 describe("download: interrupted teardown guard & abort_all", function()
@@ -1801,6 +1824,36 @@ describe("download: pipelined online preview prewarming", function()
     -- Prewarming should be skipped because prewarm = false
     assert.are.equal(0, #mock_snacks.conversions_run)
     assert.are.equal(0, #mock_snacks.conversions_created)
+  end)
+
+  it("never prewarms full-resolution saved files when opts.is_save == true or destination is in save_dir", function()
+    config.options.save_dir = tmp_dir .. "/saved"
+    vim.fn.mkdir(config.options.save_dir, "p")
+
+    local saved_dest = config.options.save_dir .. "/12345.jpg"
+    local part = saved_dest .. ".part"
+    local exit_fn = nil
+
+    vim.system = function(cmd, opts, on_exit)
+      exit_fn = on_exit
+      write_valid_jpeg(part, 4096)
+      return { kill = function() end }
+    end
+
+    local download_done = false
+    download.download_async("https://example.com/full_res.jpg", saved_dest, function(ok)
+      download_done = ok
+    end, { priority = constants.PRIORITY_PREVIEW, is_save = true, prewarm = false })
+
+    assert.is_not_nil(exit_fn)
+    exit_fn({ code = 0 })
+    vim.wait(300, function() return download_done end, 10)
+    assert.is_true(download_done)
+
+    -- Full-resolution saved file MUST NOT be enqueued or converted in prewarmer
+    assert.are.equal(0, #mock_snacks.conversions_run)
+    assert.are.equal(0, #mock_snacks.conversions_created)
+    assert.are.equal(0, #prewarmer.queue)
   end)
 
   it("queues multiple pipelined preview downloads without exceeding prewarmer concurrency", function()

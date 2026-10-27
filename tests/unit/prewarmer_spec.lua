@@ -292,6 +292,74 @@ describe("gelbooru.media.prewarmer", function()
       resolver.extract_video_thumbnail = orig_extract
     end)
 
+    it("marks both thumbnail path and post.file_url in prewarmed_cache on video thumbnail success", function()
+      local vid_path = make_dummy_file("video_cached_203.mp4", 5000)
+      local thumb_path = config.options.cache_dir .. "/vthumb_203.jpg"
+      make_dummy_file("cache/vthumb_203.jpg", 1024)
+
+      local post = {
+        id = 203,
+        is_local = true,
+        file_url = vid_path,
+        is_video = true,
+      }
+
+      local orig_extract = resolver.extract_video_thumbnail
+      resolver.extract_video_thumbnail = function(path, p, cb)
+        cb(thumb_path)
+      end
+
+      local done = false
+      prewarmer.prewarm_post(post, function(ok)
+        done = true
+      end)
+
+      vim.wait(500, function() return done end, 10)
+      assert.is_true(done)
+
+      assert.is_true(prewarmer.prewarmed_cache[thumb_path] == true)
+      assert.is_true(prewarmer.prewarmed_cache[vid_path] == true)
+
+      -- Verify that subsequent prewarm_posts does not re-enqueue this video post
+      local posts = { post }
+      prewarmer.prewarm_posts(posts, 1, { include_cur = true })
+      assert.are.equal(0, #prewarmer.queue)
+
+      resolver.extract_video_thumbnail = orig_extract
+    end)
+
+    it("immediately returns from extract_video_thumbnail callback if state.State.torn_down is true", function()
+      local vid_path = make_dummy_file("video_teardown_204.mp4", 5000)
+      local post = {
+        id = 204,
+        is_local = true,
+        file_url = vid_path,
+        is_video = true,
+      }
+
+      local stored_cb
+      local orig_extract = resolver.extract_video_thumbnail
+      resolver.extract_video_thumbnail = function(path, p, cb)
+        stored_cb = cb
+      end
+
+      prewarmer.prewarm_post(post)
+      assert.is_truthy(prewarmer.active_jobs[vid_path])
+
+      -- Simulate teardown before async thumbnail finishes
+      state.State.torn_down = true
+
+      -- Trigger thumbnail completion callback
+      stored_cb(config.options.cache_dir .. "/vthumb_204.jpg")
+
+      -- active_jobs should remain untouched (not cleared by callback), queue not drained
+      assert.is_truthy(prewarmer.active_jobs[vid_path])
+
+      -- Cleanup
+      state.State.torn_down = false
+      resolver.extract_video_thumbnail = orig_extract
+    end)
+
     it("ignores post with _pending_delete safely", function()
       local img_path = make_dummy_file("del.jpg", 2048)
       local post = {
@@ -579,6 +647,63 @@ describe("gelbooru.media.prewarmer", function()
         elseif idx < 5 then
           assert.is_false(seen_forward, "Expected backward target " .. idx .. " before forward targets")
         end
+      end
+    end)
+  end)
+
+  describe("is_prewarmed and has_converted_artifact", function()
+    it("returns true if path is already present in in-memory prewarmed_cache", function()
+      prewarmer.prewarmed_cache["/fake/path.jpg"] = true
+      assert.is_true(prewarmer.is_prewarmed("/fake/path.jpg"))
+    end)
+
+    it("returns true if converted artifact file exists on disk via mock_snacks.get_file", function()
+      local src = make_dummy_file("artifact_test.png", 2048)
+      -- mock_snacks get_file returns src .. ".png"
+      local artifact = src .. ".png"
+
+      assert.is_false(prewarmer.has_converted_artifact(src))
+      assert.is_false(prewarmer.is_prewarmed(src))
+
+      -- Create artifact on disk
+      local f = io.open(artifact, "wb")
+      f:write(string.rep("C", 1024))
+      f:close()
+
+      assert.is_true(prewarmer.has_converted_artifact(src))
+      assert.is_true(prewarmer.is_prewarmed(src))
+      -- Check that in-memory cache was also populated
+      assert.is_true(prewarmer.prewarmed_cache[src] == true)
+    end)
+
+    it("prewarm_posts skips enqueuing posts whose converted artifacts exist on disk", function()
+      local posts = {}
+      for i = 1, 3 do
+        local p = make_dummy_file(string.format("cached_art_%d.jpg", i), 2048)
+        table.insert(posts, { id = i, is_local = true, file_url = p })
+      end
+
+      -- Pre-create artifact for post 2
+      local art2 = posts[2].file_url .. ".png"
+      local f = io.open(art2, "wb")
+      f:write(string.rep("C", 1024))
+      f:close()
+
+      -- Squelch convert.run so we can inspect queue
+      local orig_run = package.loaded["snacks.image.convert"].convert
+      package.loaded["snacks.image.convert"].convert = function(opts)
+        local conv = orig_run(opts)
+        conv.run = function(self)
+          self.running = true
+        end
+        return conv
+      end
+
+      prewarmer.prewarm_posts(posts, 1, { include_cur = true, radius = 2 })
+
+      -- Post 2 should be recognized as prewarmed from disk and not enqueued
+      for _, item in ipairs(prewarmer.queue) do
+        assert.are_not.equal(posts[2].file_url, item.path)
       end
     end)
   end)

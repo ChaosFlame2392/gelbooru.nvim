@@ -958,7 +958,7 @@ function M.save_current(cb)
         ui.render_list()
       end
       if cb then cb(saved, dest) end
-    end, { resume = true, priority = constants.PRIORITY_PREVIEW })
+    end, { resume = true, priority = constants.PRIORITY_PREVIEW, is_save = true, prewarm = false })
     return
   end
   util.ensure(config.options.save_dir)
@@ -1003,7 +1003,7 @@ function M.save_current(cb)
     if cb then
       cb(saved, dest)
     end
-  end, { resume = true, priority = constants.PRIORITY_PREVIEW })
+  end, { resume = true, priority = constants.PRIORITY_PREVIEW, is_save = true, prewarm = false })
 end
 
 function M.fetch_post_by_id(id, cb)

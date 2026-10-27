@@ -6,6 +6,7 @@
 local constants = require("gelbooru.core.constants")
 local state = require("gelbooru.core.state")
 local resolver = require("gelbooru.media.resolver")
+local util = require("gelbooru.core.util")
 local log = require("gelbooru.core.log")
 
 local M = {}
@@ -28,6 +29,37 @@ local function get_convert_module()
   return nil
 end
 
+function M.has_converted_artifact(path)
+  if not path or type(path) ~= "string" or path == "" then
+    return false
+  end
+  local convert_mod = get_convert_module()
+  if convert_mod and type(convert_mod.get_file) == "function" then
+    local ok, file = pcall(convert_mod.get_file, path)
+    if ok and file and type(file) == "string" and vim.fn.filereadable(file) == 1 then
+      local sz = vim.fn.getfsize(file) or 0
+      if sz > 0 then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+function M.is_prewarmed(path)
+  if not path or type(path) ~= "string" or path == "" then
+    return false
+  end
+  if M.prewarmed_cache[path] == true then
+    return true
+  end
+  if M.has_converted_artifact(path) then
+    M.prewarmed_cache[path] = true
+    return true
+  end
+  return false
+end
+
 local function count_active_jobs()
   local count = 0
   for _ in pairs(M.active_jobs) do
@@ -48,15 +80,23 @@ function M.drain_queue()
     if item then
       if item.post and not item.post._pending_delete then
         local path = item.post.file_url
-        if not M.active_jobs[path] and not M.prewarmed_cache[path] then
-          active = active + 1
-          M.prewarm_post(item.post, item.cb)
+        if not M.active_jobs[path] then
+          if M.is_prewarmed(path) then
+            if item.cb then pcall(item.cb, true) end
+          else
+            active = active + 1
+            M.prewarm_post(item.post, item.cb)
+          end
         end
       elseif item.path and not (item.post and item.post._pending_delete) then
         local path = item.path
-        if not M.active_jobs[path] and not M.prewarmed_cache[path] then
-          active = active + 1
-          M._do_prewarm_file(path, item.cb)
+        if not M.active_jobs[path] then
+          if M.is_prewarmed(path) then
+            if item.cb then pcall(item.cb, true) end
+          else
+            active = active + 1
+            M._do_prewarm_file(path, item.cb)
+          end
         end
       end
     end
@@ -137,7 +177,7 @@ function M.prewarm_file(file_path, cb, opts)
     return nil
   end
 
-  if M.prewarmed_cache[file_path] then
+  if M.is_prewarmed(file_path) then
     if cb then cb(true) end
     return nil
   end
@@ -192,6 +232,11 @@ function M.prewarm_post(post, cb)
     return nil
   end
 
+  if post.file_url and M.is_prewarmed(post.file_url) then
+    if cb then cb(true) end
+    return nil
+  end
+
   local is_vid = resolver.is_video_post(post)
   if is_vid then
     local vpath = post.file_url
@@ -204,14 +249,33 @@ function M.prewarm_post(post, cb)
     if vim.fn.filereadable(thumb_dest) == 1
       and (vim.fn.getfsize(thumb_dest) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES
       and resolver.is_image_complete(thumb_dest) then
-      return M.prewarm_file(thumb_dest, cb)
+      if M.is_prewarmed(thumb_dest) then
+        M.prewarmed_cache[thumb_dest] = true
+        if post.file_url then
+          M.prewarmed_cache[post.file_url] = true
+        end
+        if cb then cb(true) end
+        return nil
+      end
+      return M.prewarm_file(thumb_dest, function(ok, err)
+        if ok then
+          M.prewarmed_cache[thumb_dest] = true
+          if post.file_url then
+            M.prewarmed_cache[post.file_url] = true
+          end
+        end
+        if cb then cb(ok, err) end
+      end)
     end
 
     local job = { post = post, is_video = true, cb = cb }
     M.active_jobs[vpath] = job
 
     resolver.extract_video_thumbnail(vpath, post, function(tpath)
-      if state.State.torn_down or post._pending_delete then
+      if state.State.torn_down then
+        return
+      end
+      if post._pending_delete then
         M.active_jobs[vpath] = nil
         if cb then cb(false, "Cancelled") end
         M.drain_queue()
@@ -220,7 +284,16 @@ function M.prewarm_post(post, cb)
 
       if tpath and vim.fn.filereadable(tpath) == 1 then
         local conv = M.prewarm_file(tpath, function(ok, err)
+          if state.State.torn_down then
+            return
+          end
           M.active_jobs[vpath] = nil
+          if ok then
+            M.prewarmed_cache[tpath] = true
+            if post.file_url then
+              M.prewarmed_cache[post.file_url] = true
+            end
+          end
           if cb then cb(ok, err) end
           M.drain_queue()
         end)
@@ -317,7 +390,16 @@ function M.prewarm_posts(posts, cur_idx, dir_or_opts)
         end
       end
 
-      if not already_queued and not M.active_jobs[path] and not M.prewarmed_cache[path] then
+      local is_cached = (path and M.is_prewarmed(path))
+      if not is_cached and resolver.is_video_post(p) then
+        local vthumb = resolver.get_video_thumbnail_path(path, p.id)
+        if vthumb and M.is_prewarmed(vthumb) then
+          M.prewarmed_cache[path] = true
+          is_cached = true
+        end
+      end
+
+      if not already_queued and not M.active_jobs[path] and not is_cached then
         table.insert(M.queue, {
           post = p,
           post_idx = idx,
@@ -355,11 +437,8 @@ function M.reorder_queue(cur_idx, dir)
       return true
     end
 
-    local delta_a = (idx_a - cur_idx) * dir
-    local delta_b = (idx_b - cur_idx) * dir
-
-    local rank_a = (delta_a >= 0) and delta_a or (1000 + math.abs(delta_a))
-    local rank_b = (delta_b >= 0) and delta_b or (1000 + math.abs(delta_b))
+    local rank_a = util.directional_rank(idx_a, cur_idx, dir)
+    local rank_b = util.directional_rank(idx_b, cur_idx, dir)
 
     return rank_a < rank_b
   end)
