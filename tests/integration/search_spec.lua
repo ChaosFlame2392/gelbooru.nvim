@@ -728,6 +728,46 @@ describe("Integration: Search & List flow", function()
       download.curl_async = orig_curl_async
     end)
 
+    it("autopage boundary advance: triggers background fetch when cursor reaches 15 posts before list end", function()
+      ui.open()
+      local keymaps = require("gelbooru.ui.keymaps")
+      local constants = require("gelbooru.core.constants")
+      local fetch_calls = {}
+      local orig_fetch = api.fetch
+      api.fetch = function(dir, auto)
+        table.insert(fetch_calls, { dir = dir, auto = auto })
+      end
+
+      -- Populate 42 posts
+      local posts = {}
+      for i = 1, 42 do
+        table.insert(posts, {
+          id = tostring(i),
+          score = i,
+          width = 800,
+          height = 600,
+          file_url = string.format("https://example.com/%d.jpg", i),
+          preview_url = string.format("https://example.com/prev_%d.jpg", i),
+        })
+      end
+      state.State.posts = posts
+      state.State.cur = 1
+      ui.render_list()
+
+      -- AUTOPAGE_BOUNDARY_THRESHOLD is 15: 42 - 15 = 27.
+      -- Moving to index 26 should NOT trigger autopage
+      keymaps.on_cursor_change(26)
+      assert.are.equal(0, #fetch_calls)
+
+      -- Moving to index 27 (27 >= 42 - 15) MUST trigger autopage (dir = 1, auto = false)
+      keymaps.on_cursor_change(27)
+      assert.are.equal(1, #fetch_calls)
+      assert.are.equal(1, fetch_calls[1].dir)
+      assert.are.equal(false, fetch_calls[1].auto)
+
+      api.fetch = orig_fetch
+    end)
+
     it("processes partial candidate pool into top scores on mid-stream network failure without hanging", function()
       ui.open()
       local download = require("gelbooru.net.download")
