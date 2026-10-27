@@ -302,4 +302,21 @@ function M.shuffle(list)
   return list
 end
 
+function M.abort_background_tasks()
+  pcall(function()
+    local download = require("gelbooru.net.download")
+    download.cancel_prefetch_timers(true)
+    download.abort_all()
+  end)
+  pcall(function()
+    require("gelbooru.local.indexer").stop()
+  end)
+  pcall(function()
+    require("gelbooru.media.prewarmer").stop()
+  end)
+  pcall(function()
+    require("gelbooru.media.resolver").abort_active()
+  end)
+end
+
 return M

@@ -777,14 +777,12 @@ describe("tags.catalog", function()
         for i = 1, 500 do
           catalog.add_tag({ n = "test_tag_" .. i, c = i * 10, t = 0 })
         end
-        -- Warmup JIT trace to avoid cold compilation jitter
-        catalog.search("test_tag_1")
         local t0 = vim.loop.hrtime()
         local results = catalog.search("test_tag_1")
         local t1 = vim.loop.hrtime()
         local elapsed_ms = (t1 - t0) / 1e6
         assert.is_true(#results > 0)
-        assert.is_true(elapsed_ms < 3.0, string.format("Expected elapsed_ms < 3.0, got %.2fms", elapsed_ms))
+        assert.is_true(elapsed_ms < 3.0)
       end)
     end)
 

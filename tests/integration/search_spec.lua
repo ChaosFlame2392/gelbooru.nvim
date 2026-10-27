@@ -521,6 +521,51 @@ describe("Integration: Search & List flow", function()
       assert.are.not_equal("should_be_ignored", state.State.query)
       assert.are.equal(prev_epoch, state.State.search_epoch)
     end)
+
+    it("dispatches initial search query as PRIORITY_PREVIEW and autopage fetches as PRIORITY_AUTOPAGE", function()
+      ui.open()
+      local download = require("gelbooru.net.download")
+      local constants = require("gelbooru.core.constants")
+      local curl_calls = {}
+
+      local orig_curl_async = download.curl_async
+      download.curl_async = function(url, cb, opts)
+        if url:find("s=post") then
+          table.insert(curl_calls, { url = url, opts = opts })
+          vim.schedule(function()
+            cb(vim.fn.json_encode({ post = { { id = 1, file_url = "https://example.com/1.jpg" } } }))
+          end)
+        else
+          orig_curl_async(url, cb, opts)
+        end
+      end
+
+      -- 1. Initial search query must get Priority 1 (PRIORITY_PREVIEW)
+      api.execute_search("hatsune_miku")
+      vim.wait(300, function() return #curl_calls >= 1 and not state.State.loading end, 10)
+
+      assert.are.equal(1, #curl_calls)
+      assert.is_not_nil(curl_calls[1].opts)
+      assert.are.equal(constants.PRIORITY_PREVIEW, curl_calls[1].opts.priority)
+
+      -- 2. Autopage fetch (is_explicit = false) must get Priority 3 (PRIORITY_AUTOPAGE)
+      api.fetch(1, false)
+      vim.wait(300, function() return #curl_calls >= 2 and not state.State.loading end, 10)
+
+      assert.are.equal(2, #curl_calls)
+      assert.is_not_nil(curl_calls[2].opts)
+      assert.are.equal(constants.PRIORITY_AUTOPAGE, curl_calls[2].opts.priority)
+
+      -- 3. Multi-Stage piped search must get Priority 1 (PRIORITY_PREVIEW)
+      api.execute_search("hatsune_miku | sort:id:1")
+      vim.wait(300, function() return #curl_calls >= 3 and not state.State.loading end, 10)
+
+      assert.are.equal(3, #curl_calls)
+      assert.is_not_nil(curl_calls[3].opts)
+      assert.are.equal(constants.PRIORITY_PREVIEW, curl_calls[3].opts.priority)
+
+      download.curl_async = orig_curl_async
+    end)
   end)
 
   describe("Multi-Stage Piped Online Search (| sort:<key>[:<limit>])", function()

@@ -511,5 +511,75 @@ describe("gelbooru.media.prewarmer", function()
       assert.are.equal(50, cancelled[2].idx)
       assert.is_false(cancelled[2].ok)
     end)
+
+    it("reorders queue on direction reversal to prioritize active scroll direction", function()
+      -- Seed queue with items from forward scrolling (e.g. cur_idx = 5, items 7, 8, 4, 3)
+      prewarmer.queue = {
+        { post_idx = 7, path = "/tmp/7.jpg" },
+        { post_idx = 8, path = "/tmp/8.jpg" },
+        { post_idx = 4, path = "/tmp/4.jpg" },
+        { post_idx = 3, path = "/tmp/3.jpg" },
+      }
+
+      -- Reversing direction to backward (dir = -1) at cursor 5:
+      -- Backward items (4, 3) must come before forward items (7, 8), closest first (4 then 3, then 7 then 8)
+      prewarmer.reorder_queue(5, -1)
+
+      assert.are.equal(4, #prewarmer.queue)
+      assert.are.equal(4, prewarmer.queue[1].post_idx)
+      assert.are.equal(3, prewarmer.queue[2].post_idx)
+      assert.are.equal(7, prewarmer.queue[3].post_idx)
+      assert.are.equal(8, prewarmer.queue[4].post_idx)
+
+      -- Change direction to forward (dir = 1) at cursor 5:
+      -- Forward items (7, 8) must come before backward items (4, 3), closest first (7 then 8, then 4 then 3)
+      prewarmer.reorder_queue(5, 1)
+
+      assert.are.equal(7, prewarmer.queue[1].post_idx)
+      assert.are.equal(8, prewarmer.queue[2].post_idx)
+      assert.are.equal(4, prewarmer.queue[3].post_idx)
+      assert.are.equal(3, prewarmer.queue[4].post_idx)
+    end)
+
+    it("prewarm_posts automatically reorders pending queue items on direction reversal", function()
+      local posts = {}
+      for i = 1, 20 do
+        table.insert(posts, { id = i, is_local = true, file_url = make_dummy_file("p_" .. i .. ".jpg", 2048) })
+      end
+
+      -- Squelch convert.run so items remain queued in prewarmer.queue
+      local orig_run = package.loaded["snacks.image.convert"].convert
+      package.loaded["snacks.image.convert"].convert = function(opts)
+        local conv = orig_run(opts)
+        conv.run = function(self)
+          self.running = true
+          table.insert(mock_snacks.conversions_run, self)
+        end
+        return conv
+      end
+
+      -- Prewarm moving forward at 5 (fills 3 active slots, queues remainder)
+      prewarmer.prewarm_posts(posts, 5, 1)
+      assert.are.equal(1, prewarmer.last_dir)
+
+      -- Reverse direction to backward (-1) at cursor 5
+      prewarmer.prewarm_posts(posts, 5, -1)
+      assert.are.equal(-1, prewarmer.last_dir)
+
+      -- The pending queue items should have backward targets at the front
+      local queued_indices = {}
+      for _, item in ipairs(prewarmer.queue) do
+        table.insert(queued_indices, item.post_idx)
+      end
+      -- Backward indices (< 5) should appear before forward indices (> 5)
+      local seen_forward = false
+      for _, idx in ipairs(queued_indices) do
+        if idx > 5 then
+          seen_forward = true
+        elseif idx < 5 then
+          assert.is_false(seen_forward, "Expected backward target " .. idx .. " before forward targets")
+        end
+      end
+    end)
   end)
 end)

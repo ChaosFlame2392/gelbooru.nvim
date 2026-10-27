@@ -83,18 +83,7 @@ function M.restore_history(idx)
     return
   end
   M.save_current_history()
-  local download = require("gelbooru.net.download")
-  download.cancel_prefetch_timers(true)
-  pcall(download.abort_all)
-  pcall(function()
-    require("gelbooru.local.indexer").stop()
-  end)
-  pcall(function()
-    require("gelbooru.media.prewarmer").stop()
-  end)
-  pcall(function()
-    require("gelbooru.media.resolver").abort_active()
-  end)
+  util.abort_background_tasks()
   State.search_epoch = (State.search_epoch or 0) + 1
   State.loading = false
   pcall(function()

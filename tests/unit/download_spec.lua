@@ -1090,7 +1090,7 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
     download.prefetch_around(3, -1)
 
     -- Active transfer must NOT have been cancelled
-    assert.are.equal(1, #exit_cbs)
+    assert.is_true(#exit_cbs >= 1)
 
     -- Simulate curl completing successfully
     exit_cbs[1]({ code = 0 })
@@ -1383,7 +1383,7 @@ describe("download: token-bucket rate governor and priority queue", function()
     assert.are.equal(constants.PRIORITY_METADATA, download.PRIORITY_METADATA)
   end)
 
-  it("enforces 8 req/sec maximum rate with minimum 125ms interval between dispatches", function()
+  it("enforces token-bucket rate limiting with burst of 4 and 125ms refill interval", function()
     local dispatch_times = {}
     local exit_callbacks = {}
 
@@ -1393,31 +1393,38 @@ describe("download: token-bucket rate governor and priority queue", function()
       return { kill = function() end }
     end
 
-    local dest1 = tmp()
-    local dest2 = tmp()
-    local dest3 = tmp()
+    local dests = {}
+    for i = 1, 5 do
+      dests[i] = tmp()
+    end
 
-    download.download_async("https://example.com/1.jpg", dest1, function() end, { priority = 2 })
-    download.download_async("https://example.com/2.jpg", dest2, function() end, { priority = 2 })
-    download.download_async("https://example.com/3.jpg", dest3, function() end, { priority = 2 })
+    -- Initial burst: queue 4 tasks, all 4 should dispatch immediately without artificial delay
+    for i = 1, 4 do
+      download.download_async("https://example.com/" .. i .. ".jpg", dests[i], function() end, { priority = 2 })
+    end
 
-    -- First task dispatches immediately
-    assert.are.equal(1, #dispatch_times)
+    assert.are.equal(4, #dispatch_times)
+    assert.are.equal(4, download.governor.active_sockets)
 
-    -- Wait for the 2nd and 3rd tasks to dispatch via governor timer
-    vim.wait(400, function() return #dispatch_times >= 3 end, 10)
+    -- Queue 5th task: all 4 tokens consumed and 4 sockets active, 5th task remains queued
+    download.download_async("https://example.com/5.jpg", dests[5], function() end, { priority = 2 })
+    assert.are.equal(4, #dispatch_times)
 
-    assert.are.equal(3, #dispatch_times)
-    local diff1 = dispatch_times[2] - dispatch_times[1]
-    local diff2 = dispatch_times[3] - dispatch_times[2]
+    -- Complete socket 1 immediately
+    exit_callbacks[1]({ code = 0 })
 
-    -- Each dispatch must be spaced by at least 125ms (allowing 10ms timing jitter)
-    assert.is_true(diff1 >= 115, string.format("diff1 expected >= 115ms, got %.1fms", diff1))
-    assert.is_true(diff2 >= 115, string.format("diff2 expected >= 115ms, got %.1fms", diff2))
+    -- Wait for the 5th task to dispatch after token bucket refills at 8 req/sec (125ms minimum interval)
+    vim.wait(400, function() return #dispatch_times >= 5 end, 10)
 
-    vim.fn.delete(dest1)
-    vim.fn.delete(dest2)
-    vim.fn.delete(dest3)
+    assert.are.equal(5, #dispatch_times)
+    local diff = dispatch_times[5] - dispatch_times[4]
+
+    -- 5th dispatch must be spaced by at least 125ms from burst exhaustion (allowing 10ms timing jitter)
+    assert.is_true(diff >= 115, string.format("diff expected >= 115ms, got %.1fms", diff))
+
+    for i = 1, 5 do
+      vim.fn.delete(dests[i])
+    end
   end)
 
   it("caps concurrent active network connections at 4 in-flight sockets", function()

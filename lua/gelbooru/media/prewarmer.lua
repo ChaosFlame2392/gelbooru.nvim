@@ -17,6 +17,7 @@ M.queue = {}
 M.max_concurrent = constants.PREWARM_MAX_CONCURRENT or 3
 M.radius = constants.PREWARM_LOCAL_RADIUS or 5
 M.sliding_window = constants.PREWARM_SLIDING_WINDOW or 10
+M.last_dir = nil
 
 local function get_convert_module()
   pcall(require, "snacks")
@@ -81,6 +82,7 @@ function M._do_prewarm_file(file_path, cb, convert_mod)
     return convert_mod.convert({
       src = file_path,
       on_done = function(c)
+        if state.State.torn_down then return end
         M.active_conversions[c] = nil
         M.active_jobs[file_path] = nil
         local err = c:error()
@@ -255,6 +257,9 @@ function M.prewarm_posts(posts, cur_idx, dir_or_opts)
     include_cur = dir_or_opts.include_cur or false
   end
 
+  local direction_reversed = (M.last_dir ~= nil and M.last_dir ~= dir)
+  M.last_dir = dir
+
   local target_indices = {}
   local seen_indices = {}
 
@@ -322,7 +327,42 @@ function M.prewarm_posts(posts, cur_idx, dir_or_opts)
     end
   end
 
+  -- Reorder pending queue items so tasks in the active direction (closest to cur_idx first)
+  -- are processed ahead of tasks from the old direction
+  if direction_reversed or dir_or_opts ~= nil then
+    M.reorder_queue(cur_idx, dir)
+  end
+
   M.drain_queue()
+end
+
+function M.reorder_queue(cur_idx, dir)
+  if not M.queue or #M.queue <= 1 then
+    return
+  end
+  cur_idx = cur_idx or (state.State and state.State.cur) or 1
+  dir = dir or 1
+
+  table.sort(M.queue, function(a, b)
+    local idx_a = a.post_idx
+    local idx_b = b.post_idx
+
+    if not idx_a and not idx_b then
+      return false
+    elseif not idx_a then
+      return false
+    elseif not idx_b then
+      return true
+    end
+
+    local delta_a = (idx_a - cur_idx) * dir
+    local delta_b = (idx_b - cur_idx) * dir
+
+    local rank_a = (delta_a >= 0) and delta_a or (1000 + math.abs(delta_a))
+    local rank_b = (delta_b >= 0) and delta_b or (1000 + math.abs(delta_b))
+
+    return rank_a < rank_b
+  end)
 end
 
 function M.prune_queue(cur_idx, window)
@@ -342,6 +382,7 @@ function M.prune_queue(cur_idx, window)
 end
 
 function M.stop()
+  M.last_dir = nil
   for _, item in ipairs(M.queue) do
     if item and item.cb then
       pcall(item.cb, false, "Cancelled")
@@ -371,6 +412,7 @@ end
 function M.reset()
   M.stop()
   M.prewarmed_cache = {}
+  M.last_dir = nil
 end
 
 function M.invalidate(file_path_or_id)

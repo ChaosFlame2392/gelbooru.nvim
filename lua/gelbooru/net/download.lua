@@ -32,6 +32,8 @@ M._prefetch_timer_meta = {}
 local governor = {
   active_sockets = 0,
   last_dispatch_time = 0,
+  last_refill_time = 0,
+  tokens = constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS,
   timer = nil,
   queues = {
     [1] = {},
@@ -44,6 +46,21 @@ M.governor = governor
 
 function governor.now_ms()
   return (vim.uv or vim.loop).hrtime() / 1e6
+end
+
+function governor.refill()
+  local now = governor.now_ms()
+  if governor.last_refill_time == 0 or governor.last_dispatch_time == 0 then
+    governor.tokens = constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS
+    governor.last_refill_time = now
+    return
+  end
+  local elapsed = now - governor.last_refill_time
+  if elapsed > 0 then
+    local added = elapsed * (constants.RATE_LIMIT_RPS / 1000)
+    governor.tokens = math.min(constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS, (governor.tokens or 0) + added)
+    governor.last_refill_time = now
+  end
 end
 
 function governor.queue_count()
@@ -82,6 +99,8 @@ function governor.reset(notify_cancelled)
   governor.timer = nil
   governor.active_sockets = 0
   governor.last_dispatch_time = 0
+  governor.last_refill_time = 0
+  governor.tokens = constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS
 
   if notify_cancelled then
     for p = 1, 4 do
@@ -123,13 +142,12 @@ end
 function governor.release_socket()
   governor.active_sockets = math.max(0, governor.active_sockets - 1)
   if not governor.is_empty() then
-    local now = governor.now_ms()
-    local elapsed = now - governor.last_dispatch_time
-    local min_interval = constants.RATE_LIMIT_MIN_INTERVAL_MS
-    if elapsed >= min_interval or governor.last_dispatch_time == 0 then
+    governor.refill()
+    if (governor.tokens or 0) >= 1 - 1e-9 then
       governor.dispatch()
     else
-      local wait_ms = math.max(1, math.ceil(min_interval - elapsed))
+      local needed = 1 - (governor.tokens or 0)
+      local wait_ms = math.max(1, math.ceil(needed / (constants.RATE_LIMIT_RPS / 1000)))
       governor.schedule_dispatch(wait_ms)
     end
   end
@@ -140,7 +158,13 @@ function governor.dispatch()
     return
   end
 
+  governor.refill()
+
   while governor.active_sockets < constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS do
+    if (governor.tokens or 0) < 1 - 1e-9 then
+      break
+    end
+
     local next_task = nil
     for p = 1, 4 do
       local q = governor.queues[p]
@@ -160,21 +184,10 @@ function governor.dispatch()
       break
     end
 
-    local now = governor.now_ms()
-    local elapsed = now - governor.last_dispatch_time
-    local min_interval = constants.RATE_LIMIT_MIN_INTERVAL_MS
-
-    if elapsed < min_interval and governor.last_dispatch_time > 0 then
-      -- Rate limit hit: put back at front of queue and schedule
-      table.insert(governor.queues[next_task.priority], 1, next_task)
-      local wait_ms = math.max(1, math.ceil(min_interval - elapsed))
-      governor.schedule_dispatch(wait_ms)
-      return
-    end
-
-    -- Eligible: dispatch!
+    -- Consume token and socket, then dispatch immediately
+    governor.tokens = math.max(0, (governor.tokens or 1) - 1)
     governor.active_sockets = governor.active_sockets + 1
-    governor.last_dispatch_time = now
+    governor.last_dispatch_time = governor.now_ms()
 
     local ok, err = pcall(next_task.run)
     if not ok then
@@ -187,11 +200,10 @@ function governor.dispatch()
   end
 
   if not governor.is_empty() and governor.active_sockets < constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS then
-    local now = governor.now_ms()
-    local elapsed = now - governor.last_dispatch_time
-    local min_interval = constants.RATE_LIMIT_MIN_INTERVAL_MS
-    if elapsed < min_interval and governor.last_dispatch_time > 0 then
-      local wait_ms = math.max(1, math.ceil(min_interval - elapsed))
+    governor.refill()
+    if (governor.tokens or 0) < 1 - 1e-9 then
+      local needed = 1 - (governor.tokens or 0)
+      local wait_ms = math.max(1, math.ceil(needed / (constants.RATE_LIMIT_RPS / 1000)))
       governor.schedule_dispatch(wait_ms)
     end
   end
@@ -414,39 +426,30 @@ function M.is_valid_media(file_path, ref_path)
   return size > constants.MIN_VALID_MEDIA_BYTES
 end
 
+local function _abort_handles_map(handles_map)
+  for dest, handle in pairs(handles_map or {}) do
+    if type(dest) == "string" then
+      M.interrupted_dests[dest] = true
+    end
+    if handle then
+      M.interrupted_handles[handle] = true
+      if handle.kill then
+        pcall(handle.kill, handle, 9)
+      elseif handle.proc and handle.proc.kill then
+        pcall(handle.proc.kill, handle.proc, 9)
+      end
+      handle.proc = nil
+      handle.task = nil
+    end
+  end
+end
+M._abort_handles_map = _abort_handles_map
+
 function M.abort_all()
   M.cancel_pending_resumes()
   M.cancel_prefetch_timers(true)
-  for dest, handle in pairs(M.active_handles or {}) do
-    if type(dest) == "string" then
-      M.interrupted_dests[dest] = true
-    end
-    if handle then
-      M.interrupted_handles[handle] = true
-      if handle.kill then
-        pcall(handle.kill, handle, 9)
-      elseif handle.proc and handle.proc.kill then
-        pcall(handle.proc.kill, handle.proc, 9)
-      end
-      handle.proc = nil
-      handle.task = nil
-    end
-  end
-  for dest, handle in pairs(M.active_prefetch_handles or {}) do
-    if type(dest) == "string" then
-      M.interrupted_dests[dest] = true
-    end
-    if handle then
-      M.interrupted_handles[handle] = true
-      if handle.kill then
-        pcall(handle.kill, handle, 9)
-      elseif handle.proc and handle.proc.kill then
-        pcall(handle.proc.kill, handle.proc, 9)
-      end
-      handle.proc = nil
-      handle.task = nil
-    end
-  end
+  _abort_handles_map(M.active_handles)
+  _abort_handles_map(M.active_prefetch_handles)
   if M.governor then
     M.governor.reset(true)
   end
@@ -735,6 +738,7 @@ function M.download_async(url, dest, cb, opts)
         M.active_handles[dest] = nil
       end
       vim.schedule(function()
+        if state.State.torn_down then return end
         local callbacks = M.active_downloads[dest] or {}
         M.active_downloads[dest] = nil
         M.active_handles[dest] = nil
@@ -797,10 +801,6 @@ function M.download_async(url, dest, cb, opts)
           end
           log("WARN", "DOWNLOAD", "Download failed or corrupted (code %d): %s", out.code or -1, url)
         else
-          pcall(function()
-            local now = os.time()
-            uv.fs_utime(dest, now, now)
-          end)
           log("INFO", "DOWNLOAD", "Download succeeded: %s", dest)
 
           -- Pipelined online preview prewarming:

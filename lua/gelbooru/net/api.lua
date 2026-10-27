@@ -135,11 +135,24 @@ function M.normalize_remote_tags(tags_str)
   return branches[1] or ""
 end
 
-function M.fetch(direction, is_explicit)
+function M.fetch(direction, is_explicit, opts)
   direction = direction or 1
   local State = state.State
   local UI = state.UI
   local ui = require("gelbooru.ui")
+
+  local priority = constants.PRIORITY_PREVIEW
+  if type(opts) == "number" then
+    priority = opts
+  elseif type(opts) == "table" and opts.priority then
+    priority = opts.priority
+  elseif is_explicit == false then
+    priority = constants.PRIORITY_AUTOPAGE
+  elseif State.page > 0 and #State.posts > 0 then
+    priority = constants.PRIORITY_AUTOPAGE
+  else
+    priority = constants.PRIORITY_PREVIEW
+  end
 
   if not State.query or util.is_local_query(State.query) then
     return
@@ -284,7 +297,7 @@ function M.fetch(direction, is_explicit)
       if State.cur == 1 then
         ui.render_preview(false)
       end
-    end, { priority = (direction ~= nil) and constants.PRIORITY_AUTOPAGE or constants.PRIORITY_PREVIEW })
+    end, { priority = priority })
   else
     -- Multi-branch parallel querying for OR tags (e.g. ~foot_focus ~soles)
     local all_posts = {}
@@ -393,7 +406,7 @@ function M.fetch(direction, is_explicit)
             ui.render_preview(false)
           end
         end
-      end, { priority = (direction ~= nil) and constants.PRIORITY_AUTOPAGE or constants.PRIORITY_PREVIEW })
+      end, { priority = priority })
     end
   end
 end
@@ -441,17 +454,7 @@ function M.execute_search(query, opts)
     return
   end
 
-  download.cancel_prefetch_timers(true)
-  pcall(download.abort_all)
-  pcall(function()
-    require("gelbooru.local.indexer").stop()
-  end)
-  pcall(function()
-    require("gelbooru.media.prewarmer").stop()
-  end)
-  pcall(function()
-    require("gelbooru.media.resolver").abort_active()
-  end)
+  util.abort_background_tasks()
 
   clear_preview_loading()
 
@@ -470,7 +473,7 @@ function M.execute_search(query, opts)
   if plan.is_pipeline then
     M.execute_piped_search(query, plan)
   else
-    M.fetch(1)
+    M.fetch(1, true, { priority = constants.PRIORITY_PREVIEW })
   end
 
   -- Auto-resolve any unknown query tags so they are saved to discovered.json
@@ -837,7 +840,7 @@ function M.execute_piped_search(query, pipe)
         if completed == #branches then
           on_batch_done()
         end
-      end)
+      end, { priority = constants.PRIORITY_PREVIEW })
     end
   end
 
