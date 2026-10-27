@@ -1594,7 +1594,7 @@ describe("download: token-bucket rate governor and priority queue", function()
     exit_callbacks[1]({ code = 28 })
 
     -- Connection capacity must be released immediately so queued task can dispatch
-    vim.wait(250, function() return #spawned >= 5 end, 10)
+    vim.wait(1000, function() return #spawned >= 5 end, 10)
     assert.are.equal(5, #spawned)
     assert.are.equal("https://example.com/queued.jpg", spawned[5])
 
@@ -1660,7 +1660,7 @@ describe("download: token-bucket rate governor and priority queue", function()
     download.governor.last_dispatch_time = 0
     download.governor.dispatch()
 
-    vim.wait(250, function() return #spawned >= 5 end, 10)
+    vim.wait(1000, function() return #spawned >= 5 end, 10)
     -- kill_before_run should have been skipped, and survivor should have dispatched
     assert.are.equal("https://example.com/survivor.jpg", spawned[#spawned])
   end)

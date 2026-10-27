@@ -683,6 +683,8 @@ function M.extract_video_thumbnail(video_path, post_or_id, cb)
       "1",
       "-q:v",
       "2",
+      "-f",
+      "image2",
       temp_part,
       "-y",
     }, {}, function(out)

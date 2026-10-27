@@ -688,6 +688,8 @@ describe("lua.gelbooru.media.resolver", function()
         "1",
         "-q:v",
         "2",
+        "-f",
+        "image2",
         expected_part,
         "-y",
       }, spawned_cmd)
