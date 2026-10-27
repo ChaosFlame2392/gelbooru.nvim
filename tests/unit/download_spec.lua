@@ -1831,3 +1831,117 @@ describe("download: pipelined online preview prewarming", function()
   end)
 end)
 
+describe("download: sliding-window queue bounding and prefetch pruning", function()
+  local orig_system
+  local uv = vim.uv or vim.loop
+
+  before_each(function()
+    download.abort_all()
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.interrupted_dests = {}
+    download.pending_resumes = {}
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
+    orig_system = vim.system
+  end)
+
+  after_each(function()
+    vim.system = orig_system
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
+  end)
+
+  it("prunes out-of-radius prefetch tasks from rate governor queue", function()
+    -- Intercept vim.system so tasks stay in queue without running
+    vim.system = function()
+      return { kill = function() end }
+    end
+
+    -- Saturate 4 sockets first so subsequent tasks queue up
+    download.governor.active_sockets = 4
+    download.governor.last_dispatch_time = download.governor.now_ms()
+
+    local indices = { 2, 5, 10, 35, 50 }
+    for _, idx in ipairs(indices) do
+      local dest = string.format("%s/prev_slide_%d.jpg", config.options.cache_dir, idx)
+      download.download_async("https://example.com/slide_" .. idx .. ".jpg", dest, function() end, {
+        priority = constants.PRIORITY_PREFETCH,
+        post_idx = idx,
+      })
+    end
+
+    local q = download.governor.queues[constants.PRIORITY_PREFETCH]
+    assert.are.equal(5, #q)
+
+    -- Prune around cursor 10 with window 10 (keeps [0, 20], drops 35 and 50)
+    assert.is_function(download.prune_prefetch_queue)
+    download.prune_prefetch_queue(10, 10)
+
+    assert.are.equal(3, #q)
+    assert.are.equal(2, q[1].post_idx)
+    assert.are.equal(5, q[2].post_idx)
+    assert.are.equal(10, q[3].post_idx)
+
+    -- Cleaned up active_downloads for pruned items
+    local dest_35 = string.format("%s/prev_slide_35.jpg", config.options.cache_dir)
+    local dest_50 = string.format("%s/prev_slide_50.jpg", config.options.cache_dir)
+    assert.is_nil(download.active_downloads[dest_35])
+    assert.is_nil(download.active_downloads[dest_50])
+  end)
+
+  it("prunes out-of-radius stagger timers in UI.prefetch_timers", function()
+    local UI = state.UI
+    UI.prefetch_timers = {}
+
+    local t1 = uv.new_timer()
+    download._prefetch_timer_meta = download._prefetch_timer_meta or {}
+    download._prefetch_timer_meta[t1] = { post_idx = 5, dest = "dest_5" }
+    UI.prefetch_timers[t1] = t1
+
+    local t2 = uv.new_timer()
+    download._prefetch_timer_meta[t2] = { post_idx = 45, dest = "dest_45" }
+    UI.prefetch_timers[t2] = t2
+    download.queued_prefetch_dests["dest_45"] = true
+
+    download.prune_prefetch_queue(10, 10)
+
+    -- t2 (post_idx 45, distance 35 > 10) must be closed and removed
+    assert.is_not_nil(UI.prefetch_timers[t1])
+    assert.is_nil(UI.prefetch_timers[t2])
+    assert.is_true(t2:is_closing())
+    assert.is_nil(download.queued_prefetch_dests["dest_45"])
+
+    if not t1:is_closing() then
+      t1:close()
+    end
+    UI.prefetch_timers = {}
+    download._prefetch_timer_meta = {}
+  end)
+
+  it("governor.reset(true) closes governor.timer and resets all queue state", function()
+    download.governor.active_sockets = 2
+    local timer = uv.new_timer()
+    timer:start(5000, 0, function() end)
+    download.governor.timer = timer
+
+    local task_cancelled = false
+    table.insert(download.governor.queues[constants.PRIORITY_PREFETCH], {
+      priority = constants.PRIORITY_PREFETCH,
+      on_cancel = function() task_cancelled = true end,
+    })
+
+    download.governor.reset(true)
+
+    assert.is_nil(download.governor.timer)
+    assert.is_true(timer:is_closing())
+    assert.are.equal(0, download.governor.active_sockets)
+    assert.is_true(task_cancelled)
+    assert.is_true(download.governor.is_empty())
+  end)
+end)
+
+

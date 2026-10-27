@@ -84,7 +84,7 @@ function M.restore_history(idx)
   end
   M.save_current_history()
   local download = require("gelbooru.net.download")
-  download.cancel_prefetch_timers()
+  download.cancel_prefetch_timers(true)
   pcall(download.abort_all)
   pcall(function()
     require("gelbooru.local.indexer").stop()

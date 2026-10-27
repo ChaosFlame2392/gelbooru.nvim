@@ -26,6 +26,7 @@ M.queued_retries = {}
 M.active_prefetch_handles = {}
 M.queued_prefetch_dests = {}
 M.last_prefetch_dir = nil
+M._prefetch_timer_meta = {}
 
 -- Centralized Token-Bucket Rate Governor & Priority Queue
 local governor = {
@@ -261,6 +262,57 @@ function M.reorder_prefetch_queue(cur_idx, dir)
   governor.reorder_prefetch(cur_idx, dir)
 end
 
+function governor.prune_prefetch(cur_idx, window)
+  window = window or constants.PREWARM_SLIDING_WINDOW or 10
+  cur_idx = cur_idx or 1
+  local q = governor.queues[constants.PRIORITY_PREFETCH]
+  if not q then return end
+
+  local i = 1
+  while i <= #q do
+    local task = q[i]
+    if task.post_idx and math.abs(task.post_idx - cur_idx) > window then
+      table.remove(q, i)
+      task.killed = true
+      if task.handle then
+        task.handle.killed = true
+      end
+      if task.on_cancel then
+        pcall(task.on_cancel)
+      end
+    else
+      i = i + 1
+    end
+  end
+end
+
+function M.prune_prefetch_queue(cur_idx, window)
+  window = window or constants.PREWARM_SLIDING_WINDOW or 10
+  cur_idx = cur_idx or (state.State and state.State.cur) or 1
+  governor.prune_prefetch(cur_idx, window)
+
+  local UI = state.UI
+  if UI and UI.prefetch_timers then
+    for timer, tval in pairs(UI.prefetch_timers) do
+      local t = (type(timer) == "userdata" or type(timer) == "table") and timer or tval
+      local meta = M._prefetch_timer_meta and M._prefetch_timer_meta[t]
+      if meta and meta.post_idx and math.abs(meta.post_idx - cur_idx) > window then
+        if not t:is_closing() then
+          pcall(t.stop, t)
+          pcall(t.close, t)
+        end
+        UI.prefetch_timers[timer] = nil
+        if meta.dest and M.queued_prefetch_dests then
+          M.queued_prefetch_dests[meta.dest] = nil
+        end
+        if M._prefetch_timer_meta then
+          M._prefetch_timer_meta[t] = nil
+        end
+      end
+    end
+  end
+end
+
 local function is_in_save_dir(path)
   if not path or type(path) ~= "string" or path == "" then
     return false
@@ -364,6 +416,7 @@ end
 
 function M.abort_all()
   M.cancel_pending_resumes()
+  M.cancel_prefetch_timers(true)
   for dest, handle in pairs(M.active_handles or {}) do
     if type(dest) == "string" then
       M.interrupted_dests[dest] = true
@@ -372,7 +425,26 @@ function M.abort_all()
       M.interrupted_handles[handle] = true
       if handle.kill then
         pcall(handle.kill, handle, 9)
+      elseif handle.proc and handle.proc.kill then
+        pcall(handle.proc.kill, handle.proc, 9)
       end
+      handle.proc = nil
+      handle.task = nil
+    end
+  end
+  for dest, handle in pairs(M.active_prefetch_handles or {}) do
+    if type(dest) == "string" then
+      M.interrupted_dests[dest] = true
+    end
+    if handle then
+      M.interrupted_handles[handle] = true
+      if handle.kill then
+        pcall(handle.kill, handle, 9)
+      elseif handle.proc and handle.proc.kill then
+        pcall(handle.proc.kill, handle.proc, 9)
+      end
+      handle.proc = nil
+      handle.task = nil
     end
   end
   if M.governor then
@@ -381,6 +453,7 @@ function M.abort_all()
   M.active_handles = {}
   M.active_prefetch_handles = {}
   M.queued_prefetch_dests = {}
+  M._prefetch_timer_meta = {}
 end
 
 function M.curl_async(url, cb, opts)
@@ -462,7 +535,12 @@ function M.curl_async(url, cb, opts)
           if handle_proxy then
             M.active_handles[handle_proxy] = nil
             M.interrupted_dests[handle_proxy] = nil
+            handle_proxy.proc = nil
+            handle_proxy.task = nil
           end
+          task.handle = nil
+          task.run = nil
+          task.on_cancel = nil
           if cb then
             cb(out.code == 0 and out.stdout or nil)
           end
@@ -670,7 +748,12 @@ function M.download_async(url, dest, cb, opts)
           if handle_proxy.proc then
             M.interrupted_handles[handle_proxy.proc] = nil
           end
+          handle_proxy.proc = nil
+          handle_proxy.task = nil
         end
+        task.handle = nil
+        task.run = nil
+        task.on_cancel = nil
         if M.interrupted_dests[dest] then
           M.interrupted_dests[dest] = nil
         end
@@ -858,6 +941,7 @@ function M.cancel_prefetch_timers(abort_active)
   end
   UI.prefetch_timers = {}
   M.queued_prefetch_dests = {}
+  M._prefetch_timer_meta = {}
   if abort_active then
     M.last_prefetch_dir = nil
     for dest, handle in pairs(M.active_prefetch_handles or {}) do
@@ -909,6 +993,9 @@ function M.prefetch_around(idx, scroll_dir)
     governor.reorder_prefetch(idx, dir)
   end
   M.last_prefetch_dir = dir
+
+  -- Prune out-of-radius tasks from rate governor prefetch queue & pending stagger timers
+  M.prune_prefetch_queue(idx, radius or 10)
 
   local ahead, behind = {}, {}
   for i = 1, radius do
@@ -971,6 +1058,8 @@ function M.prefetch_around(idx, scroll_dir)
               local cap_url, cap_dest = url, dest
               local cap_pid = p.id
               local cap_idx = i
+              M._prefetch_timer_meta = M._prefetch_timer_meta or {}
+              M._prefetch_timer_meta[timer] = { post_idx = cap_idx, dest = cap_dest }
 
               timer:start(
                 delay,
@@ -980,6 +1069,9 @@ function M.prefetch_around(idx, scroll_dir)
                     timer:close()
                   end
                   UI.prefetch_timers[timer] = nil
+                  if M._prefetch_timer_meta then
+                    M._prefetch_timer_meta[timer] = nil
+                  end
                   if M.queued_prefetch_dests then
                     M.queued_prefetch_dests[cap_dest] = nil
                   end

@@ -277,6 +277,7 @@ function M.fetch(direction, is_explicit)
         end
       end
       State.page = State.page + 1
+      collectgarbage("step", 100)
       history.save_current_history()
       ui.set_status()
       ui.render_list()
@@ -384,6 +385,7 @@ function M.fetch(direction, is_explicit)
             end
           end
           State.page = State.page + 1
+          collectgarbage("step", 100)
           history.save_current_history()
           ui.set_status()
           ui.render_list()

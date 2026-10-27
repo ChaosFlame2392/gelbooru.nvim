@@ -483,5 +483,33 @@ describe("gelbooru.media.prewarmer", function()
       prewarmer.invalidate(img_path)
       assert.is_nil(prewarmer.prewarmed_cache[img_path])
     end)
+
+    it("prunes out-of-radius tasks via prune_queue and notifies callbacks", function()
+      local cancelled = {}
+      for i = 1, 5 do
+        table.insert(prewarmer.queue, {
+          path = "/tmp/item_" .. i .. ".jpg",
+          post_idx = i * 10, -- 10, 20, 30, 40, 50
+          cb = function(ok, err)
+            table.insert(cancelled, { idx = i * 10, ok = ok, err = err })
+          end,
+        })
+      end
+
+      -- Prune around cursor 20 with window 10 (keeps [10, 30], drops 40, 50)
+      assert.is_function(prewarmer.prune_queue)
+      prewarmer.prune_queue(20, 10)
+
+      assert.are.equal(3, #prewarmer.queue)
+      assert.are.equal(10, prewarmer.queue[1].post_idx)
+      assert.are.equal(20, prewarmer.queue[2].post_idx)
+      assert.are.equal(30, prewarmer.queue[3].post_idx)
+
+      assert.are.equal(2, #cancelled)
+      assert.are.equal(40, cancelled[1].idx)
+      assert.is_false(cancelled[1].ok)
+      assert.are.equal(50, cancelled[2].idx)
+      assert.is_false(cancelled[2].ok)
+    end)
   end)
 end)

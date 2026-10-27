@@ -843,5 +843,254 @@ describe("Pipeline & Concurrency Stress Testing Suite", function()
       end
     end)
   end)
+
+  -----------------------------------------------------------------------------
+  -- SECTION 4: Sliding-Window Queue Bounding & Strict Lifecycle Teardown
+  -----------------------------------------------------------------------------
+  describe("4. Sliding-Window Queue Bounding & Strict Lifecycle Teardown", function()
+    local prewarmer = require("gelbooru.media.prewarmer")
+    local resolver = require("gelbooru.media.resolver")
+    local keymaps = require("gelbooru.ui.keymaps")
+    local uv = vim.uv or vim.loop
+
+    it("large cursor jumps (gg, G) prune out-of-radius prefetch and prewarm tasks (|idx - cur| > 10)", function()
+      ui.open()
+
+      -- Create 60 dummy posts
+      local posts = {}
+      for i = 1, 60 do
+        table.insert(posts, {
+          id = tostring(1000 + i),
+          score = 100,
+          preview_url = string.format("https://example.com/prev_%d.jpg", 1000 + i),
+          file_url = string.format("https://example.com/full_%d.jpg", 1000 + i),
+        })
+      end
+      state.State.posts = posts
+      state.State.cur = 1
+
+      -- Prevent downloads from completing synchronously so tasks queue in rate governor
+      download.governor.active_sockets = 4
+      download.governor.last_dispatch_time = download.governor.now_ms()
+
+      -- Prefetch around cursor 1
+      download.prefetch_around(1, 1)
+
+      -- Add mock items to prewarmer queue
+      for i = 2, 8 do
+        table.insert(prewarmer.queue, {
+          path = "/tmp/dummy_" .. i .. ".jpg",
+          post_idx = i,
+        })
+      end
+
+      -- Jump to bottom (post 60) via 'G'
+      keymaps.on_cursor_change("G")
+      assert.are.equal(60, state.State.cur)
+
+      -- All remaining prefetch tasks in rate governor queue must be within window 10 (|idx - 60| <= 10)
+      for _, task in ipairs(download.governor.queues[constants.PRIORITY_PREFETCH] or {}) do
+        if task.post_idx and not task.killed then
+          assert.is_true(math.abs(task.post_idx - 60) <= 10,
+            string.format("Prefetch task %d was not pruned after jumping to 60", task.post_idx))
+        end
+      end
+
+      -- All remaining prewarm tasks must be within window 10
+      for _, item in ipairs(prewarmer.queue or {}) do
+        if item.post_idx then
+          assert.is_true(math.abs(item.post_idx - 60) <= 10,
+            string.format("Prewarm task %d was not pruned after jumping to 60", item.post_idx))
+        end
+      end
+
+      -- Now jump back to top (post 1) via 'gg'
+      keymaps.on_cursor_change("gg")
+      assert.are.equal(1, state.State.cur)
+
+      for _, task in ipairs(download.governor.queues[constants.PRIORITY_PREFETCH] or {}) do
+        if task.post_idx and not task.killed then
+          assert.is_true(math.abs(task.post_idx - 1) <= 10,
+            string.format("Prefetch task %d was not pruned after jumping to 1", task.post_idx))
+        end
+      end
+
+      for _, item in ipairs(prewarmer.queue or {}) do
+        if item.post_idx then
+          assert.is_true(math.abs(item.post_idx - 1) <= 10,
+            string.format("Prewarm task %d was not pruned after jumping to 1", item.post_idx))
+        end
+      end
+
+      ui.teardown()
+    end)
+
+    it("closing the browser window (teardown) terminates all active background curl transfers, image conversions, ffmpeg thumbnailers, and closes all timers", function()
+      ui.open()
+
+      -- 1. Simulate in-flight curl transfer
+      local curl_killed = false
+      local mock_curl_proc = {
+        kill = function(self, sig)
+          curl_killed = true
+        end,
+      }
+      local mock_handle = {
+        dest = "/tmp/mock_dl.jpg",
+        proc = mock_curl_proc,
+        kill = function(self, sig)
+          self.killed = true
+          mock_curl_proc:kill(sig)
+        end,
+      }
+      download.active_handles["/tmp/mock_dl.jpg"] = mock_handle
+      download.active_downloads["/tmp/mock_dl.jpg"] = { function() end }
+
+      -- 2. Simulate in-flight prewarmer conversion
+      local conv_aborted = false
+      local mock_conv = {
+        abort = function() conv_aborted = true end,
+        error = function() return nil end,
+      }
+      prewarmer.active_conversions[mock_conv] = true
+      prewarmer.active_jobs["/tmp/mock_conv.jpg"] = { conv = mock_conv }
+      table.insert(prewarmer.queue, { path = "/tmp/queued.jpg", post_idx = 20 })
+
+      -- 3. Simulate in-flight ffmpeg video transcode
+      local ffmpeg_killed = false
+      local mock_ffmpeg_handle = {
+        thumb_dest = "/tmp/vthumb_999.jpg",
+        kill = function(self, sig)
+          ffmpeg_killed = true
+        end,
+      }
+      resolver.active_ffmpeg_handles = resolver.active_ffmpeg_handles or {}
+      resolver.active_ffmpeg_handles[mock_ffmpeg_handle] = true
+
+      -- 4. Simulate active rate governor timer and tasks
+      local gov_timer = uv.new_timer()
+      gov_timer:start(10000, 0, function() end)
+      download.governor.timer = gov_timer
+      download.governor.active_sockets = 2
+      table.insert(download.governor.queues[1], { priority = 1, on_cancel = function() end })
+
+      -- 5. Teardown UI
+      ui.teardown()
+
+      -- Assertions:
+      assert.is_true(curl_killed, "Active curl transfer must be killed on teardown")
+      assert.is_true(conv_aborted, "Active image conversion must be aborted on teardown")
+      assert.is_true(ffmpeg_killed, "Active ffmpeg process must be killed on teardown")
+      assert.is_nil(download.governor.timer, "Rate governor timer must be nil'd out on teardown")
+      assert.is_true(gov_timer:is_closing(), "Rate governor timer must be closed on teardown")
+      assert.are.equal(0, download.governor.active_sockets, "Active sockets counter must be reset to 0")
+      assert.is_true(download.governor.is_empty(), "All governor priority queues must be wiped")
+      assert.are.equal(0, #prewarmer.queue, "Prewarmer queue must be wiped on teardown")
+      assert.are.equal(0, vim.tbl_count(prewarmer.active_conversions), "Prewarmer active conversions must be cleared")
+      assert.are.equal(0, vim.tbl_count(resolver.active_ffmpeg_handles), "Active ffmpeg handles must be cleared")
+      assert.is_true(state.State.torn_down)
+    end)
+
+    it("query switches cancel in-flight tasks from prior queries so stale results never overwrite active results", function()
+      ui.open()
+
+      -- Online query "hatsune_miku"
+      api.execute_search("hatsune_miku")
+      local epoch1 = state.State.search_epoch
+
+      -- Simulate an in-flight curl handle
+      local curl1_killed = false
+      local h1 = {
+        dest = "/tmp/miku.jpg",
+        kill = function() curl1_killed = true end,
+      }
+      download.active_handles["/tmp/miku.jpg"] = h1
+      download.active_downloads["/tmp/miku.jpg"] = { function() end }
+
+      -- Simulate delayed API response closure
+      local delayed_callback = nil
+      download.curl_async("https://gelbooru.com/api", function(res)
+        delayed_callback = res
+      end)
+
+      -- Switch query to local folder
+      local mock_dir = "/tmp/mock_local_test_dir_" .. os.time()
+      vim.fn.mkdir(mock_dir, "p")
+      local f1 = mock_dir .. "/local_01.jpg"
+      local f = io.open(f1, "w")
+      if f then f:write("header"); f:close() end
+
+      ui.open_local("local:" .. mock_dir)
+
+      -- In-flight curl from previous query must have been killed
+      assert.is_true(curl1_killed, "Prior in-flight curl transfer must be killed when switching to local")
+      assert.is_not_equal(epoch1, state.State.search_epoch, "Search epoch must increment on query switch")
+
+      -- If delayed callback from query 1 resolves now, it must not corrupt State.posts
+      local stale_body = vim.fn.json_encode({
+        post = { { id = "99999", file_url = "https://example.com/stale.jpg" } }
+      })
+      if delayed_callback then
+        pcall(delayed_callback, stale_body)
+      end
+
+      -- State.posts must contain the local posts, not the stale remote post
+      assert.are.equal(1, #state.State.posts)
+      assert.is_true(state.State.posts[1].is_local == true)
+
+      vim.fn.delete(mock_dir, "rf")
+      ui.teardown()
+    end)
+
+    it("continuous navigation through 100+ high-resolution posts maintains flat memory usage without handle leaks", function()
+      ui.open()
+
+      -- Build 120 posts
+      local posts = {}
+      for i = 1, 120 do
+        table.insert(posts, {
+          id = tostring(5000 + i),
+          score = i * 10,
+          preview_url = string.format("https://example.com/nav_%d.jpg", i),
+          file_url = string.format("https://example.com/nav_full_%d.jpg", i),
+        })
+      end
+      state.State.posts = posts
+      state.State.cur = 1
+
+      collectgarbage("collect")
+      collectgarbage("collect")
+      local baseline_mem_kb = collectgarbage("count")
+
+      -- Rapidly navigate through posts: forward, backward, jumps
+      for i = 1, 120 do
+        keymaps.on_cursor_change(i)
+        if i % 10 == 0 then
+          -- Direction change / jitter
+          keymaps.on_cursor_change("k")
+          keymaps.on_cursor_change("j")
+        end
+      end
+
+      -- Test boundary jump
+      keymaps.on_cursor_change("G")
+      keymaps.on_cursor_change("gg")
+
+      collectgarbage("collect")
+      collectgarbage("collect")
+      local final_mem_kb = collectgarbage("count")
+
+      -- Memory delta must be flat (< 15MB growth across 120 posts navigation in Lua heap)
+      local delta_kb = final_mem_kb - baseline_mem_kb
+      assert.is_true(delta_kb < 15000, string.format("Memory grew excessively: %d KB", delta_kb))
+
+      -- Zero unclosed timers or leaked handles
+      assert.are.equal(0, vim.tbl_count(state.UI.prefetch_timers or {}))
+      vim.wait(300, function() return state.UI.scroll_timer == nil end, 20)
+      assert.is_nil(state.UI.scroll_timer)
+
+      ui.teardown()
+    end)
+  end)
 end)
 

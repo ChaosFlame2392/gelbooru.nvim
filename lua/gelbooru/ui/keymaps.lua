@@ -60,12 +60,17 @@ function M.on_cursor_change(action)
   render.render_list()
   UI._syncing_cursor = false
   render.render_preview(false)
+  local window = constants.PREWARM_SLIDING_WINDOW or 10
+  prewarmer.prune_queue(State.cur, window)
+  download.prune_prefetch_queue(State.cur, window)
+
   if not (State.posts[State.cur] and State.posts[State.cur].is_local) then
     download.prefetch_around(State.cur, State.scroll_dir)
   else
     prewarmer.prewarm_posts(State.posts, State.cur, State.scroll_dir)
   end
   if State.cur >= #State.posts - constants.AUTOPAGE_BOUNDARY_THRESHOLD then
+    collectgarbage("step", 100)
     api.fetch(1, false)
   end
 end

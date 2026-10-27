@@ -93,6 +93,8 @@ function M._do_prewarm_file(file_path, cb, convert_mod)
         if job.cb then
           pcall(job.cb, success, err)
         end
+        job.conv = nil
+        job.cb = nil
         M.drain_queue()
       end,
     })
@@ -295,13 +297,7 @@ function M.prewarm_posts(posts, cur_idx, dir_or_opts)
 
   -- Sliding-window bounded queue: prune items beyond window threshold
   local window = constants.PREWARM_SLIDING_WINDOW or 10
-  local pruned_queue = {}
-  for _, item in ipairs(M.queue) do
-    if not item.post_idx or math.abs(item.post_idx - cur_idx) <= window then
-      table.insert(pruned_queue, item)
-    end
-  end
-  M.queue = pruned_queue
+  M.prune_queue(cur_idx, window)
 
   -- Enqueue lookahead targets
   for _, idx in ipairs(target_indices) do
@@ -329,7 +325,28 @@ function M.prewarm_posts(posts, cur_idx, dir_or_opts)
   M.drain_queue()
 end
 
+function M.prune_queue(cur_idx, window)
+  window = window or constants.PREWARM_SLIDING_WINDOW or 10
+  cur_idx = cur_idx or (state.State and state.State.cur) or 1
+  local pruned = {}
+  for _, item in ipairs(M.queue) do
+    if not item.post_idx or math.abs(item.post_idx - cur_idx) <= window then
+      table.insert(pruned, item)
+    else
+      if item.cb then
+        pcall(item.cb, false, "Pruned from queue: out of radius")
+      end
+    end
+  end
+  M.queue = pruned
+end
+
 function M.stop()
+  for _, item in ipairs(M.queue) do
+    if item and item.cb then
+      pcall(item.cb, false, "Cancelled")
+    end
+  end
   M.queue = {}
 
   for conv in pairs(M.active_conversions) do
@@ -342,6 +359,10 @@ function M.stop()
   for _, job in pairs(M.active_jobs) do
     if job and job.conv and job.conv.abort then
       pcall(job.conv.abort, job.conv)
+    end
+    if job then
+      job.conv = nil
+      job.cb = nil
     end
   end
   M.active_jobs = {}
