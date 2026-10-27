@@ -11,6 +11,7 @@ local engine = require("gelbooru.query.engine")
 local index = require("gelbooru.local.index")
 local indexer = require("gelbooru.local.indexer")
 local constants = require("gelbooru.core.constants")
+local prewarmer = require("gelbooru.media.prewarmer")
 
 M.extract_post_id = scan.extract_post_id
 M.scan_local_folder = scan.scan_local_folder
@@ -20,6 +21,7 @@ M.unmark_saved = index.unmark_saved
 
 function M.open_local(query_or_dir)
   download.cancel_prefetch_timers()
+  prewarmer.stop()
   local ui = require("gelbooru.ui")
   local plan = engine.prepare(query_or_dir)
   local posts, resolved_dir, target_file = M.scan_local_folder(plan.dir)
@@ -87,6 +89,7 @@ function M.open_local(query_or_dir)
   ui.render_list()
   ui.render_preview(false)
   indexer.start_background_indexing(posts)
+  prewarmer.prewarm_posts(filtered_posts, initial_cur, { dir = 1, include_cur = true, radius = constants.PREWARM_LOCAL_RADIUS })
   if vim.fn.isdirectory(resolved_dir) == 0 then
     ui.set_status(string.format("Directory not found: %s", resolved_dir), constants.STATUS_TIMEOUT_LOCAL_MS)
   elseif #posts == 0 then
