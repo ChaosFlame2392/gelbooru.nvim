@@ -10,6 +10,8 @@ local history = require("gelbooru.core.history")
 local download = require("gelbooru.net.download")
 local config = require("gelbooru.core.config")
 local util = require("gelbooru.core.util")
+local mock_snacks = require("tests.integration.helpers.mock_snacks")
+local prewarmer = require("gelbooru.media.prewarmer")
 
 describe("Integration: Local Folder Browser Mode", function()
   local tmp_dir
@@ -1708,6 +1710,114 @@ describe("Integration: Local Folder Browser Mode", function()
       assert.is_false(read_called)
       assert.are.equal(1280, cw)
       assert.are.equal(720, ch)
+    end)
+  end)
+
+  describe("Local Artwork Background Prewarming", function()
+    local prewarm_dir
+
+    before_each(function()
+      prewarm_dir = vim.fn.tempname()
+      vim.fn.mkdir(prewarm_dir, "p")
+      for i = 1, 10 do
+        local p = string.format("%s/item_%02d.jpg", prewarm_dir, i)
+        local f = io.open(p, "wb")
+        if f then
+          f:write(string.rep("Z", 2048))
+          f:close()
+        end
+      end
+    end)
+
+    after_each(function()
+      vim.fn.delete(prewarm_dir, "rf")
+    end)
+
+    it("opening a local directory starts prewarming initial posts immediately", function()
+      ui.open_local(prewarm_dir)
+
+      assert.are.equal(10, #state.State.posts)
+      assert.are.equal(1, state.State.cur)
+
+      -- Verify that mock_snacks has received convert calls for the initial posts
+      vim.wait(1000, function() return #mock_snacks.conversions_run >= 5 end, 20)
+      assert.is_true(#mock_snacks.conversions_run >= 5)
+
+      local warmed_srcs = {}
+      for _, c in ipairs(mock_snacks.conversions_run) do
+        warmed_srcs[c.src] = true
+      end
+      for i = 1, 5 do
+        assert.is_true(warmed_srcs[state.State.posts[i].file_url] == true)
+      end
+    end)
+
+    it("navigating with j kicks off background prewarming for upcoming images in scroll direction", function()
+      ui.open_local(prewarm_dir)
+      vim.wait(1000, function() return #mock_snacks.conversions_run >= 5 end, 20)
+
+      -- Navigate down with j
+      local keymaps = require("gelbooru.ui.keymaps")
+      keymaps.on_cursor_change("j")
+
+      assert.are.equal(2, state.State.cur)
+      assert.are.equal(1, state.State.scroll_dir)
+
+      -- Lookahead should now prewarm up to post 7
+      vim.wait(1000, function()
+        for _, c in ipairs(mock_snacks.conversions_run) do
+          if c.src == state.State.posts[7].file_url then
+            return true
+          end
+        end
+        return false
+      end, 20)
+
+      local warmed_srcs = {}
+      for _, c in ipairs(mock_snacks.conversions_run) do
+        warmed_srcs[c.src] = true
+      end
+      assert.is_true(warmed_srcs[state.State.posts[7].file_url] == true)
+    end)
+
+    it("extracts and caches video thumbnails ahead of time for local video files", function()
+      local vid_path = prewarm_dir .. "/clip_01.mp4"
+      local f = io.open(vid_path, "wb")
+      if f then
+        f:write(string.rep("V", 4096))
+        f:close()
+      end
+
+      local resolver_mod = require("gelbooru.media.resolver")
+      local orig_extract = resolver_mod.extract_video_thumbnail
+      local thumb_path = config.options.cache_dir .. "/vthumb_clip_01.jpg"
+      local f_thumb = io.open(thumb_path, "wb")
+      if f_thumb then
+        f_thumb:write(string.rep("T", 2048))
+        f_thumb:close()
+      end
+
+      local extract_called = false
+      resolver_mod.extract_video_thumbnail = function(path, p, cb)
+        extract_called = true
+        cb(thumb_path)
+      end
+
+      ui.open_local(prewarm_dir)
+      vim.wait(1000, function() return extract_called end, 20)
+
+      assert.is_true(extract_called)
+      resolver_mod.extract_video_thumbnail = orig_extract
+    end)
+
+    it("teardown aborts background prewarming and cleans queues", function()
+      ui.open_local(prewarm_dir)
+      assert.is_truthy(state.UI.wins.frame)
+
+      ui.teardown()
+
+      assert.are.equal(0, #prewarmer.queue)
+      assert.are.equal(0, vim.tbl_count(prewarmer.active_conversions))
     end)
   end)
 end)

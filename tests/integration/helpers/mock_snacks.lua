@@ -6,9 +6,15 @@ local state = require("gelbooru.core.state")
 local M = {}
 
 M.placements_created = {}
+M.conversions_created = {}
+M.conversions_run = {}
+M.conversions_aborted = {}
 
 function M.setup()
   M.placements_created = {}
+  M.conversions_created = {}
+  M.conversions_run = {}
+  M.conversions_aborted = {}
 
   local placement_cls = {}
   placement_cls.__index = placement_cls
@@ -62,11 +68,83 @@ function M.setup()
   }
 
   package.loaded["snacks.image.placement"] = mod
+
+  local convert_cls = {}
+  convert_cls.__index = convert_cls
+
+  convert_cls.run = function(self)
+    self.running = true
+    table.insert(M.conversions_run, self)
+    if self.opts and self.opts.sync then
+      self.done_flag = true
+      if self.opts.on_done then
+        self.opts.on_done(self)
+      end
+    else
+      vim.schedule(function()
+        if not self.aborted then
+          self.done_flag = true
+          if self.opts and self.opts.on_done then
+            self.opts.on_done(self)
+          end
+        end
+      end)
+    end
+  end
+
+  convert_cls.abort = function(self)
+    self.aborted = true
+    table.insert(M.conversions_aborted, self)
+  end
+
+  convert_cls.done = function(self)
+    return self.done_flag == true
+  end
+
+  convert_cls.ready = function(self)
+    return self.done_flag == true
+  end
+
+  convert_cls.error = function(self)
+    return self._err
+  end
+
+  local convert_mod = {
+    convert = function(opts)
+      local conv = setmetatable({
+        opts = opts or {},
+        src = opts and opts.src,
+        file = opts and opts.src and (opts.src .. ".png"),
+        done_flag = false,
+        aborted = false,
+        _err = nil,
+      }, convert_cls)
+      table.insert(M.conversions_created, conv)
+      return conv
+    end,
+  }
+
+  _G.Snacks = _G.Snacks or {
+    image = {
+      config = {
+        convert = {},
+        debug = {},
+      },
+    },
+  }
+  package.loaded["snacks"] = _G.Snacks
+  package.loaded["snacks.image.convert"] = convert_mod
 end
 
 function M.teardown()
   package.loaded["snacks.image.placement"] = nil
+  package.loaded["snacks.image.convert"] = nil
+  package.loaded["snacks"] = nil
+  _G.Snacks = nil
   M.placements_created = {}
+  M.conversions_created = {}
+  M.conversions_run = {}
+  M.conversions_aborted = {}
 end
 
 return M
