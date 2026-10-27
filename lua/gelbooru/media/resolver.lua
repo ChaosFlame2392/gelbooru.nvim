@@ -1311,7 +1311,7 @@ function M.resolve(post, opts, callback)
       end
       M.clean_corrupt_snacks_cache(dest)
       try_candidate(idx + 1)
-    end, { force = force })
+    end, { force = force, priority = constants.PRIORITY_PREVIEW })
   end
 
   try_candidate(1)

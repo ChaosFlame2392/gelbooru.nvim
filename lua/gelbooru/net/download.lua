@@ -4,7 +4,18 @@ local state = require("gelbooru.core.state")
 local util = require("gelbooru.core.util")
 local constants = require("gelbooru.core.constants")
 
+local uv = vim.uv or vim.loop
+
 local M = {}
+
+M.PRIORITY_PREVIEW = constants.PRIORITY_PREVIEW
+M.PRIORITY_PREFETCH = constants.PRIORITY_PREFETCH
+M.PRIORITY_AUTOPAGE = constants.PRIORITY_AUTOPAGE
+M.PRIORITY_METADATA = constants.PRIORITY_METADATA
+
+M.RATE_LIMIT_RPS = constants.RATE_LIMIT_RPS
+M.RATE_LIMIT_MIN_INTERVAL_MS = constants.RATE_LIMIT_MIN_INTERVAL_MS
+M.RATE_LIMIT_MAX_CONCURRENT_SOCKETS = constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS
 
 M.active_downloads = {}
 M.active_handles = {}
@@ -15,6 +26,202 @@ M.queued_retries = {}
 M.active_prefetch_handles = {}
 M.queued_prefetch_dests = {}
 M.last_prefetch_dir = nil
+
+-- Centralized Token-Bucket Rate Governor & Priority Queue
+local governor = {
+  active_sockets = 0,
+  last_dispatch_time = 0,
+  timer = nil,
+  queues = {
+    [1] = {},
+    [2] = {},
+    [3] = {},
+    [4] = {},
+  },
+}
+M.governor = governor
+
+function governor.now_ms()
+  return (vim.uv or vim.loop).hrtime() / 1e6
+end
+
+function governor.queue_count()
+  local count = 0
+  for p = 1, 4 do
+    for _, task in ipairs(governor.queues[p] or {}) do
+      if not task.killed then
+        count = count + 1
+      end
+    end
+  end
+  return count
+end
+
+function governor.is_empty()
+  for p = 1, 4 do
+    local q = governor.queues[p]
+    if q and #q > 0 then
+      for _, task in ipairs(q) do
+        if not task.killed then
+          return false
+        end
+      end
+    end
+  end
+  return true
+end
+
+function governor.reset(notify_cancelled)
+  if governor.timer and not governor.timer:is_closing() then
+    pcall(function()
+      governor.timer:stop()
+      governor.timer:close()
+    end)
+  end
+  governor.timer = nil
+  governor.active_sockets = 0
+  governor.last_dispatch_time = 0
+
+  if notify_cancelled then
+    for p = 1, 4 do
+      local q = governor.queues[p] or {}
+      for _, task in ipairs(q) do
+        if not task.killed and task.on_cancel then
+          pcall(task.on_cancel)
+        end
+      end
+    end
+  end
+
+  governor.queues = {
+    [1] = {},
+    [2] = {},
+    [3] = {},
+    [4] = {},
+  }
+end
+
+function M.reset_rate_governor()
+  governor.reset(false)
+end
+
+function governor.schedule_dispatch(delay_ms)
+  if state.State.torn_down then
+    return
+  end
+  delay_ms = math.max(1, delay_ms or 1)
+  if not governor.timer or governor.timer:is_closing() then
+    governor.timer = (vim.uv or vim.loop).new_timer()
+  end
+  governor.timer:stop()
+  governor.timer:start(delay_ms, 0, vim.schedule_wrap(function()
+    governor.dispatch()
+  end))
+end
+
+function governor.release_socket()
+  governor.active_sockets = math.max(0, governor.active_sockets - 1)
+  if not governor.is_empty() then
+    local now = governor.now_ms()
+    local elapsed = now - governor.last_dispatch_time
+    local min_interval = constants.RATE_LIMIT_MIN_INTERVAL_MS
+    if elapsed >= min_interval or governor.last_dispatch_time == 0 then
+      governor.dispatch()
+    else
+      local wait_ms = math.max(1, math.ceil(min_interval - elapsed))
+      governor.schedule_dispatch(wait_ms)
+    end
+  end
+end
+
+function governor.dispatch()
+  if state.State.torn_down then
+    return
+  end
+
+  while governor.active_sockets < constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS do
+    local next_task = nil
+    for p = 1, 4 do
+      local q = governor.queues[p]
+      while q and #q > 0 do
+        local candidate = table.remove(q, 1)
+        if not candidate.killed then
+          next_task = candidate
+          break
+        end
+      end
+      if next_task then
+        break
+      end
+    end
+
+    if not next_task then
+      break
+    end
+
+    local now = governor.now_ms()
+    local elapsed = now - governor.last_dispatch_time
+    local min_interval = constants.RATE_LIMIT_MIN_INTERVAL_MS
+
+    if elapsed < min_interval and governor.last_dispatch_time > 0 then
+      -- Rate limit hit: put back at front of queue and schedule
+      table.insert(governor.queues[next_task.priority], 1, next_task)
+      local wait_ms = math.max(1, math.ceil(min_interval - elapsed))
+      governor.schedule_dispatch(wait_ms)
+      return
+    end
+
+    -- Eligible: dispatch!
+    governor.active_sockets = governor.active_sockets + 1
+    governor.last_dispatch_time = now
+
+    local ok, err = pcall(next_task.run)
+    if not ok then
+      log("ERROR", "GOVERNOR", "Task dispatch execution error: %s", tostring(err))
+      if next_task.socket_active then
+        next_task.socket_active = false
+        governor.release_socket()
+      end
+    end
+  end
+
+  if not governor.is_empty() and governor.active_sockets < constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS then
+    local now = governor.now_ms()
+    local elapsed = now - governor.last_dispatch_time
+    local min_interval = constants.RATE_LIMIT_MIN_INTERVAL_MS
+    if elapsed < min_interval and governor.last_dispatch_time > 0 then
+      local wait_ms = math.max(1, math.ceil(min_interval - elapsed))
+      governor.schedule_dispatch(wait_ms)
+    end
+  end
+end
+
+function governor.enqueue(task)
+  local p = task.priority or constants.PRIORITY_METADATA
+  p = math.max(1, math.min(4, p))
+  task.priority = p
+  table.insert(governor.queues[p], task)
+  governor.dispatch()
+end
+
+function governor.upgrade_priority(dest, new_priority)
+  if not dest then return end
+  new_priority = math.max(1, math.min(4, new_priority or 1))
+  for p = new_priority + 1, 4 do
+    local q = governor.queues[p]
+    if q then
+      for i, task in ipairs(q) do
+        if task.dest == dest and not task.killed then
+          table.remove(q, i)
+          task.priority = new_priority
+          table.insert(governor.queues[new_priority], 1, task)
+          governor.dispatch()
+          return
+        end
+      end
+    end
+  end
+end
 
 local function is_in_save_dir(path)
   if not path or type(path) ~= "string" or path == "" then
@@ -107,67 +314,126 @@ function M.abort_all()
       end
     end
   end
+  if M.governor then
+    M.governor.reset(true)
+  end
   M.active_handles = {}
   M.active_prefetch_handles = {}
   M.queued_prefetch_dests = {}
 end
 
-function M.curl_async(url, cb)
-  log("DEBUG", "CURL", "GET %s", url)
-  local handle
-  local done = false
-  local spawn_ok, res = pcall(function()
-    return vim.system({
-      "curl",
-      "-s",
-      "--fail",
-      "-L",
-      "--max-time",
-      tostring(constants.CURL_API_TIMEOUT_SEC),
-      "--connect-timeout",
-      tostring(constants.CURL_CONNECT_TIMEOUT_SEC),
-      "--retry",
-      "3",
-      "--retry-delay",
-      "2",
-      "--retry-connrefused",
-      url,
-    }, { text = true }, function(out)
-      done = true
-      if handle then
-        M.active_handles[handle] = nil
-        M.interrupted_dests[handle] = nil
+function M.curl_async(url, cb, opts)
+  local priority = constants.PRIORITY_METADATA
+  if type(opts) == "number" then
+    priority = opts
+  elseif type(opts) == "table" and opts.priority then
+    priority = opts.priority
+  end
+
+  local handle_proxy = {
+    url = url,
+    proc = nil,
+    killed = false,
+  }
+
+  local task = {
+    url = url,
+    priority = priority,
+    handle = handle_proxy,
+    socket_active = false,
+    on_cancel = function()
+      if cb then
+        vim.schedule(function() pcall(cb, nil) end)
       end
-      vim.schedule(function()
-        if handle then
-          M.active_handles[handle] = nil
-          M.interrupted_dests[handle] = nil
+    end,
+  }
+
+  handle_proxy.task = task
+  handle_proxy.kill = function(self, sig)
+    self.killed = true
+    if self.task then
+      self.task.killed = true
+    end
+    if self.proc and self.proc.kill then
+      pcall(self.proc.kill, self.proc, sig or 9)
+    end
+  end
+
+  task.run = function()
+    if handle_proxy.killed then
+      if cb then
+        vim.schedule(function() pcall(cb, nil) end)
+      end
+      return
+    end
+
+    task.socket_active = true
+    log("DEBUG", "CURL", "GET %s", url)
+    local done = false
+
+    local spawn_ok, res = pcall(function()
+      return vim.system({
+        "curl",
+        "-s",
+        "--fail",
+        "-L",
+        "--max-time",
+        tostring(constants.CURL_API_TIMEOUT_SEC),
+        "--connect-timeout",
+        tostring(constants.CURL_CONNECT_TIMEOUT_SEC),
+        "--retry",
+        "3",
+        "--retry-delay",
+        "2",
+        "--retry-connrefused",
+        url,
+      }, { text = true }, function(out)
+        done = true
+        if task.socket_active then
+          task.socket_active = false
+          governor.release_socket()
         end
-        if cb then
-          cb(out.code == 0 and out.stdout or nil)
+        if handle_proxy then
+          M.active_handles[handle_proxy] = nil
+          M.interrupted_dests[handle_proxy] = nil
         end
+        vim.schedule(function()
+          if handle_proxy then
+            M.active_handles[handle_proxy] = nil
+            M.interrupted_dests[handle_proxy] = nil
+          end
+          if cb then
+            cb(out.code == 0 and out.stdout or nil)
+          end
+        end)
       end)
     end)
-  end)
 
-  if not spawn_ok or not res then
-    log("ERROR", "CURL", "Failed to spawn curl: %s", tostring(res))
-    if cb then
-      vim.schedule(function()
-        cb(nil)
-      end)
+    if not spawn_ok or not res then
+      if task.socket_active then
+        task.socket_active = false
+        governor.release_socket()
+      end
+      log("ERROR", "CURL", "Failed to spawn curl: %s", tostring(res))
+      if cb then
+        vim.schedule(function()
+          cb(nil)
+        end)
+      end
+      return nil
     end
-    return nil
-  end
-  handle = res
 
-  if handle and not done then
-    M.active_handles[handle] = handle
+    handle_proxy.proc = res
+    if not done then
+      M.active_handles[handle_proxy] = handle_proxy
+    end
   end
-  return handle
+
+  governor.enqueue(task)
+  return handle_proxy
 end
 
--- opts: { resume = bool, force = bool }
+-- opts: { resume = bool, force = bool, priority = number }
 -- Automatically enables HTTP byte-range resumption (-C -) whenever a .part file
 -- exists and has size > 1024 bytes, unless opts.force is true.
 function M.download_async(url, dest, cb, opts)
@@ -185,7 +451,7 @@ function M.download_async(url, dest, cb, opts)
       if cb then
         pcall(cb, true)
       end
-      return
+      return nil
     else
       if not is_in_save_dir(dest) then
         log("WARN", "DOWNLOAD", "Existing cached file corrupted on disk, deleting: %s", dest)
@@ -196,6 +462,7 @@ function M.download_async(url, dest, cb, opts)
     end
   end
 
+  local priority = (opts and opts.priority) or constants.PRIORITY_PREVIEW
   local queued = M.active_downloads[dest]
   local running_handle = M.active_handles[dest]
   if queued then
@@ -212,6 +479,7 @@ function M.download_async(url, dest, cb, opts)
     if cb then
       table.insert(M.active_downloads[dest], cb)
     end
+    governor.upgrade_priority(dest, priority)
     return running_handle
   end
 
@@ -243,110 +511,177 @@ function M.download_async(url, dest, cb, opts)
 
   M.active_downloads[dest] = cb and { cb } or {}
 
-  local curl_cmd = {
-    "curl", "-s", "--fail", "-L",
-    "--max-time", tostring(constants.CURL_DOWNLOAD_TIMEOUT_SEC),
-    "--connect-timeout", tostring(constants.CURL_CONNECT_TIMEOUT_SEC),
-    "--retry", "3", "--retry-delay", "2", "--retry-connrefused",
-    "-H", "Referer: https://gelbooru.com/",
+  local handle_proxy = {
+    dest = dest,
+    url = url,
+    proc = nil,
+    killed = false,
   }
-  if do_resume then
-    table.insert(curl_cmd, "-C")
-    table.insert(curl_cmd, "-")
-  end
-  table.insert(curl_cmd, "-o")
-  table.insert(curl_cmd, tmp_dest)
-  table.insert(curl_cmd, url)
 
-  local handle
-  local done = false
-  local spawn_ok, res = pcall(vim.system, curl_cmd, {}, function(out)
-    done = true
-    if handle then
-      M.active_handles[dest] = nil
-    end
-    vim.schedule(function()
+  local task = {
+    dest = dest,
+    url = url,
+    priority = priority,
+    handle = handle_proxy,
+    socket_active = false,
+    on_cancel = function()
       local callbacks = M.active_downloads[dest] or {}
       M.active_downloads[dest] = nil
       M.active_handles[dest] = nil
-
-      local was_interrupted = (handle and M.interrupted_handles[handle]) or M.interrupted_dests[dest]
-      if handle then
-        M.interrupted_handles[handle] = nil
-      end
-      if M.interrupted_dests[dest] then
-        M.interrupted_dests[dest] = nil
-      end
-
-      -- If teardown killed this download, never rename the .part regardless of
-      -- curl's exit code (kill vs natural-exit race can produce code 0).
-      if was_interrupted then
-        log("INFO", "DOWNLOAD", "Download interrupted by teardown/cancel, .part preserved: %s", tmp_dest)
-        for _, fn in ipairs(callbacks) do pcall(fn, false) end
-
-        -- If a new request was queued while this was exiting, kick it off cleanly now!
-        local queued_cbs = M.queued_retries and M.queued_retries[dest]
-        if queued_cbs and #queued_cbs > 0 then
-          M.queued_retries[dest] = nil
-          M.download_async(url, dest, function(ok)
-            for _, qcb in ipairs(queued_cbs) do pcall(qcb, ok) end
-          end, opts)
-        end
-        return
-      end
-
-      local ok = false
-      if out.code == 0 and vim.fn.filereadable(tmp_dest) == 1 and M.is_valid_media(tmp_dest, dest) then
-        ok = vim.fn.rename(tmp_dest, dest) == 0
-        if not ok and vim.fn.filereadable(dest) == 1 then
-          if not is_in_save_dir(dest) then
-            vim.fn.delete(dest)
-          end
-          ok = vim.fn.rename(tmp_dest, dest) == 0
-        end
-      end
-
-      -- Only delete .part on failure for non-resumable downloads, range errors, or corrupt payloads;
-      -- for resumable downloads we leave a failed .part intact so future requests can resume it.
-      if not ok then
-        local current_part_size = vim.fn.getfsize(tmp_dest)
-        local is_range_error = (out.code == 33 or out.code == 22)
-        local preserve_part = not force and not is_range_error and current_part_size > constants.MIN_VALID_MEDIA_BYTES and out.code ~= 0
-        if not preserve_part and vim.fn.filereadable(tmp_dest) == 1 then
-          vim.fn.delete(tmp_dest)
-        end
-        log("WARN", "DOWNLOAD", "Download failed or corrupted (code %d): %s", out.code or -1, url)
-      else
-        pcall(function()
-          local uv = vim.uv or vim.loop
-          local now = os.time()
-          uv.fs_utime(dest, now, now)
-        end)
-        log("INFO", "DOWNLOAD", "Download succeeded: %s", dest)
-      end
-
       for _, fn in ipairs(callbacks) do
-        pcall(fn, ok)
+        pcall(fn, false)
       end
-    end)
-  end)
+    end,
+  }
 
-  if not spawn_ok or not res then
-    log("ERROR", "DOWNLOAD", "Failed to spawn curl: %s", tostring(res))
-    local callbacks = M.active_downloads[dest] or {}
-    M.active_downloads[dest] = nil
-    M.active_handles[dest] = nil
-    for _, fn in ipairs(callbacks) do
-      pcall(fn, false)
+  handle_proxy.task = task
+  handle_proxy.kill = function(self, sig)
+    self.killed = true
+    if self.task then
+      self.task.killed = true
     end
-    return nil
+    if not self.proc and self.dest and M.active_downloads[self.dest] then
+      local callbacks = M.active_downloads[self.dest] or {}
+      M.active_downloads[self.dest] = nil
+      M.active_handles[self.dest] = nil
+      for _, fn in ipairs(callbacks) do
+        pcall(fn, false)
+      end
+    end
+    if self.proc and self.proc.kill then
+      pcall(self.proc.kill, self.proc, sig or 9)
+    end
   end
 
-  handle = res
-  if handle and not done then
-    M.active_handles[dest] = handle
+  M.active_handles[dest] = handle_proxy
+
+  task.run = function()
+    if handle_proxy.killed then
+      task.on_cancel()
+      return
+    end
+
+    task.socket_active = true
+
+    local curl_cmd = {
+      "curl", "-s", "--fail", "-L",
+      "--max-time", tostring(constants.CURL_DOWNLOAD_TIMEOUT_SEC),
+      "--connect-timeout", tostring(constants.CURL_CONNECT_TIMEOUT_SEC),
+      "--retry", "3", "--retry-delay", "2", "--retry-connrefused",
+      "-H", "Referer: https://gelbooru.com/",
+    }
+    if do_resume then
+      table.insert(curl_cmd, "-C")
+      table.insert(curl_cmd, "-")
+    end
+    table.insert(curl_cmd, "-o")
+    table.insert(curl_cmd, tmp_dest)
+    table.insert(curl_cmd, url)
+
+    local done = false
+    local spawn_ok, res = pcall(vim.system, curl_cmd, {}, function(out)
+      done = true
+      if task.socket_active then
+        task.socket_active = false
+        governor.release_socket()
+      end
+      if handle_proxy then
+        M.active_handles[dest] = nil
+      end
+      vim.schedule(function()
+        local callbacks = M.active_downloads[dest] or {}
+        M.active_downloads[dest] = nil
+        M.active_handles[dest] = nil
+
+        local was_interrupted = (handle_proxy and M.interrupted_handles[handle_proxy])
+          or (handle_proxy and handle_proxy.proc and M.interrupted_handles[handle_proxy.proc])
+          or M.interrupted_dests[dest]
+
+        if handle_proxy then
+          M.interrupted_handles[handle_proxy] = nil
+          if handle_proxy.proc then
+            M.interrupted_handles[handle_proxy.proc] = nil
+          end
+        end
+        if M.interrupted_dests[dest] then
+          M.interrupted_dests[dest] = nil
+        end
+
+        -- If teardown killed this download, never rename the .part regardless of
+        -- curl's exit code (kill vs natural-exit race can produce code 0).
+        if was_interrupted then
+          log("INFO", "DOWNLOAD", "Download interrupted by teardown/cancel, .part preserved: %s", tmp_dest)
+          for _, fn in ipairs(callbacks) do pcall(fn, false) end
+
+          -- If a new request was queued while this was exiting, kick it off cleanly now!
+          local queued_cbs = M.queued_retries and M.queued_retries[dest]
+          if queued_cbs and #queued_cbs > 0 then
+            M.queued_retries[dest] = nil
+            M.download_async(url, dest, function(ok)
+              for _, qcb in ipairs(queued_cbs) do pcall(qcb, ok) end
+            end, opts)
+          end
+          return
+        end
+
+        local ok = false
+        if out.code == 0 and vim.fn.filereadable(tmp_dest) == 1 and M.is_valid_media(tmp_dest, dest) then
+          ok = vim.fn.rename(tmp_dest, dest) == 0
+          if not ok and vim.fn.filereadable(dest) == 1 then
+            if not is_in_save_dir(dest) then
+              vim.fn.delete(dest)
+            end
+            ok = vim.fn.rename(tmp_dest, dest) == 0
+          end
+        end
+
+        -- Only delete .part on failure for non-resumable downloads, range errors, or corrupt payloads;
+        -- for resumable downloads we leave a failed .part intact so future requests can resume it.
+        if not ok then
+          local current_part_size = vim.fn.getfsize(tmp_dest)
+          local is_range_error = (out.code == 33 or out.code == 22)
+          local preserve_part = not force and not is_range_error and current_part_size > constants.MIN_VALID_MEDIA_BYTES and out.code ~= 0
+          if not preserve_part and vim.fn.filereadable(tmp_dest) == 1 then
+            vim.fn.delete(tmp_dest)
+          end
+          log("WARN", "DOWNLOAD", "Download failed or corrupted (code %d): %s", out.code or -1, url)
+        else
+          pcall(function()
+            local now = os.time()
+            uv.fs_utime(dest, now, now)
+          end)
+          log("INFO", "DOWNLOAD", "Download succeeded: %s", dest)
+        end
+
+        for _, fn in ipairs(callbacks) do
+          pcall(fn, ok)
+        end
+      end)
+    end)
+
+    if not spawn_ok or not res then
+      if task.socket_active then
+        task.socket_active = false
+        governor.release_socket()
+      end
+      log("ERROR", "DOWNLOAD", "Failed to spawn curl: %s", tostring(res))
+      local callbacks = M.active_downloads[dest] or {}
+      M.active_downloads[dest] = nil
+      M.active_handles[dest] = nil
+      for _, fn in ipairs(callbacks) do
+        pcall(fn, false)
+      end
+      return nil
+    end
+
+    handle_proxy.proc = res
+    if handle_proxy and not done then
+      M.active_handles[dest] = handle_proxy
+    end
   end
-  return handle
+
+  governor.enqueue(task)
+  return handle_proxy
 end
 
 -- Scans save_dir for orphaned .part files from previous sessions and queues
@@ -408,7 +743,7 @@ function M.resume_pending_saves()
             M.download_async(file_url, dest, function(saved)
               log(saved and "INFO" or "WARN", "DOWNLOAD",
                 saved and "Auto-resumed save completed: %s" or "Auto-resume failed: %s", dest)
-            end, { resume = true })
+            end, { resume = true, priority = constants.PRIORITY_METADATA })
           end)
         end, i * constants.RESUME_STAGGER_MS)
         M.pending_resumes[dest] = timer or true
@@ -544,7 +879,7 @@ function M.prefetch_around(idx, scroll_dir)
                 if M.active_prefetch_handles then
                   M.active_prefetch_handles[dest] = nil
                 end
-              end)
+              end, { priority = constants.PRIORITY_PREFETCH })
               if handle and M.active_prefetch_handles and M.active_downloads[dest] then
                 M.active_prefetch_handles[dest] = handle
               end
@@ -576,7 +911,7 @@ function M.prefetch_around(idx, scroll_dir)
                       if M.active_prefetch_handles then
                         M.active_prefetch_handles[cap_dest] = nil
                       end
-                    end)
+                    end, { priority = constants.PRIORITY_PREFETCH })
                     if handle and M.active_prefetch_handles and M.active_downloads[cap_dest] then
                       M.active_prefetch_handles[cap_dest] = handle
                     end

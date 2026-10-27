@@ -572,16 +572,20 @@ describe("Pipeline & Concurrency Stress Testing Suite", function()
       assert.is_not_nil(state.UI.scroll_timer)
 
       -- But lookahead prefetch MUST have been dispatched eagerly without waiting for scroll_timer!
-      -- Both post 2 (N+1) and post 3 (N+2) must have been dispatched concurrently
-      assert.is_true(#spawned_urls >= 2)
+      -- Both post 2 (N+1) and post 3 (N+2) are tracked in active_prefetch_handles immediately
       assert.are.equal(2, vim.tbl_count(download_mod.active_prefetch_handles or {}))
+
+      -- Wait for rate governor to dispatch top lookahead targets
+      vim.wait(250, function() return #spawned_urls >= 2 end, 10)
+      assert.is_true(#spawned_urls >= 2)
 
       -- Navigate to post 2 moving forward
       state.State.cur = 2
       state.State.scroll_dir = 1
       ui.render_preview(false)
 
-      -- Lookahead prefetch should have eagerly triggered next post (post 4)
+      -- Lookahead prefetch should have triggered next post (post 4) via rate governor
+      vim.wait(250, function() return #spawned_urls >= 3 end, 10)
       assert.is_true(#spawned_urls >= 3)
 
       -- Rapid direction reversal to post 1 (dir = -1)

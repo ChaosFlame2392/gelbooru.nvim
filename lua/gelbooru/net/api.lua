@@ -283,7 +283,7 @@ function M.fetch(direction, is_explicit)
       if State.cur == 1 then
         ui.render_preview(false)
       end
-    end)
+    end, { priority = (direction ~= nil) and constants.PRIORITY_AUTOPAGE or constants.PRIORITY_PREVIEW })
   else
     -- Multi-branch parallel querying for OR tags (e.g. ~foot_focus ~soles)
     local all_posts = {}
@@ -391,7 +391,7 @@ function M.fetch(direction, is_explicit)
             ui.render_preview(false)
           end
         end
-      end)
+      end, { priority = (direction ~= nil) and constants.PRIORITY_AUTOPAGE or constants.PRIORITY_PREVIEW })
     end
   end
 end
@@ -950,7 +950,7 @@ function M.save_current(cb)
         ui.render_list()
       end
       if cb then cb(saved, dest) end
-    end, { resume = true })
+    end, { resume = true, priority = constants.PRIORITY_PREVIEW })
     return
   end
   util.ensure(config.options.save_dir)
@@ -995,7 +995,7 @@ function M.save_current(cb)
     if cb then
       cb(saved, dest)
     end
-  end, { resume = true })
+  end, { resume = true, priority = constants.PRIORITY_PREVIEW })
 end
 
 function M.fetch_post_by_id(id, cb)
@@ -1023,7 +1023,7 @@ function M.fetch_post_by_id(id, cb)
     else
       if cb then cb(nil) end
     end
-  end)
+  end, { priority = constants.PRIORITY_METADATA })
 end
 
 function M.fetch_post_metadata(p, cb)

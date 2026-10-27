@@ -14,6 +14,10 @@ describe("download: deduplication & caching", function()
   local orig_system
 
   before_each(function()
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
     download.active_downloads = {}
     download.active_handles = {}
     download.interrupted_dests = {}
@@ -85,6 +89,10 @@ describe("download: curl arguments, retry options & referer injection", function
   local orig_system
 
   before_each(function()
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
     download.active_downloads = {}
     download.active_handles = {}
     download.interrupted_dests = {}
@@ -277,6 +285,10 @@ describe("download: atomic file rename & size verification", function()
   local orig_system
 
   before_each(function()
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
     download.active_downloads = {}
     download.active_handles = {}
     download.interrupted_dests = {}
@@ -410,6 +422,10 @@ describe("download: failure recovery & resume flag behaviour", function()
   local orig_system
 
   before_each(function()
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
     download.active_downloads = {}
     download.active_handles = {}
     download.interrupted_dests = {}
@@ -571,6 +587,10 @@ describe("download: curl_async execution & response handling", function()
   local orig_system
 
   before_each(function()
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
     download.active_downloads = {}
     download.active_handles = {}
     download.interrupted_dests = {}
@@ -628,6 +648,10 @@ describe("download: interrupted teardown guard & abort_all", function()
   local orig_system
 
   before_each(function()
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
     download.active_downloads = {}
     download.active_handles = {}
     download.interrupted_dests = {}
@@ -691,6 +715,10 @@ describe("download: safe queue pruning and error handling", function()
   local orig_system
 
   before_each(function()
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
     download.active_downloads = {}
     download.active_handles = {}
     download.interrupted_dests = {}
@@ -768,6 +796,10 @@ describe("download: resume_pending_saves & timer management", function()
   local orig_save_dir
 
   before_each(function()
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
     download.active_downloads = {}
     download.active_handles = {}
     download.interrupted_dests = {}
@@ -844,6 +876,10 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
   local orig_torn_down
 
   before_each(function()
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
     download.active_downloads = {}
     download.active_handles = {}
     download.active_prefetch_handles = {}
@@ -890,16 +926,17 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
     -- Trigger prefetch at index 1 with direction 1 -> immediate targets are posts 102 (N+1) and 103 (N+2)
     download.prefetch_around(1, 1)
 
-    -- Both top lookahead targets (102 and 103) must be triggered immediately without timer delay!
+    -- Both active handles must be tracked in active_prefetch_handles immediately
+    assert.are.equal(2, vim.tbl_count(download.active_prefetch_handles))
+
+    -- Subsequent posts (104, 105) must be staggered via prefetch_timers immediately
+    assert.is_true(vim.tbl_count(state.UI.prefetch_timers) >= 2)
+
+    -- Both top lookahead targets (102 and 103) dispatch via rate governor without artificial prefetch timer delay
+    vim.wait(250, function() return #spawned_urls >= 2 end, 10)
     assert.are.equal(2, #spawned_urls)
     assert.are.equal("http://example.com/102_s.jpg", spawned_urls[1])
     assert.are.equal("http://example.com/103_s.jpg", spawned_urls[2])
-
-    -- Both active handles must be tracked in active_prefetch_handles
-    assert.are.equal(2, vim.tbl_count(download.active_prefetch_handles))
-
-    -- Subsequent posts (104, 105) must be staggered via prefetch_timers
-    assert.is_true(vim.tbl_count(state.UI.prefetch_timers) >= 2)
   end)
 
   it("dispatches top lookahead targets in reverse scroll direction without delay", function()
@@ -914,6 +951,7 @@ describe("download: eager lookahead & prefetch pipeline (Issue 4)", function()
     -- Trigger prefetch at index 5 with direction -1 -> immediate targets are posts 104 (N-1) and 103 (N-2)
     download.prefetch_around(5, -1)
 
+    vim.wait(250, function() return #spawned_urls >= 2 end, 10)
     assert.are.equal(2, #spawned_urls)
     assert.are.equal("http://example.com/104_s.jpg", spawned_urls[1])
     assert.are.equal("http://example.com/103_s.jpg", spawned_urls[2])
@@ -1230,6 +1268,298 @@ describe("download.cancel_pending_resumes and download.cancel_prefetch_timers", 
     assert.are.same({}, download.queued_prefetch_dests)
     assert.are.same({}, download.active_prefetch_handles)
     assert.are.equal(9, killed_sig)
+  end)
+end)
+
+describe("download: token-bucket rate governor and priority queue", function()
+  local orig_system
+  local uv = vim.uv or vim.loop
+
+  before_each(function()
+    download.abort_all()
+    download.active_downloads = {}
+    download.active_handles = {}
+    download.interrupted_dests = {}
+    download.pending_resumes = {}
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
+    orig_system = vim.system
+  end)
+
+  after_each(function()
+    vim.system = orig_system
+    download.abort_all()
+    if download.reset_rate_governor then
+      download.reset_rate_governor()
+    end
+  end)
+
+  it("exposes rate governor constants and priority levels", function()
+    assert.are.equal(8, constants.RATE_LIMIT_RPS)
+    assert.are.equal(125, constants.RATE_LIMIT_MIN_INTERVAL_MS)
+    assert.are.equal(4, constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS)
+    assert.are.equal(1, constants.PRIORITY_PREVIEW)
+    assert.are.equal(2, constants.PRIORITY_PREFETCH)
+    assert.are.equal(3, constants.PRIORITY_AUTOPAGE)
+    assert.are.equal(4, constants.PRIORITY_METADATA)
+
+    assert.are.equal(constants.PRIORITY_PREVIEW, download.PRIORITY_PREVIEW)
+    assert.are.equal(constants.PRIORITY_PREFETCH, download.PRIORITY_PREFETCH)
+    assert.are.equal(constants.PRIORITY_AUTOPAGE, download.PRIORITY_AUTOPAGE)
+    assert.are.equal(constants.PRIORITY_METADATA, download.PRIORITY_METADATA)
+  end)
+
+  it("enforces 8 req/sec maximum rate with minimum 125ms interval between dispatches", function()
+    local dispatch_times = {}
+    local exit_callbacks = {}
+
+    vim.system = function(cmd, opts, on_exit)
+      table.insert(dispatch_times, uv.hrtime() / 1e6)
+      table.insert(exit_callbacks, on_exit)
+      return { kill = function() end }
+    end
+
+    local dest1 = tmp()
+    local dest2 = tmp()
+    local dest3 = tmp()
+
+    download.download_async("https://example.com/1.jpg", dest1, function() end, { priority = 2 })
+    download.download_async("https://example.com/2.jpg", dest2, function() end, { priority = 2 })
+    download.download_async("https://example.com/3.jpg", dest3, function() end, { priority = 2 })
+
+    -- First task dispatches immediately
+    assert.are.equal(1, #dispatch_times)
+
+    -- Wait for the 2nd and 3rd tasks to dispatch via governor timer
+    vim.wait(400, function() return #dispatch_times >= 3 end, 10)
+
+    assert.are.equal(3, #dispatch_times)
+    local diff1 = dispatch_times[2] - dispatch_times[1]
+    local diff2 = dispatch_times[3] - dispatch_times[2]
+
+    -- Each dispatch must be spaced by at least 125ms (allowing 10ms timing jitter)
+    assert.is_true(diff1 >= 115, string.format("diff1 expected >= 115ms, got %.1fms", diff1))
+    assert.is_true(diff2 >= 115, string.format("diff2 expected >= 115ms, got %.1fms", diff2))
+
+    vim.fn.delete(dest1)
+    vim.fn.delete(dest2)
+    vim.fn.delete(dest3)
+  end)
+
+  it("caps concurrent active network connections at 4 in-flight sockets", function()
+    local spawned = {}
+    local exit_callbacks = {}
+
+    vim.system = function(cmd, opts, on_exit)
+      local url = cmd[#cmd]
+      table.insert(spawned, url)
+      table.insert(exit_callbacks, on_exit)
+      return { kill = function() end }
+    end
+
+    -- Queue 6 tasks
+    for i = 1, 6 do
+      local dest = tmp()
+      download.download_async("https://example.com/item" .. i .. ".jpg", dest, function() end, { priority = 2 })
+    end
+
+    -- Wait enough time for 4 dispatches to occur (t = 0, 125, 250, 375ms)
+    vim.wait(500, function() return #spawned >= 4 end, 10)
+
+    -- Exactly 4 concurrent sockets active; 5th and 6th remain queued
+    assert.are.equal(4, #spawned)
+    assert.are.equal(4, download.governor.active_sockets)
+
+    -- Wait an additional 200ms; 5th task still MUST NOT dispatch while 4 sockets remain active
+    vim.wait(200, function() return false end, 10)
+    assert.are.equal(4, #spawned)
+
+    -- Now complete socket 1
+    local part = tmp() .. ".part"
+    local f = io.open(part, "wb")
+    f:write(string.rep("x", 2048))
+    f:close()
+    exit_callbacks[1]({ code = 0 })
+
+    -- Once a socket completes and minimum interval elapses, task 5 dispatches
+    vim.wait(300, function() return #spawned >= 5 end, 10)
+    assert.are.equal(5, #spawned)
+    assert.are.equal("https://example.com/item5.jpg", spawned[5])
+
+    vim.fn.delete(part)
+  end)
+
+  it("dispatches tasks according to 4 priority levels (P1 > P2 > P3 > P4)", function()
+    local dispatched_urls = {}
+    local exit_callbacks = {}
+
+    vim.system = function(cmd, opts, on_exit)
+      local url = cmd[#cmd]
+      table.insert(dispatched_urls, url)
+      table.insert(exit_callbacks, on_exit)
+      return { kill = function() end }
+    end
+
+    -- Saturate 4 sockets so newly queued items must wait in priority queue
+    for i = 1, 4 do
+      download.download_async("https://example.com/active" .. i .. ".jpg", tmp(), function() end, { priority = 1 })
+    end
+    vim.wait(500, function() return #dispatched_urls >= 4 end, 10)
+    assert.are.equal(4, #dispatched_urls)
+
+    -- Now enqueue in reverse priority order: P4 (metadata), P3 (autopage), P2 (prefetch), P1 (cursor preview)
+    download.curl_async("https://example.com/api/metadata", function() end, { priority = constants.PRIORITY_METADATA })
+    download.curl_async("https://example.com/api/autopage", function() end, { priority = constants.PRIORITY_AUTOPAGE })
+    download.download_async("https://example.com/lookahead.jpg", tmp(), function() end, { priority = constants.PRIORITY_PREFETCH })
+    download.download_async("https://example.com/cursor_preview.jpg", tmp(), function() end, { priority = constants.PRIORITY_PREVIEW })
+
+    -- Complete in-flight sockets one by one to let queued tasks dispatch
+    for i = 1, 4 do
+      exit_callbacks[i]({ code = 0 })
+      vim.wait(200, function() return #dispatched_urls >= 4 + i end, 10)
+    end
+
+    assert.are.equal(8, #dispatched_urls)
+    -- Queued tasks must have dispatched in strict priority order:
+    -- P1 (cursor preview) -> P2 (lookahead prefetch) -> P3 (autopage) -> P4 (metadata)
+    assert.are.equal("https://example.com/cursor_preview.jpg", dispatched_urls[5])
+    assert.are.equal("https://example.com/lookahead.jpg", dispatched_urls[6])
+    assert.are.equal("https://example.com/api/autopage", dispatched_urls[7])
+    assert.are.equal("https://example.com/api/metadata", dispatched_urls[8])
+  end)
+
+  it("escalates queued task priority when a higher-priority request arrives for the same destination", function()
+    local dispatched_urls = {}
+    local exit_callbacks = {}
+
+    vim.system = function(cmd, opts, on_exit)
+      local url = cmd[#cmd]
+      table.insert(dispatched_urls, url)
+      table.insert(exit_callbacks, on_exit)
+      return { kill = function() end }
+    end
+
+    -- Fill 4 active slots
+    for i = 1, 4 do
+      download.download_async("https://example.com/slot" .. i .. ".jpg", tmp(), function() end, { priority = 1 })
+    end
+    vim.wait(500, function() return #dispatched_urls >= 4 end, 10)
+
+    local shared_dest = tmp()
+    local other_dest = tmp()
+
+    -- Enqueue shared_dest as P2 (prefetch)
+    download.download_async("https://example.com/shared.jpg", shared_dest, function() end, { priority = 2 })
+    -- Enqueue other_dest as P2 (prefetch)
+    download.download_async("https://example.com/other.jpg", other_dest, function() end, { priority = 2 })
+
+    -- Now user moves cursor to shared_dest, requesting it as P1 (preview)
+    download.download_async("https://example.com/shared.jpg", shared_dest, function() end, { priority = 1 })
+
+    -- Release a socket slot
+    exit_callbacks[1]({ code = 0 })
+
+    vim.wait(250, function() return #dispatched_urls >= 5 end, 10)
+    assert.are.equal(5, #dispatched_urls)
+    -- shared.jpg should have been upgraded to P1 and dispatched before other.jpg
+    assert.are.equal("https://example.com/shared.jpg", dispatched_urls[5])
+
+    vim.fn.delete(shared_dest)
+    vim.fn.delete(other_dest)
+  end)
+
+  it("releases connection capacity immediately on curl network error or timeout", function()
+    local exit_callbacks = {}
+    local spawned = {}
+
+    vim.system = function(cmd, opts, on_exit)
+      table.insert(spawned, cmd[#cmd])
+      table.insert(exit_callbacks, on_exit)
+      return { kill = function() end }
+    end
+
+    for i = 1, 4 do
+      download.download_async("https://example.com/err" .. i .. ".jpg", tmp(), function() end, { priority = 1 })
+    end
+    vim.wait(500, function() return #spawned >= 4 end, 10)
+
+    local queued_dest = tmp()
+    download.download_async("https://example.com/queued.jpg", queued_dest, function() end, { priority = 1 })
+
+    -- Fail socket 1 with curl error code 28 (timeout)
+    exit_callbacks[1]({ code = 28 })
+
+    -- Connection capacity must be released immediately so queued task can dispatch
+    vim.wait(250, function() return #spawned >= 5 end, 10)
+    assert.are.equal(5, #spawned)
+    assert.are.equal("https://example.com/queued.jpg", spawned[5])
+
+    vim.fn.delete(queued_dest)
+  end)
+
+  it("releases all connection capacity and aborts queued tasks on download.abort_all()", function()
+    local killed_handles = {}
+    vim.system = function(cmd, opts, on_exit)
+      return {
+        kill = function(self, sig)
+          table.insert(killed_handles, sig)
+        end,
+      }
+    end
+
+    -- Fill 4 sockets and queue 2 more
+    for i = 1, 6 do
+      download.download_async("https://example.com/abort" .. i .. ".jpg", tmp(), function() end, { priority = 2 })
+    end
+    vim.wait(500, function() return download.governor.active_sockets >= 4 end, 10)
+
+    assert.are.equal(4, download.governor.active_sockets)
+    assert.is_true(download.governor.queue_count() > 0)
+
+    -- Call abort_all
+    download.abort_all()
+
+    -- Active sockets must be 0 and queue cleared
+    assert.are.equal(0, download.governor.active_sockets)
+    assert.are.equal(0, download.governor.queue_count())
+
+    -- All active handles must have received SIGKILL (9)
+    assert.are.equal(4, #killed_handles)
+    for _, sig in ipairs(killed_handles) do
+      assert.are.equal(9, sig)
+    end
+  end)
+
+  it("cancels queued task when handle:kill() is called before dispatch", function()
+    local spawned = {}
+    vim.system = function(cmd, opts, on_exit)
+      table.insert(spawned, cmd[#cmd])
+      return { kill = function() end }
+    end
+
+    -- Fill 4 slots
+    for i = 1, 4 do
+      download.download_async("https://example.com/fill" .. i .. ".jpg", tmp(), function() end, { priority = 1 })
+    end
+    vim.wait(500, function() return #spawned >= 4 end, 10)
+
+    -- Queue item 5 and item 6
+    local handle5 = download.download_async("https://example.com/kill_before_run.jpg", tmp(), function() end, { priority = 2 })
+    download.download_async("https://example.com/survivor.jpg", tmp(), function() end, { priority = 2 })
+
+    assert.is_not_nil(handle5)
+    -- Kill handle5 while still queued
+    handle5:kill(9)
+
+    -- Reset governor sockets to simulate slot availability
+    download.governor.active_sockets = 0
+    download.governor.last_dispatch_time = 0
+    download.governor.dispatch()
+
+    vim.wait(250, function() return #spawned >= 5 end, 10)
+    -- kill_before_run should have been skipped, and survivor should have dispatched
+    assert.are.equal("https://example.com/survivor.jpg", spawned[#spawned])
   end)
 end)
 
