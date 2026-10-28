@@ -86,7 +86,7 @@ function M.fail_preview(msg, p)
   if p and not is_same_post(State.posts[State.cur], p) then
     return
   end
-  pcall(canvas.close)
+  pcall(canvas.clear)
   pcall(vim.api.nvim_win_set_buf, UI.wins.img, UI.bufs.img)
   util.set_lines(UI.bufs.img, { "", "  [ " .. msg .. " ]" })
   M.set_status(msg, constants.STATUS_TIMEOUT_INDEXER_MS)
@@ -100,6 +100,7 @@ local fail_preview = M.fail_preview
 function M.load_and_render_image(p, opts_or_idx, _, force)
   if not p then return fail_preview("No post selected", nil) end
   resolver.abort_active()
+  pcall(canvas.abort, state.UI.wins.img)
   local opts = type(opts_or_idx) == "table" and opts_or_idx or { force = (opts_or_idx == true or force == true) }
   M.set_status("Loading preview…")
   local epoch = state.State.search_epoch
@@ -108,7 +109,7 @@ function M.load_and_render_image(p, opts_or_idx, _, force)
       return
     end
     if target and target.path and not (target.is_video and not target.is_thumbnail) then
-      if not canvas.render(state.UI.wins.img, target.path) then
+      if not canvas.display(state.UI.wins.img, target.path) then
         fail_preview("Image Conversion Failed - File may be corrupted or unsupported", p)
       else
         if target.width and target.height and (not p.width or p.width <= 0) then

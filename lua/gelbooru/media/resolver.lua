@@ -1,21 +1,40 @@
 local config = require("gelbooru.core.config")
 local constants = require("gelbooru.core.constants")
+local inspector = require("gelbooru.media.inspector")
 local log = require("gelbooru.core.log")
 local state = require("gelbooru.core.state")
+local transcoder = require("gelbooru.media.transcoder")
 local util = require("gelbooru.core.util")
 
 local M = {}
 
-M.VIDEO_EXTS = {
-  ["mp4"] = true,
-  ["webm"] = true,
-  ["avi"] = true,
-  ["mov"] = true,
-  ["mkv"] = true,
-}
-
-M.active_ffmpeg_handles = {}
 M._active_request_id = 0
+
+-- Connect transcoder clean cache hook to scrubber
+transcoder.clean_cache_hook = function(target)
+  M.clean_corrupt_snacks_cache(target)
+end
+
+-- Re-export pure binary inspector functions
+M.read_image_dimensions = inspector.read_image_dimensions
+M.is_image_complete = inspector.is_image_complete
+M.is_info_corrupt = inspector.is_info_corrupt
+M.is_gif_animated = inspector.is_gif_animated
+M.inspect = inspector.inspect
+M.parse_png_dimensions = inspector.parse_png_dimensions
+M.parse_gif_dimensions = inspector.parse_gif_dimensions
+M.parse_webp_dimensions = inspector.parse_webp_dimensions
+M.parse_jpeg_dimensions = inspector.parse_jpeg_dimensions
+
+-- Re-export isolated transcoder functions
+M.VIDEO_EXTS = transcoder.VIDEO_EXTS
+M.is_video_post = transcoder.is_video_post
+M.get_video_thumbnail_path = transcoder.get_video_thumbnail_path
+M.get_saved_video_path = transcoder.get_saved_video_path
+M.abort_video_transcodes = transcoder.abort_video_transcodes
+M.abort_all_ffmpeg = transcoder.abort_all_ffmpeg
+M.extract_video_thumbnail = transcoder.extract_video_thumbnail
+M.transcode_animation_loop = transcoder.transcode_animation_loop
 
 function M.clear_snacks_image_cache()
   local ok, img_mod = pcall(require, "snacks.image.image")
@@ -24,325 +43,6 @@ function M.clear_snacks_image_cache()
   end
 end
 local clear_snacks_image_cache = M.clear_snacks_image_cache
-
---------------------------------------------------------------------------------
--- Binary Image Parsing & Format Completion Validation
---------------------------------------------------------------------------------
-
-local function parse_png_dimensions(f)
-  f:seek("set", 0)
-  local data = f:read(24)
-  if not data or #data < 24 then
-    return nil, nil
-  end
-  local b1, b2, b3, b4, b5, b6, b7, b8 = string.byte(data, 1, 8)
-  if b1 ~= 137 or b2 ~= 80 or b3 ~= 78 or b4 ~= 71 or b5 ~= 13 or b6 ~= 10 or b7 ~= 26 or b8 ~= 10 then
-    return nil, nil
-  end
-  local ctype = data:sub(13, 16)
-  if ctype ~= "IHDR" then
-    return nil, nil
-  end
-  local w1, w2, w3, w4, h1, h2, h3, h4 = string.byte(data, 17, 24)
-  local w = w1 * 16777216 + w2 * 65536 + w3 * 256 + w4
-  local h = h1 * 16777216 + h2 * 65536 + h3 * 256 + h4
-  if w > 0 and h > 0 then
-    return w, h
-  end
-  return nil, nil
-end
-
-local function parse_gif_dimensions(f)
-  f:seek("set", 0)
-  local data = f:read(10)
-  if not data or #data < 10 then
-    return nil, nil
-  end
-  local sig = data:sub(1, 6)
-  if sig ~= "GIF87a" and sig ~= "GIF89a" then
-    return nil, nil
-  end
-  local w1, w2, h1, h2 = string.byte(data, 7, 10)
-  local w = w1 + w2 * 256
-  local h = h1 + h2 * 256
-  if w > 0 and h > 0 then
-    return w, h
-  end
-  return nil, nil
-end
-
-local function parse_webp_dimensions(f)
-  f:seek("set", 0)
-  local head = f:read(12)
-  if not head or #head < 12 then
-    return nil, nil
-  end
-  if head:sub(1, 4) ~= "RIFF" or head:sub(9, 12) ~= "WEBP" then
-    return nil, nil
-  end
-
-  local offset = 12
-  local max_chunks = constants.MAX_WEBP_CHUNKS or 32
-  while max_chunks > 0 do
-    max_chunks = max_chunks - 1
-    f:seek("set", offset)
-    local chunk_hdr = f:read(8)
-    if not chunk_hdr or #chunk_hdr < 8 then
-      return nil, nil
-    end
-    local fourcc = chunk_hdr:sub(1, 4)
-    local s1, s2, s3, s4 = string.byte(chunk_hdr, 5, 8)
-    local chunk_size = s1 + s2 * 256 + s3 * 65536 + s4 * 16777216
-    if chunk_size < 0 then
-      return nil, nil
-    end
-
-    if fourcc == "VP8 " then
-      local payload = f:read(10)
-      if not payload or #payload < 10 then
-        return nil, nil
-      end
-      local sc1, sc2, sc3 = string.byte(payload, 4, 6)
-      if sc1 ~= 157 or sc2 ~= 1 or sc3 ~= 42 then
-        return nil, nil
-      end
-      local w1, w2, h1, h2 = string.byte(payload, 7, 10)
-      local w = (w1 + w2 * 256) % 16384
-      local h = (h1 + h2 * 256) % 16384
-      if w > 0 and h > 0 then
-        return w, h
-      end
-      return nil, nil
-    elseif fourcc == "VP8L" then
-      local payload = f:read(5)
-      if not payload or #payload < 5 then
-        return nil, nil
-      end
-      local sig, b0, b1, b2, b3 = string.byte(payload, 1, 5)
-      if sig ~= 47 then
-        return nil, nil
-      end
-      local w = (b0 + (b1 % 64) * 256) + 1
-      local h = (math.floor(b1 / 64) + b2 * 4 + (b3 % 16) * 1024) + 1
-      if w > 0 and h > 0 then
-        return w, h
-      end
-      return nil, nil
-    elseif fourcc == "VP8X" then
-      local payload = f:read(10)
-      if not payload or #payload < 10 then
-        return nil, nil
-      end
-      local w1, w2, w3, h1, h2, h3 = string.byte(payload, 5, 10)
-      local w = (w1 + w2 * 256 + w3 * 65536) + 1
-      local h = (h1 + h2 * 256 + h3 * 65536) + 1
-      if w > 0 and h > 0 then
-        return w, h
-      end
-      return nil, nil
-    else
-      local pad = (chunk_size % 2 == 1) and 1 or 0
-      offset = offset + 8 + chunk_size + pad
-    end
-  end
-  return nil, nil
-end
-
-local function parse_jpeg_dimensions(f)
-  f:seek("set", 0)
-  local soi = f:read(2)
-  if not soi or #soi < 2 then
-    return nil, nil
-  end
-  local b1, b2 = string.byte(soi, 1, 2)
-  if b1 ~= 255 or b2 ~= 216 then
-    return nil, nil
-  end
-
-  local max_markers = constants.MAX_JPEG_MARKERS or 256
-  while max_markers > 0 do
-    local byte = f:read(1)
-    if not byte then
-      return nil, nil
-    end
-    local m = string.byte(byte)
-    if m == 255 then
-      max_markers = max_markers - 1
-      while true do
-        local next_b = f:read(1)
-        if not next_b then
-          return nil, nil
-        end
-        m = string.byte(next_b)
-        if m ~= 255 then
-          break
-        end
-      end
-
-      if m == 0 or m == 255 then
-        -- 0x00 is escaped 0xFF; continue scanning
-      elseif m == 217 or m == 218 then
-        -- 0xD9 (EOI) or 0xDA (SOS) reached before SOF marker
-        return nil, nil
-      elseif (m >= 192 and m <= 195) or (m >= 197 and m <= 199) or (m >= 201 and m <= 203) or (m >= 205 and m <= 207) then
-        -- SOF0-SOF3, SOF5-SOF7, SOF9-SOF11, SOF13-SOF15
-        local hdr = f:read(7)
-        if not hdr or #hdr < 7 then
-          return nil, nil
-        end
-        local l1, l2, prec, h1, h2, w1, w2 = string.byte(hdr, 1, 7)
-        local h = h1 * 256 + h2
-        local w = w1 * 256 + w2
-        if w > 0 and h > 0 then
-          return w, h
-        end
-        return nil, nil
-      elseif m == 1 or (m >= 208 and m <= 215) then
-        -- TEM (0x01) or RST0-RST7 (0xD0-0xD7) have no payload length
-      else
-        local len_bytes = f:read(2)
-        if not len_bytes or #len_bytes < 2 then
-          return nil, nil
-        end
-        local l1, l2 = string.byte(len_bytes, 1, 2)
-        local seg_len = l1 * 256 + l2
-        if seg_len < 2 then
-          return nil, nil
-        end
-        local seek_res = f:seek("cur", seg_len - 2)
-        if not seek_res then
-          return nil, nil
-        end
-      end
-    end
-  end
-  return nil, nil
-end
-
-local function parse_dimensions(f)
-  local magic = f:read(4)
-  if not magic or #magic < 4 then
-    return nil, nil
-  end
-
-  local b1, b2, b3, b4 = string.byte(magic, 1, 4)
-  if b1 == 137 and b2 == 80 and b3 == 78 and b4 == 71 then
-    return parse_png_dimensions(f)
-  elseif magic:sub(1, 3) == "GIF" then
-    return parse_gif_dimensions(f)
-  elseif magic == "RIFF" then
-    return parse_webp_dimensions(f)
-  elseif b1 == 255 and b2 == 216 then
-    return parse_jpeg_dimensions(f)
-  end
-
-  return nil, nil
-end
-
-function M.read_image_dimensions(path)
-  if not path or type(path) ~= "string" or path == "" then
-    return nil, nil
-  end
-  local f = io.open(path, "rb")
-  if not f then
-    return nil, nil
-  end
-
-  local ok, w, h = pcall(parse_dimensions, f)
-  f:close()
-  if ok and w and h and w > 0 and h > 0 then
-    return w, h
-  end
-  return nil, nil
-end
-
-function M.is_image_complete(path)
-  if not path or type(path) ~= "string" or path == "" then
-    return false
-  end
-  local sz = vim.fn.getfsize(path)
-  if not sz or sz <= 0 then
-    return false
-  end
-  local f = io.open(path, "rb")
-  if not f then
-    return false
-  end
-
-  local head = f:read(16) or ""
-  local hlen = #head
-  if hlen < 4 then
-    f:close()
-    return false
-  end
-
-  local lower_head = head:lower()
-  if lower_head:find("<!doctype", 1, true)
-    or lower_head:find("<html", 1, true)
-    or lower_head:find("<?xml", 1, true) then
-    f:close()
-    return false
-  end
-
-  local b1, b2, b3, b4 = string.byte(head, 1, 4)
-
-  -- PNG: 8-byte signature (\137PNG\r\n\026\n) and IEND chunk in the last 64 bytes
-  if b1 == 137 and b2 == 80 and b3 == 78 and b4 == 71 then
-    if hlen < 8 or head:sub(1, 8) ~= "\137PNG\r\n\026\n" or sz < 36 then
-      f:close()
-      return false
-    end
-    local seek_back = math.min(sz, 64)
-    f:seek("end", -seek_back)
-    local tail = f:read(seek_back) or ""
-    f:close()
-    return tail:find("IEND", 1, true) ~= nil
-  end
-
-  -- JPEG: SOI (\255\216) and EOI (\255\217) in the last 128 bytes
-  if b1 == 255 and b2 == 216 then
-    if sz < 4 then
-      f:close()
-      return false
-    end
-    local seek_back = math.min(sz, 128)
-    f:seek("end", -seek_back)
-    local tail = f:read(seek_back) or ""
-    f:close()
-    return tail:find("\255\217", 1, true) ~= nil
-  end
-
-  -- GIF: GIF87a / GIF89a header and trailer ';' (0x3B)
-  if head:sub(1, 3) == "GIF" then
-    if hlen < 6 or (head:sub(1, 6) ~= "GIF87a" and head:sub(1, 6) ~= "GIF89a") or sz < 6 then
-      f:close()
-      return false
-    end
-    local seek_back = math.min(sz, 4)
-    f:seek("end", -seek_back)
-    local tail = f:read(seek_back) or ""
-    f:close()
-    return tail:find(";", 1, true) ~= nil
-  end
-
-  -- WebP: RIFF header, WEBP fourcc at bytes 9-12, declared payload size
-  if head:sub(1, 4) == "RIFF" then
-    if hlen < 12 or head:sub(9, 12) ~= "WEBP" then
-      f:close()
-      return false
-    end
-    local s1, s2, s3, s4 = string.byte(head, 5, 8)
-    local riff_len = s1 + s2 * 256 + s3 * 65536 + s4 * 16777216
-    f:close()
-    return sz >= (riff_len + 8)
-  end
-
-  f:close()
-
-  -- Fallback for unhandled/other formats: validate dimensions
-  local w, h = M.read_image_dimensions(path)
-  return (w ~= nil and h ~= nil and w > 0 and h > 0)
-end
 
 --------------------------------------------------------------------------------
 -- URL & Post Classification Helpers
@@ -355,17 +55,6 @@ function M.file_ext_from_url(url)
   local clean = url:match("^([^?#]+)") or url
   local ext = clean:match("%.([%w_]+)$")
   return (ext and ext ~= "") and ext:lower() or "jpg"
-end
-
-function M.is_video_post(p)
-  if not p then
-    return false
-  end
-  if p.is_video == true then
-    return true
-  end
-  local ext = M.file_ext_from_url(p.file_url)
-  return M.VIDEO_EXTS[ext] == true
 end
 
 function M.preview_source_name(p, url)
@@ -495,7 +184,16 @@ function M.get_preview_targets(p, url_idx)
       table.insert(candidates, p.sample_url)
     end
   else
-    candidates = { p.sample_url, p.preview_url, p.file_url }
+    candidates = {}
+    if p.sample_url and p.sample_url ~= "" then
+      table.insert(candidates, p.sample_url)
+    end
+    if p.preview_url and p.preview_url ~= "" then
+      table.insert(candidates, p.preview_url)
+    end
+    if p.file_url and p.file_url ~= "" then
+      table.insert(candidates, p.file_url)
+    end
   end
   for i = 1, #candidates do
     local u = candidates[i]
@@ -538,219 +236,6 @@ function M.resolve_post_dimensions(p, opt_path)
 end
 
 --------------------------------------------------------------------------------
--- Video Thumbnailing & Transcoder Lifecycle
---------------------------------------------------------------------------------
-
-function M.get_video_thumbnail_path(video_path, post_id)
-  local cache_dir = config.options.cache_dir
-  local id_key = (post_id and tostring(post_id) ~= "" and tostring(post_id) ~= "nil")
-    and tostring(post_id)
-    or (video_path and video_path:match("([^/]+)%.%w+$") or "temp")
-  return string.format("%s/vthumb_%s.jpg", cache_dir, id_key)
-end
-
-function M.get_saved_video_path(post_id)
-  if not post_id or tostring(post_id) == "" or tostring(post_id) == "nil" then
-    return nil
-  end
-  local save_dir = config.options.save_dir and vim.fn.expand(config.options.save_dir)
-  if not save_dir or save_dir == "" then
-    return nil
-  end
-  local State = state.State
-  local local_index = require("gelbooru.local.index")
-  local num_id = tonumber(post_id)
-  local saved_ext = num_id and State and State.saved_index and State.saved_index[num_id]
-  if not saved_ext and local_index.update_saved_index then
-    local idx = local_index.update_saved_index()
-    saved_ext = num_id and idx and idx[num_id]
-  end
-  if saved_ext and M.VIDEO_EXTS[saved_ext] then
-    local candidate = string.format("%s/%s.%s", save_dir, tostring(post_id), saved_ext)
-    if vim.fn.filereadable(candidate) == 1 then
-      return candidate
-    end
-  end
-  for ext in pairs(M.VIDEO_EXTS) do
-    local candidate = string.format("%s/%s.%s", save_dir, tostring(post_id), ext)
-    if vim.fn.filereadable(candidate) == 1 then
-      return candidate
-    end
-  end
-  return nil
-end
-
-M._ffmpeg_thumb_dests = {}
-M._aborted_handles = {}
-
-function M.abort_video_transcodes()
-  for h in pairs(M.active_ffmpeg_handles or {}) do
-    if h then
-      if M._aborted_handles then
-        M._aborted_handles[h] = true
-      end
-      pcall(function() h._aborted = true end)
-      if h.kill then
-        pcall(h.kill, h, constants.SIGKILL or 9)
-      end
-      local tdest = (M._ffmpeg_thumb_dests and M._ffmpeg_thumb_dests[h]) or h.thumb_dest
-      local tpart = (h and h.thumb_part) or (tdest and (tdest .. ".part"))
-      if tpart and vim.fn.filereadable(tpart) == 1 then
-        pcall(vim.fn.delete, tpart)
-      end
-      if tdest and vim.fn.filereadable(tdest) == 1 then
-        local sz = vim.fn.getfsize(tdest) or 0
-        if sz <= constants.MIN_VALID_VIDEO_THUMB_BYTES or not M.is_image_complete(tdest) then
-          pcall(vim.fn.delete, tdest)
-          M.clean_corrupt_snacks_cache(tdest)
-        end
-      end
-    end
-  end
-  M.active_ffmpeg_handles = {}
-  M._ffmpeg_thumb_dests = {}
-end
-M.abort_all_ffmpeg = M.abort_video_transcodes
-
-function M.extract_video_thumbnail(video_path, post_or_id, cb)
-  local post = type(post_or_id) == "table" and post_or_id or nil
-  local post_id = post and post.id or post_or_id
-
-  if post_id then
-    local cached_thumb = M.get_video_thumbnail_path(video_path, post_id)
-    if vim.fn.filereadable(cached_thumb) == 1 then
-      if (vim.fn.getfsize(cached_thumb) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES and M.is_image_complete(cached_thumb) then
-        if cb then cb(cached_thumb) end
-        return
-      else
-        pcall(vim.fn.delete, cached_thumb)
-        M.clean_corrupt_snacks_cache(cached_thumb)
-      end
-    end
-  end
-
-  local vpath = video_path
-  if (not vpath or vim.fn.filereadable(vpath) == 0 or vpath:match("%.jpg$") or vpath:match("vthumb_")) and post_id then
-    local found = nil
-    if post and post.file_url and vim.fn.filereadable(post.file_url) == 1 then
-      found = post.file_url
-    end
-    if not found then
-      found = M.get_saved_video_path(post_id)
-    end
-    if found then
-      vpath = found
-    elseif vpath and (vpath:match("%.jpg$") or vpath:match("vthumb_")) then
-      vpath = nil
-    end
-  end
-
-  if not vpath or vpath:match("%.part$") or vpath:match("%.jpg$") or vpath:match("vthumb_")
-    or vim.fn.filereadable(vpath) == 0 or (vim.fn.getfsize(vpath) or 0) <= 0 then
-    if cb then cb(nil) end
-    return
-  end
-
-  local thumb_dest = M.get_video_thumbnail_path(vpath, post_id)
-  if vim.fn.filereadable(thumb_dest) == 1 then
-    if (vim.fn.getfsize(thumb_dest) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES and M.is_image_complete(thumb_dest) then
-      if cb then cb(thumb_dest) end
-      return
-    else
-      pcall(vim.fn.delete, thumb_dest)
-      M.clean_corrupt_snacks_cache(thumb_dest)
-    end
-  end
-
-  if vim.fn.executable("ffmpeg") ~= 1 then
-    if cb then cb(nil) end
-    return
-  end
-
-  util.ensure(config.options.cache_dir)
-
-  local temp_part = thumb_dest .. ".part"
-  local handle = nil
-  local done = false
-  local spawn_ok, res = pcall(function()
-    return vim.system({
-      "ffmpeg",
-      "-ss",
-      "00:00:01",
-      "-i",
-      vpath,
-      "-frames:v",
-      "1",
-      "-q:v",
-      "2",
-      temp_part,
-      "-y",
-    }, {}, function(out)
-      done = true
-      local was_aborted = (handle and M._aborted_handles and M._aborted_handles[handle])
-        or (handle and handle._aborted)
-      if handle then
-        M.active_ffmpeg_handles[handle] = nil
-        if M._ffmpeg_thumb_dests then
-          M._ffmpeg_thumb_dests[handle] = nil
-        end
-      end
-      vim.schedule(function()
-        if state.State.torn_down or was_aborted or (handle and handle._aborted) then
-          if vim.fn.filereadable(temp_part) == 1 then
-            pcall(vim.fn.delete, temp_part)
-          end
-          if vim.fn.filereadable(thumb_dest) == 1 and ((vim.fn.getfsize(thumb_dest) or 0) <= constants.MIN_VALID_VIDEO_THUMB_BYTES or not M.is_image_complete(thumb_dest)) then
-            pcall(vim.fn.delete, thumb_dest)
-            M.clean_corrupt_snacks_cache(thumb_dest)
-          end
-          return
-        end
-        if handle then
-          M.active_ffmpeg_handles[handle] = nil
-          if M._ffmpeg_thumb_dests then
-            M._ffmpeg_thumb_dests[handle] = nil
-          end
-        end
-        if out.code == 0 and vim.fn.filereadable(temp_part) == 1 and (vim.fn.getfsize(temp_part) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES and M.is_image_complete(temp_part) then
-          local ren_ok = os.rename(temp_part, thumb_dest)
-          if ren_ok then
-            if cb then cb(thumb_dest) end
-            return
-          end
-        end
-        if vim.fn.filereadable(temp_part) == 1 then
-          pcall(vim.fn.delete, temp_part)
-        end
-        if vim.fn.filereadable(thumb_dest) == 1 and ((vim.fn.getfsize(thumb_dest) or 0) <= constants.MIN_VALID_VIDEO_THUMB_BYTES or not M.is_image_complete(thumb_dest)) then
-          pcall(vim.fn.delete, thumb_dest)
-          M.clean_corrupt_snacks_cache(thumb_dest)
-        end
-        if cb then cb(nil) end
-      end)
-    end)
-  end)
-
-  if not spawn_ok or not res then
-    if cb then cb(nil) end
-    return nil
-  end
-
-  handle = res
-  pcall(function()
-    handle.thumb_dest = thumb_dest
-    handle.thumb_part = temp_part
-  end)
-  if M._ffmpeg_thumb_dests then
-    M._ffmpeg_thumb_dests[handle] = thumb_dest
-  end
-  if handle and not done then
-    M.active_ffmpeg_handles[handle] = handle
-  end
-  return handle
-end
-
---------------------------------------------------------------------------------
 -- Snacks Cache Forensics & Corruption Scrubbing
 --------------------------------------------------------------------------------
 
@@ -782,19 +267,6 @@ local function sanitize_base_candidates(name)
   end
   return bases
 end
-
-local function is_info_corrupt(content)
-  if not content or content == "" then
-    return true
-  end
-  local c = content:lower()
-  return c:find("identify:") ~= nil
-    or c:find("improper") ~= nil
-    or c:find("error") ~= nil
-    or c:find("failed") ~= nil
-    or c:find("corrupt") ~= nil
-end
-M.is_info_corrupt = is_info_corrupt
 
 function M.find_snacks_cache_candidates(target)
   if not target or target == "" or tostring(target) == "nil" then
@@ -891,92 +363,11 @@ function M.find_snacks_cache_candidates(target)
 end
 
 function M.clean_corrupt_snacks_cache(target)
-  if not target or target == "" or tostring(target) == "nil" then
-    return
+  local ok_c, canvas = pcall(require, "gelbooru.ui.canvas")
+  if ok_c and canvas and type(canvas.clean_cache) == "function" then
+    return canvas.clean_cache(target)
   end
-  local candidate_files = M.find_snacks_cache_candidates(target)
-  local any_cleaned = false
-  for _, f in ipairs(candidate_files) do
-    if vim.fn.filereadable(f) == 1 and not M.is_in_save_dir(f) then
-      local size = vim.fn.getfsize(f) or 0
-      local is_corrupt = false
-      if size <= 0 then
-        is_corrupt = true
-      elseif f:match("%.info$") then
-        local lines = vim.fn.readfile(f)
-        local content = vim.trim(table.concat(lines or {}, " "))
-        if is_info_corrupt(content) then
-          is_corrupt = true
-        end
-      else
-        local fd = io.open(f, "rb")
-        if fd then
-          local head = fd:read(64) or ""
-          fd:close()
-          local lhead = head:lower()
-          if lhead:find("identify:")
-            or lhead:find("improper")
-            or lhead:find("<!doctype")
-            or lhead:find("<html") then
-            is_corrupt = true
-          end
-        end
-
-        if not is_corrupt then
-          local w, h = M.read_image_dimensions(f)
-          if not (w and h and w > 0 and h > 0) then
-            is_corrupt = true
-          end
-        end
-
-        if not is_corrupt and not M.is_image_complete(f) then
-          is_corrupt = true
-        end
-
-        local info_file = f .. ".info"
-        if not is_corrupt and vim.fn.filereadable(info_file) == 1 then
-          local isz = vim.fn.getfsize(info_file) or 0
-          if isz <= 0 then
-            is_corrupt = true
-          else
-            local lines = vim.fn.readfile(info_file)
-            local content = vim.trim(table.concat(lines or {}, " "))
-            if is_info_corrupt(content) then
-              is_corrupt = true
-            end
-          end
-        end
-      end
-
-      if is_corrupt then
-        any_cleaned = true
-        pcall(vim.fn.delete, f)
-        if not f:match("%.info$") then
-          local info_file = f .. ".info"
-          if vim.fn.filereadable(info_file) == 1 and not M.is_in_save_dir(info_file) then
-            pcall(vim.fn.delete, info_file)
-          end
-        else
-          local img_file = f:gsub("%.info$", "")
-          if vim.fn.filereadable(img_file) == 1 and not M.is_in_save_dir(img_file) then
-            local isz = vim.fn.getfsize(img_file) or 0
-            if isz <= 0 then
-              pcall(vim.fn.delete, img_file)
-            else
-              local iw, ih = M.read_image_dimensions(img_file)
-              if not (iw and ih and iw > 0 and ih > 0) or not M.is_image_complete(img_file) then
-                pcall(vim.fn.delete, img_file)
-              end
-            end
-          end
-        end
-      end
-    end
-  end
-
-  if any_cleaned then
-    clear_snacks_image_cache()
-  end
+  return false
 end
 
 function M.clear_snacks_cache_for(post_id_or_path)
@@ -1044,10 +435,6 @@ end
 function M.abort_active()
   M._active_request_id = (M._active_request_id or 0) + 1
   M.abort_video_transcodes()
-  local ok_c, canvas = pcall(require, "gelbooru.ui.canvas")
-  if ok_c and canvas and type(canvas.close) == "function" then
-    pcall(canvas.close)
-  end
 end
 
 local function handle_video_thumb_result(req_id, post, fallback_path, tpath, callback)
@@ -1316,5 +703,37 @@ function M.resolve(post, opts, callback)
 
   try_candidate(1)
 end
+
+setmetatable(M, {
+  __index = function(_, k)
+    if k == "active_ffmpeg_handles" then
+      return transcoder.active_ffmpeg_handles
+    end
+    if k == "_ffmpeg_thumb_dests" then
+      return transcoder._ffmpeg_thumb_dests
+    end
+    if k == "_aborted_handles" then
+      return transcoder._aborted_handles
+    end
+    return transcoder[k] or inspector[k]
+  end,
+  __newindex = function(_, k, v)
+    if k == "active_ffmpeg_handles" then
+      transcoder.active_ffmpeg_handles = v
+      transcoder.active_handles = v
+      return
+    end
+    if k == "_ffmpeg_thumb_dests" then
+      transcoder._ffmpeg_thumb_dests = v
+      transcoder._thumb_dests = v
+      return
+    end
+    if k == "_aborted_handles" then
+      transcoder._aborted_handles = v
+      return
+    end
+    rawset(M, k, v)
+  end,
+})
 
 return M

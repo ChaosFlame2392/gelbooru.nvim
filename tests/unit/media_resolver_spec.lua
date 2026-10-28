@@ -878,7 +878,7 @@ describe("lua.gelbooru.media.resolver", function()
       assert.are.equal(1080, cb_res.height)
     end)
 
-    it("abort_active calls canvas.close() to abort active placement conversions", function()
+    it("abort_active aborts video transcodes and increments request id without upward canvas dependency", function()
       local canvas = require("gelbooru.ui.canvas")
       local orig_close = canvas.close
       local close_called = false
@@ -886,9 +886,20 @@ describe("lua.gelbooru.media.resolver", function()
         close_called = true
       end
 
+      local orig_abort_transcodes = resolver.abort_video_transcodes
+      local abort_transcodes_called = false
+      resolver.abort_video_transcodes = function()
+        abort_transcodes_called = true
+      end
+
+      local prev_req_id = resolver._active_request_id or 0
       resolver.abort_active()
       canvas.close = orig_close
-      assert.is_true(close_called, "abort_active must call canvas.close()")
+      resolver.abort_video_transcodes = orig_abort_transcodes
+
+      assert.is_false(close_called, "abort_active must not call canvas.close() (presentation responsibility)")
+      assert.is_true(abort_transcodes_called, "abort_active must call abort_video_transcodes()")
+      assert.are.equal(prev_req_id + 1, resolver._active_request_id)
     end)
 
     it("is_info_corrupt accurately identifies corrupt content", function()

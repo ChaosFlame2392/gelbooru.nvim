@@ -1723,7 +1723,7 @@ describe("Integration: Local Folder Browser Mode", function()
         local p = string.format("%s/item_%02d.jpg", prewarm_dir, i)
         local f = io.open(p, "wb")
         if f then
-          f:write(string.rep("Z", 2048))
+          f:write(string.char(0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x01, 0x00, 0x01, 0x00, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00) .. string.rep("Z", 2048) .. string.char(0xFF, 0xD9))
           f:close()
         end
       end
@@ -1739,22 +1739,17 @@ describe("Integration: Local Folder Browser Mode", function()
       assert.are.equal(10, #state.State.posts)
       assert.are.equal(1, state.State.cur)
 
-      -- Verify that mock_snacks has received convert calls for the initial posts
-      vim.wait(1000, function() return #mock_snacks.conversions_run >= 5 end, 20)
-      assert.is_true(#mock_snacks.conversions_run >= 5)
+      -- Verify that initial posts have been prewarmed/verified ready
+      vim.wait(1000, function() return prewarmer.is_prewarmed(state.State.posts[1].file_url) end, 20)
 
-      local warmed_srcs = {}
-      for _, c in ipairs(mock_snacks.conversions_run) do
-        warmed_srcs[c.src] = true
-      end
       for i = 1, 5 do
-        assert.is_true(warmed_srcs[state.State.posts[i].file_url] == true)
+        assert.is_true(prewarmer.is_prewarmed(state.State.posts[i].file_url) == true)
       end
     end)
 
     it("navigating with j kicks off background prewarming for upcoming images in scroll direction", function()
       ui.open_local(prewarm_dir)
-      vim.wait(1000, function() return #mock_snacks.conversions_run >= 5 end, 20)
+      vim.wait(1000, function() return prewarmer.is_prewarmed(state.State.posts[1].file_url) end, 20)
 
       -- Navigate down with j
       local keymaps = require("gelbooru.ui.keymaps")
@@ -1765,19 +1760,10 @@ describe("Integration: Local Folder Browser Mode", function()
 
       -- Lookahead should now prewarm up to post 7
       vim.wait(1000, function()
-        for _, c in ipairs(mock_snacks.conversions_run) do
-          if c.src == state.State.posts[7].file_url then
-            return true
-          end
-        end
-        return false
+        return prewarmer.is_prewarmed(state.State.posts[7].file_url)
       end, 20)
 
-      local warmed_srcs = {}
-      for _, c in ipairs(mock_snacks.conversions_run) do
-        warmed_srcs[c.src] = true
-      end
-      assert.is_true(warmed_srcs[state.State.posts[7].file_url] == true)
+      assert.is_true(prewarmer.is_prewarmed(state.State.posts[7].file_url) == true)
     end)
 
     it("extracts and caches video thumbnails ahead of time for local video files", function()

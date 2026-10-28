@@ -14,7 +14,7 @@ This document is the primary technical reference and architectural specification
 - **Offline Booru Metadata Enrichment**: Enriches locally saved images and videos with live Gelbooru post metadata, tags, ratings, and artist categorization via fast ID extraction and disk caching.
 - **In-Editor Image Rendering**: Leverages `snacks.image` (supporting Kitty graphics protocol, Ghostty, Wezterm, and terminal pixel renderers) to display high-resolution post previews inside floating windows. Includes video detection, local disk caching, prefetching, and fallback chains.
 - **Interactive Multi-Window UI**: Floating layout featuring a top search bar, live autocomplete dropdown, scrollable post list, full image canvas, expandable metadata inspector, and status line.
-- **Zero Heavy Runtime Dependencies**: Pure Lua codebase requiring only Neovim (>= 0.9.0), system `curl`, and an image backend (`snacks.nvim` or `image.nvim`).
+- **Zero Heavy Runtime Dependencies**: Pure Lua codebase requiring only Neovim (>= 0.9.0), system `curl`, and an image backend (`snacks.nvim` or native Kitty graphics).
 
 ---
 
@@ -159,7 +159,9 @@ gelbooru.nvim/
     │   ├── indexer.lua               # Dual-tier cursor rush prefetcher & background metadata indexer
     │   └── scan.lua                  # Fast & safe directory scanner & post ID extractor
     ├── media/
-    │   └── resolver.lua              # Headless media resolver, binary validation, video thumbnails, caching
+    │   ├── inspector.lua             # Pure binary header parser (PNG, GIF, WebP, JPEG), animation & integrity inspector
+    │   ├── resolver.lua              # Headless media resolver, candidate fallback, and cache scrubber
+    │   └── transcoder.lua            # Asynchronous FFmpeg video thumbnailing & process lifecycle manager
     ├── net/
     │   ├── init.lua                  # Facade re-exporting API and download submodules
     │   ├── api.lua                   # Gelbooru REST client, query execution, metadata hydration
@@ -260,8 +262,14 @@ Thin facade (145 lines) providing a unified public entry point and backwards-com
 #### `lua/gelbooru/ui/autocomplete.lua`
 Real-time tag autocompletion engine: cursor-column token extraction, sub-3ms lookup using first-character bucket tables, empty token protection, popularity-weighted candidate scoring, category badge formatting, and context-aware scoping (suppressing `local_only` sorting tags in online queries with zero keystroke lag).
 
+#### `lua/gelbooru/media/inspector.lua`
+Pure, side-effect-free binary inspection module: dedicated to fast (<0.02ms) byte-level header parsing and integrity verification for PNG, GIF (GIF87a/89a), WebP (VP8/VP8L/VP8X), and JPEG (SOF0/SOF2). Evaluates multi-frame GIF animations (`is_gif_animated`) while avoiding false positives on static GIFs via LZW sub-block skipping, detects conversion corruption strings (`is_info_corrupt`), and returns structured image details (`inspect`). Operates with zero child processes and zero window/buffer dependencies.
+
+#### `lua/gelbooru/media/transcoder.lua`
+Asynchronous video transcoding and process lifecycle manager: encapsulates OS child processes (`ffmpeg`) for single-frame thumbnail extraction (`extract_video_thumbnail`), deterministic active handle tracking (`active_ffmpeg_handles`), and SIGKILL process termination with partial file cleanup (`abort_video_transcodes`). Provides a clean extension seam for future video animation loops (`transcode_animation_loop`) and wires corrupt thumbnail cleanup hooks.
+
 #### `lua/gelbooru/media/resolver.lua`
-Headless media resolution and validation engine: handles URL hierarchy resolution (`sample_url` -> `preview_url` -> `file_url`), pure Lua binary header dimension extraction (`read_image_dimensions` for PNG, JPEG, GIF, WebP), binary format completion verification (`is_image_complete`), background video thumbnail extraction (`extract_video_thumbnail`) with atomic `.part` writing and active process tracking (`active_ffmpeg_handles`), volatile cache purging (`clear_cache`, `clear_snacks_cache_for`), and clean job cancellation (`abort_active`, `abort_video_transcodes`).
+Headless media resolution and cache scrubbing facade: orchestrates URL hierarchy resolution (`sample_url` -> `preview_url` -> `file_url`), delegates pure binary dimension and format verification to `media.inspector`, delegates video thumbnailing and process management to `media.transcoder` while preserving 100% backwards compatibility and `active_ffmpeg_handles` table identity, handles volatile preview cache purging (`clear_cache`, `clear_snacks_cache_for`), and coordinates request cancellation (`abort_active`).
 
 #### `lua/gelbooru/ui/canvas.lua`
 Terminal canvas adapter: placement creation and lifecycle isolation using `snacks.image.placement`, corrupt/extreme DPI header sanitization (`sanitize_dpi` clamping `>= 300` and `< 50` to standard 96 DPI), immediate in-flight conversion abortion (`abort_convert` -> `img._convert:abort()`), text/video placeholder rendering (`render_placeholder`), in-place placement resize nudging (`nudge`), placement teardown (`close`), and defensive buffer keymap shielding.

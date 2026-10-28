@@ -50,7 +50,7 @@ function M.teardown()
   pcall(download.abort_all)
   download.pending_resumes = {}
   pcall(resolver.abort_video_transcodes)
-  pcall(canvas.close)
+  pcall(canvas.clear)
 
   -- Execute deferred deletions on disk now that Gelbooru UI is tearing down.
   if State.pending_deletions then

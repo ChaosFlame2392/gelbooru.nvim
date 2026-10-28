@@ -13,6 +13,11 @@ M.PRIORITY_PREFETCH = constants.PRIORITY_PREFETCH
 M.PRIORITY_AUTOPAGE = constants.PRIORITY_AUTOPAGE
 M.PRIORITY_METADATA = constants.PRIORITY_METADATA
 
+M.TIER_URGENT = constants.TIER_URGENT or 1
+M.TIER_LOOKAHEAD = constants.TIER_LOOKAHEAD or 2
+M.TIER_THUMBNAIL = constants.TIER_THUMBNAIL or 3
+M.TIER_INDEXER = constants.TIER_INDEXER or 4
+
 M.RATE_LIMIT_RPS = constants.RATE_LIMIT_RPS
 M.RATE_LIMIT_MIN_INTERVAL_MS = constants.RATE_LIMIT_MIN_INTERVAL_MS
 M.RATE_LIMIT_MAX_CONCURRENT_SOCKETS = constants.RATE_LIMIT_MAX_CONCURRENT_SOCKETS
@@ -326,34 +331,46 @@ function M.reorder_prefetch_queue(cur_idx, dir)
   governor.reorder_prefetch(cur_idx, dir)
 end
 
-function governor.prune_prefetch(cur_idx, window)
-  window = window or constants.PREWARM_SLIDING_WINDOW
+function governor.prune_tasks(cur_idx, window)
+  window = window or constants.PREWARM_SLIDING_WINDOW or 10
   cur_idx = cur_idx or 1
-  local q = governor.queues[constants.PRIORITY_PREFETCH]
-  if not q then return end
-
-  local i = 1
-  while i <= #q do
-    local task = q[i]
-    if task.post_idx and math.abs(task.post_idx - cur_idx) > window then
-      table.remove(q, i)
-      task.killed = true
-      if task.handle then
-        task.handle.killed = true
+  for p = 1, 4 do
+    local q = governor.queues[p]
+    if q then
+      local i = 1
+      while i <= #q do
+        local task = q[i]
+        if task.post_idx and math.abs(task.post_idx - cur_idx) > window then
+          table.remove(q, i)
+          task.killed = true
+          if task.handle then
+            task.handle.killed = true
+          end
+          if task.dest and M.active_downloads[task.dest] then
+            local cbs = M.active_downloads[task.dest]
+            M.active_downloads[task.dest] = nil
+            M.active_handles[task.dest] = nil
+            for _, fn in ipairs(cbs) do
+              pcall(fn, false)
+            end
+          end
+          if task.on_cancel then
+            pcall(task.on_cancel)
+          end
+        else
+          i = i + 1
+        end
       end
-      if task.on_cancel then
-        pcall(task.on_cancel)
-      end
-    else
-      i = i + 1
     end
   end
 end
 
-function M.prune_prefetch_queue(cur_idx, window)
+governor.prune_prefetch = governor.prune_tasks
+
+function M.prune_out_of_radius(cur_idx, window)
   window = window or constants.PREWARM_SLIDING_WINDOW or 10
   cur_idx = cur_idx or (state.State and state.State.cur) or 1
-  governor.prune_prefetch(cur_idx, window)
+  governor.prune_tasks(cur_idx, window)
 
   local UI = state.UI
   if UI and UI.prefetch_timers then
@@ -376,6 +393,8 @@ function M.prune_prefetch_queue(cur_idx, window)
     end
   end
 end
+
+M.prune_prefetch_queue = M.prune_out_of_radius
 
 local function is_in_save_dir(path)
   if not path or type(path) ~= "string" or path == "" then
@@ -514,6 +533,9 @@ function M.abort_all()
   M.cancel_prefetch_timers(true)
   _abort_handles_map(M.active_handles)
   _abort_handles_map(M.active_prefetch_handles)
+  pcall(function()
+    require("gelbooru.media.transcoder").abort_video_transcodes()
+  end)
   if M.governor then
     M.governor.reset(true)
   end
@@ -1161,6 +1183,268 @@ function M.prefetch_around(idx, scroll_dir)
   end
 
   governor.reorder_prefetch(idx, dir)
+end
+
+--- Records a ready media path and its associated post in the prewarmed cache.
+--- @param post table|string|nil: Post object or URL
+--- @param path string|nil: Resolved local file path
+local function record_prewarmed(post, path)
+  pcall(function()
+    local prewarmer = require("gelbooru.media.prewarmer")
+    if not prewarmer or not prewarmer.prewarmed_cache then
+      return
+    end
+    if path and path ~= "" then
+      prewarmer.prewarmed_cache[path] = true
+    end
+    if type(post) == "table" and post.file_url then
+      prewarmer.prewarmed_cache[post.file_url] = true
+    elseif type(post) == "string" and post ~= "" and post ~= path then
+      prewarmer.prewarmed_cache[post] = true
+    end
+  end)
+end
+
+M.record_prewarmed = record_prewarmed
+
+function M.extract_thumbnail_queued(vpath, post, thumb_dest, priority, cb)
+  priority = priority or M.TIER_THUMBNAIL
+  if M.active_downloads[thumb_dest] then
+    if cb then
+      table.insert(M.active_downloads[thumb_dest], cb)
+    end
+    governor.upgrade_priority(thumb_dest, priority)
+    return M.active_handles[thumb_dest]
+  end
+
+  M.active_downloads[thumb_dest] = cb and { cb } or {}
+
+  local handle_proxy = {
+    dest = thumb_dest,
+    proc = nil,
+    killed = false,
+  }
+
+  local task = {
+    dest = thumb_dest,
+    priority = priority,
+    post_idx = post and (post.post_idx or post._idx),
+    handle = handle_proxy,
+    socket_active = false,
+    on_cancel = function()
+      local cbs = M.active_downloads[thumb_dest] or {}
+      M.active_downloads[thumb_dest] = nil
+      M.active_handles[thumb_dest] = nil
+      for _, fn in ipairs(cbs) do
+        pcall(fn, nil, "Cancelled")
+      end
+    end,
+  }
+
+  task.run = function()
+    if handle_proxy.killed or state.State.torn_down then
+      task.on_cancel()
+      return
+    end
+
+    task.socket_active = true
+    local transcoder = require("gelbooru.media.transcoder")
+    local proc = transcoder.extract_video_thumbnail(vpath, post, function(tpath, err)
+      if task.socket_active then
+        task.socket_active = false
+        governor.release_socket(task.priority)
+      end
+      vim.schedule(function()
+        local cbs = M.active_downloads[thumb_dest] or {}
+        M.active_downloads[thumb_dest] = nil
+        M.active_handles[thumb_dest] = nil
+        if handle_proxy then
+          handle_proxy.proc = nil
+          handle_proxy.task = nil
+        end
+        task.handle = nil
+        task.run = nil
+        task.on_cancel = nil
+
+        if state.State.torn_down or handle_proxy.killed then
+          for _, fn in ipairs(cbs) do pcall(fn, nil, "Interrupted") end
+          return
+        end
+
+        local inspector = require("gelbooru.media.inspector")
+        local ok = tpath and vim.fn.filereadable(tpath) == 1
+          and (vim.fn.getfsize(tpath) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES
+          and inspector.is_image_complete(tpath)
+
+        if ok then
+          record_prewarmed(post, thumb_dest)
+        end
+
+        for _, fn in ipairs(cbs) do
+          pcall(fn, ok and tpath or nil, ok and nil or (err or "Video thumbnail extraction failed"))
+        end
+      end)
+    end)
+
+    handle_proxy.proc = proc
+    if handle_proxy.killed and proc and proc.kill then
+      pcall(proc.kill, proc, 9)
+    end
+  end
+
+  handle_proxy.task = task
+  handle_proxy.kill = function(self, sig)
+    self.killed = true
+    if self.task then
+      self.task.killed = true
+    end
+    if not self.proc and self.dest and M.active_downloads[self.dest] then
+      local cbs = M.active_downloads[self.dest] or {}
+      M.active_downloads[self.dest] = nil
+      M.active_handles[self.dest] = nil
+      for _, fn in ipairs(cbs) do pcall(fn, nil, "Cancelled") end
+    end
+    if self.proc and self.proc.kill then
+      pcall(self.proc.kill, self.proc, sig or 9)
+    end
+  end
+
+  M.active_handles[thumb_dest] = handle_proxy
+  governor.enqueue(task)
+  return handle_proxy
+end
+
+function M.ensure_ready(post, priority, cb)
+  if state.State.torn_down then
+    if cb then vim.schedule(function() cb(nil, "Torn down") end) end
+    return nil
+  end
+
+  if not post or (type(post) == "table" and post._pending_delete) then
+    if cb then vim.schedule(function() cb(nil, "Post deleted or invalid") end) end
+    return nil
+  end
+
+  local opts = type(priority) == "table" and priority or {}
+  priority = (type(priority) == "number" and priority) or opts.priority or M.TIER_URGENT
+  priority = math.max(1, math.min(4, priority))
+  local post_idx = opts.post_idx or (type(post) == "table" and (post.post_idx or post._idx))
+
+  local inspector = require("gelbooru.media.inspector")
+  local resolver = require("gelbooru.media.resolver")
+
+  if type(post) == "string" then
+    local path = post
+    if vim.fn.filereadable(path) == 1 then
+      if inspector.is_image_complete(path) then
+        record_prewarmed(post, path)
+        if cb then vim.schedule(function() cb(path) end) end
+        return path
+      else
+        if cb then vim.schedule(function() cb(nil, "Corrupted image file") end) end
+        return nil
+      end
+    else
+      if cb then vim.schedule(function() cb(nil, "File not readable: " .. tostring(path)) end) end
+      return nil
+    end
+  end
+
+  local is_vid = resolver.is_video_post(post)
+
+  if is_vid then
+    local vpath = (post.is_local and post.file_url)
+      or (post.id and resolver.get_saved_media_path(post.id, post.file_url))
+
+    if vpath and vim.fn.filereadable(vpath) == 1 then
+      local thumb_dest = resolver.get_video_thumbnail_path(vpath, post.id)
+      if vim.fn.filereadable(thumb_dest) == 1
+        and (vim.fn.getfsize(thumb_dest) or 0) > constants.MIN_VALID_VIDEO_THUMB_BYTES
+        and inspector.is_image_complete(thumb_dest) then
+        record_prewarmed(post, thumb_dest)
+        if cb then vim.schedule(function() cb(thumb_dest) end) end
+        return thumb_dest
+      end
+
+      local thumb_priority = (priority == M.TIER_URGENT) and M.TIER_URGENT or M.TIER_THUMBNAIL
+      return M.extract_thumbnail_queued(vpath, post, thumb_dest, thumb_priority, cb)
+    else
+      local urls, dest = resolver.get_preview_targets(post)
+      if not dest then
+        if cb then vim.schedule(function() cb(nil, "No destination for video post") end) end
+        return nil
+      end
+      if vim.fn.filereadable(dest) == 1 and M.is_valid_media(dest) then
+        record_prewarmed(post, dest)
+        if cb then vim.schedule(function() cb(dest) end) end
+        return dest
+      end
+      local url = urls and urls[1]
+      if not url or not url:match("^https?://") then
+        if cb then vim.schedule(function() cb(nil, "No preview URL for video post") end) end
+        return nil
+      end
+      return M.download_async(url, dest, function(ok)
+        if ok then
+          record_prewarmed(post, dest)
+        end
+        if cb then
+          cb(ok and dest or nil, ok and nil or "Video preview download failed")
+        end
+      end, {
+        priority = priority,
+        post_idx = post_idx,
+      })
+    end
+  end
+
+  if post.is_local then
+    local lpath = post.file_url
+    if lpath and vim.fn.filereadable(lpath) == 1 and inspector.is_image_complete(lpath) then
+      record_prewarmed(post, lpath)
+      if cb then vim.schedule(function() cb(lpath) end) end
+      return lpath
+    else
+      if cb then vim.schedule(function() cb(nil, "Local image unreadable or corrupt") end) end
+      return nil
+    end
+  end
+
+  local saved_path = post.id and resolver.get_saved_media_path(post.id, post.file_url)
+  if saved_path and vim.fn.filereadable(saved_path) == 1 and M.is_valid_media(saved_path) then
+    record_prewarmed(post, saved_path)
+    if cb then vim.schedule(function() cb(saved_path) end) end
+    return saved_path
+  end
+
+  local urls, dest = resolver.get_preview_targets(post)
+  if not dest then
+    if cb then vim.schedule(function() cb(nil, "No destination for post") end) end
+    return nil
+  end
+  if vim.fn.filereadable(dest) == 1 and M.is_valid_media(dest) then
+    record_prewarmed(post, dest)
+    if cb then vim.schedule(function() cb(dest) end) end
+    return dest
+  end
+
+  local url = urls and urls[1]
+  if not url or not url:match("^https?://") then
+    if cb then vim.schedule(function() cb(nil, "No valid URL for post") end) end
+    return nil
+  end
+
+  return M.download_async(url, dest, function(ok)
+    if ok then
+      record_prewarmed(post, dest)
+    end
+    if cb then
+      cb(ok and dest or nil, ok and nil or "Image download failed")
+    end
+  end, {
+    priority = priority,
+    post_idx = post_idx,
+  })
 end
 
 return M
